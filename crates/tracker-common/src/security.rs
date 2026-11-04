@@ -1,5 +1,5 @@
 //! Random tokens, HMAC request signing and constant-time comparison for the loopback-only
-//! collector (ported from AI Tracker Lite's security.rs; header names changed to X-AT-*).
+//! Local collector HTTP security: loopback-only, HMAC-signed tokens, strict origin checks.
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use rand::RngCore;

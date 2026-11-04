@@ -1,4 +1,4 @@
-//! Stable, privacy-preserving machine fingerprint (ported from AI Tracker Lite's machine.rs).
+//! Stable, privacy-preserving machine fingerprint for AgentTracker.
 //! Only a SHA-256 hash is ever used; raw identifiers never leave the machine.
 use sha2::{Digest, Sha256};
 
@@ -24,7 +24,7 @@ fn primary_id() -> String {
     String::new()
 }
 
-/// Product-scoped fingerprint: differs from AI Tracker Lite's so activations are independent.
+/// Product-scoped fingerprint for AgentTracker.
 pub fn fingerprint_from(primary: &str) -> String {
     let primary = if primary.is_empty() { format!("node:{}", machine_name()) } else { primary.to_string() };
     let s = format!("agenttracker-v1|{}|{}|{}", primary, std::env::consts::OS, std::env::consts::ARCH);

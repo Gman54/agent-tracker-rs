@@ -1,4 +1,4 @@
-//! Shared building blocks used by AgentTracker (ported/adapted from AI Tracker Lite).
+//! Shared building blocks used by AgentTracker.
 pub mod canonical;
 pub mod hash_chain;
 pub mod license;

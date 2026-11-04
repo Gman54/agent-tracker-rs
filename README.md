@@ -67,7 +67,7 @@ Configure these under **Settings → Secrets and variables → Actions** of the 
 
 | Name | Kind | Required | Purpose |
 |---|---|---|---|
-| `AGENTTRACKER_API_KEY` | Secret | Yes (for release builds) | AgentTracker's own API key, baked in at build time. **Different from AI Tracker Lite's key.** If unset the build still works with a clearly-marked placeholder. |
+| `AGENTTRACKER_API_KEY` | Secret | Yes (for release builds) | AgentTracker license API key, baked in at build time. If unset the build works with a placeholder (shown clearly in the app). |
 | `AGENTTRACKER_LICENSE_URL` | Secret *or* Variable | Optional | License server URL baked into the build (default `https://license.invalid/agenttracker`; server wiring is a stub). |
 | `TAURI_PRIVATE_KEY` | Secret | Optional | Tauri signing key (passed as both `TAURI_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY`). Only needed once the updater is enabled. |
 | `TAURI_KEY_PASSWORD` | Secret | Optional | Password for `TAURI_PRIVATE_KEY`, if it has one. |
@@ -92,7 +92,7 @@ cargo run -p agenttracker -- --headless     # backend only; prints a one-time UI
 Environment overrides: `AGENTTRACKER_HOME` (default `%USERPROFILE%\.agenttracker`, holds the hook
 discovery file + connector state) and `AGENTTRACKER_DATA_DIR` (database and demo files).
 
-Security model (same pattern as AI Tracker Lite): the server binds a random port on 127.0.0.1 only,
+Security model: the server binds a random port on 127.0.0.1 only,
 checks the `Host` header, the window opens a **one-time launch token** that becomes an HttpOnly
 `SameSite=Strict` session cookie, state-changing UI calls need the `x-requested-with: agenttracker`
 header, pages get a strict CSP, and the hook endpoint requires an HMAC-SHA256 signature with a

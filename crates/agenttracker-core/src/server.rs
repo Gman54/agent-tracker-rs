@@ -1,5 +1,5 @@
 //! Loopback-only HTTP server: the UI API (one-time launch token → HttpOnly session cookie + CSRF
-//! header) and the hook ingest endpoint (HMAC-signed). Same pattern as AI Tracker Lite.
+//! header) and the hook ingest endpoint (HMAC-signed).
 use crate::collector::Collector;
 use crate::connectors::{claude_code::ClaudeConnector, copilot::CopilotConnector, cursor::CursorConnector, manual::ManualConnector, DetectResult};
 use crate::engine::Engine;

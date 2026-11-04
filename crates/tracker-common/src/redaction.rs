@@ -1,4 +1,4 @@
-//! Secret scrubbing for anything that gets stored or displayed (ported from AI Tracker Lite).
+//! Secret scrubbing for anything that gets stored or displayed.
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{Map, Value};
