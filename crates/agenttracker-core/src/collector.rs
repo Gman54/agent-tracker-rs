@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub const DISCOVERY_FILE: &str = "collector.json";
 pub const FALLBACK_FILE: &str = "fallback_queue.jsonl";
@@ -50,6 +50,25 @@ pub struct Collector {
     pub tasks: TaskStore,
     pub health: HealthStore,
     paused: AtomicBool,
+    /// Extra user-supplied words/phrases to scrub (on top of the built-in secret redaction,
+    /// which is always on).
+    custom_redactions: Mutex<Vec<String>>,
+}
+
+/// Replaces each literal phrase (case-sensitive, at least 3 characters) in every string value.
+pub fn redact_custom(v: &mut Value, phrases: &[String]) {
+    match v {
+        Value::String(s) => {
+            for p in phrases.iter().filter(|p| p.chars().count() >= 3) {
+                if s.contains(p.as_str()) {
+                    *s = s.replace(p.as_str(), "[REDACTED:custom]");
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| redact_custom(x, phrases)),
+        Value::Object(o) => o.values_mut().for_each(|x| redact_custom(x, phrases)),
+        _ => {}
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -68,11 +87,18 @@ impl Collector {
             tasks: TaskStore::new(db.clone()),
             health: HealthStore::new(db.clone()),
             paused: AtomicBool::new(false),
+            custom_redactions: Mutex::new(
+                db.get_setting("redaction_patterns").ok().flatten().map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default(),
+            ),
         })
     }
 
     pub fn set_paused(&self, p: bool) {
         self.paused.store(p, Ordering::SeqCst);
+    }
+
+    pub fn set_custom_redactions(&self, phrases: Vec<String>) {
+        *self.custom_redactions.lock().unwrap_or_else(|p| p.into_inner()) = phrases;
     }
 
     pub fn is_paused(&self) -> bool {
@@ -108,6 +134,10 @@ impl Collector {
                 }
             };
             if let Some(mut ev) = ev {
+                let phrases = self.custom_redactions.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                if !phrases.is_empty() {
+                    redact_custom(&mut ev.payload_redacted, &phrases);
+                }
                 self.attribute(&mut ev)?;
                 if self.events.insert(&ev)? {
                     st.stored += 1;

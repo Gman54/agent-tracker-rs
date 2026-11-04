@@ -8,6 +8,7 @@ pub mod engine;
 pub mod event;
 pub mod fs_observer;
 pub mod queue;
+pub mod report;
 pub mod server;
 pub mod store;
 pub mod task;

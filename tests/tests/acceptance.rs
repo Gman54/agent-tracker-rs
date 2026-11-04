@@ -461,3 +461,548 @@ fn test_hash_chain_append_and_verify() {
     assert!(!bad.ok);
     assert_eq!(bad.first_bad_seq, Some(3));
 }
+
+
+// =================================================================================================
+// Phase 3 additions. Still fake-agent contract tests: no live Claude Code / Cursor / Copilot.
+// =================================================================================================
+
+/// A second, independent workspace next to the fixture's default one.
+fn named_workspace(fx: &Fixture, name: &str, inputs: &[(&str, &str)]) -> std::path::PathBuf {
+    let work = fx.dir.path().join(name);
+    std::fs::create_dir_all(work.join("input")).unwrap();
+    std::fs::create_dir_all(work.join("output")).unwrap();
+    for (n, c) in inputs {
+        std::fs::write(work.join("input").join(n), c).unwrap();
+    }
+    work
+}
+
+fn task_in(fx: &Fixture, work: &Path, title: &str) -> agenttracker_core::task::TaskDefinition {
+    use agenttracker_core::task::{FolderRole, NewTask, TaskFolder};
+    let s = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+    fx.engine
+        .tasks
+        .create(NewTask {
+            title: title.into(),
+            instruction: "Copy input to output".into(),
+            connector: "claude_code".into(),
+            folders: vec![
+                TaskFolder { folder_path: s(work.to_path_buf()), role: FolderRole::Working },
+                TaskFolder { folder_path: s(work.join("input")), role: FolderRole::Protected },
+                TaskFolder { folder_path: s(work.join("output")), role: FolderRole::AllowedWrite },
+            ],
+            checks: vec![
+                check("originals_unchanged", json!({}), true),
+                check("inputs_preserved_in_output", json!({"input": "input", "output": "output"}), true),
+                check("changes_within_scope", json!({}), true),
+            ],
+        })
+        .unwrap()
+}
+
+// fake-agent contract test
+#[test]
+fn test_watcher_interruption_gap_recorded() {
+    let fx = Fixture::new();
+    let work = fx.workspace(&[("a.txt", "alpha")]);
+    let task = fx.copy_task(&work, &["a.txt"], None);
+    fx.engine.capture_baseline(&task.id).unwrap();
+    fx.engine.start(&task.id).unwrap();
+
+    // Simulate an app restart: a fresh engine over the same database has no live watchers.
+    let restarted = agenttracker_core::engine::Engine::new(fx.db.clone(), vec![]);
+    assert!(restarted.live_view(&task.id).gaps.is_empty());
+    let resumed = restarted.resume_running().unwrap();
+    assert_eq!(resumed, vec![task.id.clone()]);
+    let view = restarted.live_view(&task.id);
+    assert_eq!(view.gaps.len(), 1, "{:?}", view.gaps);
+    assert!(view.gaps[0].contains("restarted"), "gap explains what happened: {}", view.gaps[0]);
+    assert!(view.observing, "live watching resumed");
+
+    // Explicit gaps (e.g. a watcher that couldn't start) are listed too.
+    restarted.add_gap(&task.id, "Live watching couldn't start for X".into());
+    assert_eq!(restarted.live_view(&task.id).gaps.len(), 2);
+
+    // Changes made "while closed" are still caught by the final snapshot comparison.
+    copy_all(&work);
+    let run = restarted.verify(&task.id).unwrap();
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Passed), "{:#?}", run.results);
+    // Resuming again is a no-op once the task is finished.
+    assert!(restarted.resume_running().unwrap().is_empty());
+}
+
+// fake-agent contract test
+#[test]
+fn test_manual_edits_mixed_with_agent_activity() {
+    let fx = Fixture::new();
+    let work = fx.workspace(&[("a.txt", "alpha"), ("b.txt", "beta")]);
+    let task = fx.copy_task(&work, &["a.txt", "b.txt"], None);
+    fx.engine.capture_baseline(&task.id).unwrap();
+    fx.engine.start(&task.id).unwrap();
+    let cwd = work.to_string_lossy().to_string();
+
+    // Agent copies one file...
+    fx.deliver(claude_envelope("PreToolUse", 1_000, json!({"session_id": "s-mix", "cwd": cwd, "tool_name": "Write", "tool_input": {"file_path": "output/a.txt"}})));
+    std::fs::copy(work.join("input/a.txt"), work.join("output/a.txt")).unwrap();
+    fx.deliver(claude_envelope("PostToolUse", 2_000, json!({"session_id": "s-mix", "cwd": cwd, "tool_name": "Write", "tool_response": {"ok": true}})));
+    // ...the person copies the other one by hand and adds a note (no hook event for either).
+    std::fs::copy(work.join("input/b.txt"), work.join("output/b.txt")).unwrap();
+    std::fs::write(work.join("output/my-notes.txt"), "written by a human").unwrap();
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-mix", "cwd": cwd})));
+
+    let run = fx.engine.verify(&task.id).unwrap();
+    // File checks judge the folder, whoever made the change.
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Passed), "{:#?}", run.results);
+    // Only what the agent reported is recorded as agent activity — manual edits are never attributed to it.
+    let evs = fx.engine.events.by_task(&task.id).unwrap();
+    assert_eq!(evs.len(), 3);
+    assert!(evs.iter().all(|e| e.capture_source == CaptureSource::Hook));
+    assert!(!serde_json::to_string(&evs).unwrap().contains("my-notes.txt"));
+
+    // A manual edit outside the allowed folder is still caught.
+    let task2 = fx.copy_task(&work, &[], None);
+    fx.engine.capture_baseline(&task2.id).unwrap();
+    std::fs::write(work.join("stray.txt"), "oops").unwrap();
+    let run2 = fx.engine.verify(&task2.id).unwrap();
+    assert_eq!(status_of(&run2, "changes_within_scope"), CheckStatus::Failed, "{:#?}", run2.results);
+}
+
+// fake-agent contract test
+#[test]
+fn test_concurrent_sessions() {
+    let fx = Fixture::new();
+    let w1 = named_workspace(&fx, "job-one", &[("a.txt", "one")]);
+    let w2 = named_workspace(&fx, "job-two", &[("b.txt", "two")]);
+    let t1 = task_in(&fx, &w1, "Job one");
+    let t2 = task_in(&fx, &w2, "Job two");
+    for t in [&t1, &t2] {
+        fx.engine.capture_baseline(&t.id).unwrap();
+        fx.engine.start(&t.id).unwrap();
+    }
+    let (c1, c2) = (w1.to_string_lossy().to_string(), w2.to_string_lossy().to_string());
+    // Interleaved deliveries from two agent sessions working at the same time.
+    let mut ts = 0;
+    let mut next = || {
+        ts += 1_000;
+        ts
+    };
+    fx.deliver(claude_envelope("SessionStart", next(), json!({"session_id": "s-one", "cwd": c1})));
+    fx.deliver(claude_envelope("SessionStart", next(), json!({"session_id": "s-two", "cwd": c2})));
+    fx.deliver(claude_envelope("PreToolUse", next(), json!({"session_id": "s-two", "cwd": c2, "tool_name": "Bash", "tool_input": {"command": "cp"}})));
+    fx.deliver(claude_envelope("PreToolUse", next(), json!({"session_id": "s-one", "cwd": c1, "tool_name": "Bash", "tool_input": {"command": "cp"}})));
+    copy_all(&w1);
+    copy_all(&w2);
+    fx.deliver(claude_envelope("Stop", next(), json!({"session_id": "s-one", "cwd": c1})));
+    fx.deliver(claude_envelope("Stop", next(), json!({"session_id": "s-two", "cwd": c2})));
+
+    assert_eq!(fx.engine.tasks.get(&t1.id).unwrap().session_id.as_deref(), Some("s-one"));
+    assert_eq!(fx.engine.tasks.get(&t2.id).unwrap().session_id.as_deref(), Some("s-two"));
+    let e1 = fx.engine.events.by_task(&t1.id).unwrap();
+    let e2 = fx.engine.events.by_task(&t2.id).unwrap();
+    assert_eq!(e1.len(), 3);
+    assert_eq!(e2.len(), 3);
+    assert!(e1.iter().all(|e| e.session_id.as_deref() == Some("s-one")));
+    assert!(e2.iter().all(|e| e.session_id.as_deref() == Some("s-two")));
+    for t in [&t1, &t2] {
+        let run = fx.engine.verify(&t.id).unwrap();
+        assert_eq!(run.overall_verdict, Some(CheckStatus::Passed), "{:#?}", run.results);
+    }
+}
+
+// fake-agent contract test
+#[test]
+fn test_collector_outage_recovery() {
+    let fx = Fixture::new();
+    // While the collector was down, the hook appended envelopes to its fallback file.
+    let fallback = fx.dir.path().join("fallback_queue.jsonl");
+    let lines: Vec<String> = (1..=3)
+        .map(|i| claude_envelope("PreToolUse", i * 1_000, json!({"session_id": "s-out", "tool_name": format!("t{i}"), "tool_input": {}})).to_string())
+        .collect();
+    std::fs::write(&fallback, format!("{}\nnot json at all\n", lines.join("\n"))).unwrap();
+
+    let imported = fx.collector.queue.import_fallback_file(&fallback).unwrap();
+    assert_eq!(imported, 3, "malformed lines are skipped, good ones kept");
+    assert!(!fallback.exists(), "file is consumed after import");
+    fx.collector.process_pending().unwrap();
+    assert_eq!(fx.engine.events.by_session("s-out").unwrap().len(), 3);
+    assert_eq!(fx.collector.queue.pending_count().unwrap(), 0);
+
+    // The same deliveries arriving again (e.g. replay after a crash mid-import) don't duplicate.
+    std::fs::write(&fallback, lines.join("\n")).unwrap();
+    fx.collector.queue.import_fallback_file(&fallback).unwrap();
+    fx.collector.process_pending().unwrap();
+    assert_eq!(fx.engine.events.by_session("s-out").unwrap().len(), 3);
+    // Importing when there's no file is fine.
+    assert_eq!(fx.collector.queue.import_fallback_file(&fallback).unwrap(), 0);
+}
+
+fn hook_binary() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) { "agenttracker-hook.exe" } else { "agenttracker-hook" };
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"));
+    let p = target.join("debug").join(name);
+    p.exists().then_some(p)
+}
+
+// fake-agent contract test (runs the real hook binary, with no collector listening)
+#[test]
+fn test_hook_exits_zero_when_collector_down() {
+    let Some(bin) = hook_binary() else {
+        eprintln!("SKIPPED: build agenttracker-hook first (cargo build -p agenttracker-hook)");
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    // Point the hook at a port where nothing is listening.
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = dead.local_addr().unwrap().port();
+    drop(dead);
+    std::fs::write(home.path().join("collector.json"), json!({"port": port, "secret": "x"}).to_string()).unwrap();
+
+    let start = std::time::Instant::now();
+    let out = std::process::Command::new(&bin)
+        .args(["--connector", "claude_code", "--event", "Stop", "--payload", r#"{"session_id":"s-down","password":"hunter2-very-secret"}"#, "--no-stdin"])
+        .env("AGENTTRACKER_HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "hook must never block the agent");
+    assert!(out.stdout.is_empty(), "no stdout (agents may read it as a decision)");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+    let saved = std::fs::read_to_string(home.path().join("fallback_queue.jsonl")).expect("delivery kept in the fallback file");
+    assert!(saved.contains("s-down"));
+    assert!(!saved.contains("hunter2-very-secret"), "fallback file is redacted");
+
+    // And with no collector.json at all.
+    let home2 = tempfile::tempdir().unwrap();
+    let out2 = std::process::Command::new(&bin).args(["--connector", "cursor", "--event", "stop", "--no-stdin"]).env("AGENTTRACKER_HOME", home2.path()).output().unwrap();
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(home2.path().join("fallback_queue.jsonl").exists());
+}
+
+// fake-agent contract test
+#[test]
+fn test_verify_now_dedupe() {
+    let fx = Fixture::new();
+    let work = fx.workspace(&[("a.txt", "alpha")]);
+    let task = fx.copy_task(&work, &["a.txt"], None);
+    fx.engine.capture_baseline(&task.id).unwrap();
+    fx.engine.start(&task.id).unwrap();
+    copy_all(&work);
+
+    let first = fx.engine.verify_with_key(&task.id, Some("click-1")).unwrap();
+    assert!(!first.deduplicated);
+    // Double click: same key → same run, nothing re-run.
+    let again = fx.engine.verify_with_key(&task.id, Some("click-1")).unwrap();
+    assert!(again.deduplicated);
+    assert_eq!(again.run.id, first.run.id);
+    assert_eq!(fx.engine.results.runs_for_task(&task.id).unwrap().len(), 1);
+    // A deliberate re-run (new key) verifies again.
+    let rerun = fx.engine.verify_with_key(&task.id, Some("click-2")).unwrap();
+    assert!(!rerun.deduplicated);
+    assert_ne!(rerun.run.id, first.run.id);
+    // The same key on a different task is not confused with this one.
+    let other = fx.copy_task(&work, &[], Some(vec![check("originals_unchanged", json!({}), true)]));
+    fx.engine.capture_baseline(&other.id).unwrap();
+    let o = fx.engine.verify_with_key(&other.id, Some("click-1")).unwrap();
+    assert!(!o.deduplicated);
+    assert_eq!(o.run.task_id, other.id);
+}
+
+// fake-agent contract test
+#[test]
+fn test_frozen_definition_used_during_verify() {
+    let fx = Fixture::new();
+    let work = fx.workspace(&[("a.txt", "alpha")]);
+    let task = fx.copy_task(&work, &[], Some(vec![check("originals_unchanged", json!({}), true)]));
+    fx.engine.capture_baseline(&task.id).unwrap();
+    let run1 = fx.engine.verify(&task.id).unwrap();
+    assert_eq!(run1.results.len(), 1);
+    let v1 = run1.definition_version;
+
+    // The user edits the checks afterwards (adds a check that will fail).
+    let edited = fx
+        .engine
+        .tasks
+        .update_checks(&task.id, vec![check("originals_unchanged", json!({}), true), check("required_outputs_exist", json!({"paths": ["output/missing.txt"]}), true)])
+        .unwrap();
+    assert_eq!(edited.definition_version, v1 + 1);
+
+    // The earlier run's definition is frozen and unchanged.
+    let frozen = fx.engine.tasks.snapshot(&task.id, v1).unwrap().expect("frozen snapshot");
+    assert_eq!(frozen.checks.len(), 1);
+    let stored = fx.engine.results.get_run(&run1.id).unwrap().expect("stored run");
+    assert_eq!(stored.definition_version, v1);
+    assert_eq!(stored.overall_verdict, Some(CheckStatus::Passed));
+
+    // A new verification uses (and freezes) the new definition.
+    let run2 = fx.engine.verify(&task.id).unwrap();
+    assert_eq!(run2.definition_version, v1 + 1);
+    assert_eq!(run2.results.len(), 2);
+    assert_eq!(run2.overall_verdict, Some(CheckStatus::Failed));
+    assert_eq!(fx.engine.tasks.snapshot(&task.id, v1 + 1).unwrap().unwrap().checks.len(), 2);
+
+    // Checks can't be edited while a verification is in progress.
+    let t3 = fx.copy_task(&work, &[], None);
+    fx.engine.capture_baseline(&t3.id).unwrap();
+    fx.engine.tasks.transition(&t3.id, agenttracker_core::task::Lifecycle::Verifying).unwrap();
+    assert!(fx.engine.tasks.update_checks(&t3.id, vec![]).is_err());
+}
+
+// fake-agent contract test (in-process HTTP, no network)
+#[tokio::test]
+async fn test_unauthorized_requests_rejected() {
+    use agenttracker_core::server::{build_router, AppState};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let fx = Fixture::new();
+    let port = 45555;
+    let secret = "test-secret-value".to_string();
+    let state = AppState::new(
+        fx.engine.clone(),
+        fx.collector.clone(),
+        port,
+        Some("launch-token-123".into()),
+        secret.clone(),
+        None,
+        fx.dir.path().to_path_buf(),
+        fx.dir.path().join("home"),
+    );
+    let app = build_router(state);
+    let host = format!("127.0.0.1:{port}");
+    let send = |req: Request<Body>| {
+        let app = app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    let get = |path: &str, host: &str| Request::get(path).header("host", host).body(Body::empty()).unwrap();
+
+    // UI API without a session cookie.
+    assert_eq!(send(get("/api/ui/tasks", &host)).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(send(get("/api/ui/settings", &host)).await, StatusCode::UNAUTHORIZED);
+    let post_ui = Request::post("/api/ui/tasks").header("host", &host).header("x-requested-with", "agenttracker").header("content-type", "application/json").body(Body::from("{}")).unwrap();
+    assert_eq!(send(post_ui).await, StatusCode::UNAUTHORIZED);
+    // A forged cookie doesn't help.
+    let forged = Request::get("/api/ui/tasks").header("host", &host).header("cookie", "at_session=not-a-real-session").body(Body::empty()).unwrap();
+    assert_eq!(send(forged).await, StatusCode::UNAUTHORIZED);
+    // DNS-rebinding style host is refused before anything else.
+    assert_eq!(send(get("/api/ui/tasks", "evil.example:80")).await, StatusCode::FORBIDDEN);
+    assert_eq!(send(get("/", "evil.example")).await, StatusCode::FORBIDDEN);
+    // Wrong launch token.
+    assert_eq!(send(get("/launch?token=wrong", &host)).await, StatusCode::FORBIDDEN);
+
+    // Hook ingest without / with a bad signature.
+    let body = claude_envelope("Stop", 1, json!({"session_id": "s-auth"})).to_string();
+    let unsigned = Request::post("/ingest").header("host", &host).body(Body::from(body.clone())).unwrap();
+    assert_eq!(send(unsigned).await, StatusCode::UNAUTHORIZED);
+    let ts = (agenttracker_core::now_ms() / 1000).to_string();
+    let bad = Request::post("/ingest")
+        .header("host", &host)
+        .header("x-at-timestamp", &ts)
+        .header("x-at-signature", tracker_common::security::sign_body("wrong-secret", &ts, body.as_bytes()))
+        .body(Body::from(body.clone()))
+        .unwrap();
+    assert_eq!(send(bad).await, StatusCode::UNAUTHORIZED);
+    let stale_ts = (agenttracker_core::now_ms() / 1000 - 3600).to_string();
+    let stale = Request::post("/ingest")
+        .header("host", &host)
+        .header("x-at-timestamp", &stale_ts)
+        .header("x-at-signature", tracker_common::security::sign_body(&secret, &stale_ts, body.as_bytes()))
+        .body(Body::from(body.clone()))
+        .unwrap();
+    assert_eq!(send(stale).await, StatusCode::UNAUTHORIZED, "old signatures can't be replayed");
+    assert_eq!(fx.collector.queue.pending_count().unwrap(), 0, "nothing rejected was queued");
+
+    // Control: a correctly signed delivery is accepted, and a real launch gives a working session.
+    let good = Request::post("/ingest")
+        .header("host", &host)
+        .header("x-at-timestamp", &ts)
+        .header("x-at-signature", tracker_common::security::sign_body(&secret, &ts, body.as_bytes()))
+        .body(Body::from(body))
+        .unwrap();
+    assert_eq!(send(good).await, StatusCode::ACCEPTED);
+    let launch = app.clone().oneshot(get("/launch?token=launch-token-123", &host)).await.unwrap();
+    assert_eq!(launch.status(), StatusCode::FOUND);
+    let cookie = launch.headers().get("set-cookie").unwrap().to_str().unwrap().split(';').next().unwrap().to_string();
+    let authed = Request::get("/api/ui/tasks").header("host", &host).header("cookie", &cookie).body(Body::empty()).unwrap();
+    assert_eq!(send(authed).await, StatusCode::OK);
+    // Non-GET with a session but without the CSRF header is refused.
+    let no_csrf = Request::post("/api/ui/pause").header("host", &host).header("cookie", &cookie).body(Body::empty()).unwrap();
+    assert_eq!(send(no_csrf).await, StatusCode::FORBIDDEN);
+    // The launch token is single-use.
+    assert_eq!(send(get("/launch?token=launch-token-123", &host)).await, StatusCode::FORBIDDEN);
+}
+
+fn copilot_paths(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let hooks_dir = dir.join(".copilot/hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    // The user's own, unrelated hook file in the same folder.
+    std::fs::write(hooks_dir.join("my-team.json"), r#"{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"./team-audit.sh"}]}}"#).unwrap();
+    (hooks_dir.join("agenttracker.json"), hooks_dir.join("my-team.json"))
+}
+
+// fake-agent contract test
+#[test]
+fn test_copilot_install_idempotent() {
+    use agenttracker_core::connectors::copilot::{CopilotConnector, HOOK_EVENTS};
+    let dir = tempfile::tempdir().unwrap();
+    let (hooks, _) = copilot_paths(dir.path());
+    let bin = dir.path().join("agenttracker-hook.exe");
+    std::fs::write(&bin, b"fake").unwrap();
+    let c = CopilotConnector::with_paths(hooks.clone(), dir.path().join("state"));
+    assert!(!c.detect().hooks_installed);
+
+    let preview = c.preview(&bin).unwrap();
+    assert!(preview.changes && !preview.file_exists);
+    assert!(!hooks.exists(), "preview never writes");
+
+    let r1 = c.install(&bin).unwrap();
+    assert_eq!(r1.added.len(), HOOK_EVENTS.len());
+    let after1: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert_eq!(after1["version"], 1);
+    for e in HOOK_EVENTS {
+        let entries = after1["hooks"][*e].as_array().unwrap_or_else(|| panic!("{e} registered"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["type"], "command");
+        assert!(entries[0]["bash"].as_str().unwrap().contains("--at-owner agenttracker"));
+        assert!(entries[0]["powershell"].as_str().unwrap().starts_with("& "));
+    }
+    // Decision hooks that could block the agent are never registered.
+    assert!(after1["hooks"].get("preToolUse").is_none() && after1["hooks"].get("permissionRequest").is_none());
+
+    let r2 = c.install(&bin).unwrap();
+    let r3 = c.install(&bin).unwrap();
+    let after3: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert_eq!(after1, after3, "re-installing must not change the file");
+    assert!(r2.added.is_empty() && r3.added.is_empty() && r3.updated.is_empty());
+    assert!(!c.preview(&bin).unwrap().changes);
+    assert!(c.detect().hooks_installed);
+    assert!(c.connection_test().steps.iter().any(|s| s.name == "AgentTracker hooks" && s.ok));
+}
+
+// fake-agent contract test
+#[test]
+fn test_copilot_uninstall_preserves_unrelated() {
+    use agenttracker_core::connectors::copilot::CopilotConnector;
+    let dir = tempfile::tempdir().unwrap();
+    let (hooks, team) = copilot_paths(dir.path());
+    let team_before = std::fs::read(&team).unwrap();
+    let bin = dir.path().join("agenttracker-hook.exe");
+    std::fs::write(&bin, b"fake").unwrap();
+    let c = CopilotConnector::with_paths(hooks.clone(), dir.path().join("state"));
+
+    // Case 1: untouched since install → AgentTracker's file goes away entirely (or is left with none of its hooks).
+    c.install(&bin).unwrap();
+    c.uninstall().unwrap();
+    if hooks.exists() {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+        assert_eq!(count_owned(&v), 0);
+    }
+    assert!(!c.detect().hooks_installed);
+
+    // Case 2: the user added their own entry to our file after install → it survives.
+    c.install(&bin).unwrap();
+    let mut edited: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    edited["hooks"]["sessionEnd"].as_array_mut().unwrap().push(json!({"type": "command", "bash": "./my-cleanup.sh"}));
+    std::fs::write(&hooks, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+    c.uninstall().unwrap();
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert_eq!(count_owned(&after), 0);
+    assert!(after.to_string().contains("my-cleanup.sh"), "user's own hook survives: {after}");
+    assert!(!c.detect().hooks_installed);
+
+    // The unrelated hook file in the same folder was never touched.
+    assert_eq!(std::fs::read(&team).unwrap(), team_before);
+}
+
+fn copilot_env(event: &str, ts_ns: i64, payload: Value) -> agenttracker_core::connectors::HookEnvelope {
+    agenttracker_core::connectors::HookEnvelope { connector: "copilot_vscode".into(), hook_event: event.into(), hook_ts_ns: ts_ns, hook_version: "test".into(), payload }
+}
+
+// fake-agent contract test
+#[test]
+fn test_copilot_payload_normalization() {
+    use agenttracker_core::connectors::normalize;
+    let base = |extra: Value| {
+        let mut p = json!({"sessionId": "cp-1", "timestamp": 1_762_000_000_000_i64, "cwd": "C:/work"});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        p
+    };
+    let cases = [
+        ("sessionStart", base(json!({"source": "new"})), EventType::SessionStarted),
+        ("userPromptSubmitted", base(json!({"prompt": "sort my photos"})), EventType::TaskSubmitted),
+        ("postToolUse", base(json!({"toolName": "editFile", "toolArgs": {"path": "a.txt"}, "toolResult": {"ok": true}})), EventType::ToolFinished),
+        ("agentStop", base(json!({"stopReason": "end_turn"})), EventType::AgentReportedCompletion),
+        ("sessionEnd", base(json!({"reason": "complete"})), EventType::SessionEnded),
+    ];
+    for (i, (name, payload, want)) in cases.into_iter().enumerate() {
+        let ev = normalize(&copilot_env(name, (i as i64 + 1) * 1_000, payload)).unwrap();
+        assert_eq!(ev.event_type, want, "{name}");
+        assert_eq!(ev.session_id.as_deref(), Some("cp-1"), "{name}");
+        assert_eq!(ev.working_dir.as_deref(), Some("C:/work"), "{name}");
+        assert_eq!(ev.source_ts, Some(1_762_000_000_000), "{name}: uses the agent's timestamp");
+    }
+    let tool = normalize(&copilot_env("postToolUse", 9, base(json!({"toolName": "editFile", "toolArgs": {"path": "a.txt"}})))).unwrap();
+    assert_eq!(tool.payload_redacted["tool"], "editFile");
+
+    // PascalCase alias with the snake_case payload shape.
+    let snake = normalize(&copilot_env("PostToolUse", 10, json!({"hook_event_name": "PostToolUse", "session_id": "cp-2", "timestamp": "2026-11-03T10:00:00Z", "cwd": "/w", "tool_name": "bash", "tool_input": {"command": "ls"}}))).unwrap();
+    assert_eq!(snake.event_type, EventType::ToolFinished);
+    assert_eq!(snake.session_id.as_deref(), Some("cp-2"));
+    assert_eq!(snake.payload_redacted["tool"], "bash");
+
+    // Secrets in prompts are redacted; transcript paths are dropped.
+    let secret = format!("ghp_{}", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+    let p = normalize(&copilot_env("userPromptSubmitted", 11, base(json!({"prompt": format!("use token {secret}"), "transcriptPath": "/tmp/t.json"})))).unwrap();
+    assert!(!p.payload_redacted.to_string().contains(&secret));
+    assert!(!serde_json::to_string(&p).unwrap().contains("/tmp/t.json"));
+
+    // Through the real collector path too.
+    let fx = Fixture::new();
+    fx.deliver(serde_json::to_value(copilot_env("sessionStart", 20, base(json!({})))).unwrap());
+    fx.deliver(serde_json::to_value(copilot_env("agentStop", 21, base(json!({})))).unwrap());
+    let stored = fx.engine.events.by_session("cp-1").unwrap();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[1].event_type, EventType::AgentReportedCompletion);
+}
+
+// fake-agent contract test
+#[test]
+fn test_copilot_unsupported_version() {
+    use agenttracker_core::connectors::{compute_state, normalize, ConnectorState, DetectResult, UNSUPPORTED_MARKER};
+    // Missing sessionId → unsupported/changed agent version, recorded as a capture error.
+    let ev = normalize(&copilot_env("postToolUse", 1, json!({"timestamp": 1, "toolName": "x"}))).unwrap();
+    assert_eq!(ev.event_type, EventType::CaptureError);
+    assert_eq!(ev.payload_redacted[UNSUPPORTED_MARKER], true);
+    // Missing timestamp → same.
+    let ev2 = normalize(&copilot_env("agentStop", 2, json!({"sessionId": "cp-x"}))).unwrap();
+    assert_eq!(ev2.event_type, EventType::CaptureError);
+    assert_eq!(ev2.payload_redacted[UNSUPPORTED_MARKER], true);
+    // An unknown event name is a capture error but not flagged as a version problem.
+    let ev3 = normalize(&copilot_env("brandNewEvent", 3, json!({"sessionId": "cp-x", "timestamp": 3}))).unwrap();
+    assert_eq!(ev3.event_type, EventType::CaptureError);
+    assert!(ev3.payload_redacted.get(UNSUPPORTED_MARKER).is_none());
+
+    // The connector state reflects it in plain words.
+    let det = DetectResult {
+        connector: "copilot_vscode".into(),
+        agent_found: true,
+        agent_version: Some("1.106.0".into()),
+        config_path: "x".into(),
+        config_exists: true,
+        hooks_installed: true,
+        notes: vec![],
+    };
+    let (state, msg) = compute_state(&det, true, 1, true);
+    assert_eq!(state, ConnectorState::UnsupportedVersion);
+    assert!(msg.contains("file checks still work"));
+    assert_eq!(compute_state(&det, true, 0, false).0, ConnectorState::Connected);
+
+    // Stored through the collector it never breaks ingestion of later good events.
+    let fx = Fixture::new();
+    fx.deliver(serde_json::to_value(copilot_env("postToolUse", 4, json!({"toolName": "x"}))).unwrap());
+    fx.deliver(serde_json::to_value(copilot_env("sessionStart", 5, json!({"sessionId": "cp-ok", "timestamp": 5}))).unwrap());
+    assert_eq!(fx.engine.events.count().unwrap(), 2);
+    assert_eq!(fx.engine.events.by_session("cp-ok").unwrap().len(), 1);
+}

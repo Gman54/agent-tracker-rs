@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <a class="skip-link" href="#screen">Skip to content</a>
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -17,24 +18,50 @@
           <div class="brand-sub">Did your AI agent really do it?</div>
         </div>
       </div>
-      <nav class="nav" id="nav">
-        <a href="#home" data-screen="home"><span class="nav-ico">🏠</span>Home</a>
-        <a href="#connections" data-screen="connections"><span class="nav-ico">🔌</span>Connections</a>
-        <a href="#create" data-screen="create"><span class="nav-ico">✏️</span>Create Task</a>
-        <a href="#live" data-screen="live"><span class="nav-ico">⏱️</span>Live Task</a>
-        <a href="#results" data-screen="results"><span class="nav-ico">✅</span>Results</a>
-        <a href="#saved" data-screen="saved"><span class="nav-ico">📌</span>Saved Checks</a>
-        <a href="#settings" data-screen="settings"><span class="nav-ico">⚙️</span>Settings</a>
+      <nav class="nav" id="nav" aria-label="Main">
+        <a href="#home" data-screen="home">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/></svg>
+          <span>Home</span>
+        </a>
+        <a href="#connections" data-screen="connections">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 17v4"/></svg>
+          <span>Connections</span>
+        </a>
+        <a href="#create" data-screen="create">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l1-4.5L15.5 5a2.1 2.1 0 0 1 3 3L8 18.5z"/><path d="M13.5 7l3 3"/></svg>
+          <span>New Task</span>
+        </a>
+        <a href="#live" data-screen="live">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>
+          <span>Live Task</span>
+        </a>
+        <a href="#results" data-screen="results">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/></svg>
+          <span>Results</span>
+        </a>
+        <a href="#saved" data-screen="saved">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h11v17L12 16.5l-5.5 4z"/></svg>
+          <span>Saved Checks</span>
+        </a>
+        <a href="#settings" data-screen="settings">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg>
+          <span>Settings</span>
+        </a>
       </nav>
-      <div class="collect-pill" id="collect-pill">
-        <span class="dot"></span><span id="collect-text">Starting…</span>
+      <div class="sidebar-foot">
+        <div class="collect-pill" id="collect-pill" role="status">
+          <span class="dot" aria-hidden="true"></span><span id="collect-text">Starting…</span>
+        </div>
+        <button type="button" class="btn btn-secondary btn-small btn-block" id="collect-toggle">Pause collection</button>
       </div>
     </aside>
     <main class="main">
-      <div id="toast" class="toast hidden" role="status"></div>
-      <section id="screen" class="screen" aria-live="polite"></section>
+      <div id="pause-banner" class="pause-banner hidden" role="alert">⏸ Collection is paused — changes may be missed. Resume in the sidebar.</div>
+      <div id="toast" class="toast-stack" role="status" aria-live="polite"></div>
+      <section id="screen" class="screen" aria-live="polite" tabindex="-1"></section>
     </main>
   </div>
+  <div id="wizard-overlay" class="wizard-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="wizard-title"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,15 +1,33 @@
 # AgentTracker
 
 **Did your AI agent really do what it said it did?** AgentTracker records what local AI coding
-agents (Claude Code, Cursor, …) report while they work, takes a fingerprint snapshot of your folders
+agents (Claude Code, Cursor, GitHub Copilot in VS Code) report while they work, takes a fingerprint snapshot of your folders
 before and after, and runs simple checks to tell you — in plain language — whether the job was
 actually done.
 
 > ⚠️ Read [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) before relying on a verdict.
+> Exactly what has (and hasn't) been tested is listed in [docs/STATUS.md](docs/STATUS.md).
+
+![Home screen](docs/screenshots/home.png)
+
+## What it does
+- Takes a **"before" snapshot** of the folders you choose, watches while your agent works, then
+  takes an **"after" snapshot** and checks the result against your own list ("my originals must
+  stay the same", "these files must exist", ...).
+- Listens to what the agent **says** it's doing (through its official hooks) and shows that next
+  to what actually changed on disk, so you never have to take the agent's word for it.
+- Tells you in plain words: **All good**, **Needs attention** or **Couldn't confirm**.
+- Lets you save a report (HTML or JSON) and turn a failure into a saved check for next time.
+
+## What it doesn't do
+- It never blocks, pauses or undoes anything an agent does. It only watches and checks.
+- It can't restore files. Snapshots are fingerprints, not copies.
+- It doesn't send anything off your computer.
 
 ## What it is
-- A Windows desktop app (Tauri 2, Rust) with a tray icon and a friendly 7-screen UI:
-  **Home, Connections, Create Task, Live Task, Results, Saved Checks, Settings**.
+- A Windows desktop app (Tauri 2, Rust) with a tray icon and a calm, friendly 7-screen UI:
+  **Home, Connections, New Task, Live Task, Results, Saved Checks, Settings**, plus a 3-step
+  welcome wizard the first time you open it.
 - A tiny hook program (`agenttracker-hook`) your agent calls on each event. It signs the event and
   hands it to the app over 127.0.0.1; if the app isn't running it saves a redacted copy to replay later.
 - A verifier: "before" and "after" SHA-256 manifests + checks such as *Originals unchanged*,
@@ -57,6 +75,13 @@ Configure these under **Settings → Secrets and variables → Actions** of the 
 Trigger it by pushing to `main`, pushing a `v*` tag, or **Actions → Build Windows installer → Run workflow**.
 
 ## Running locally (development)
+Quick start:
+```bash
+cargo run -p agenttracker                   # opens the window (and tray icon)
+cargo run -p agenttracker -- --headless     # no window: open the http://127.0.0.1:<PORT>/launch?token=... link it prints
+```
+The launch link works once (it becomes a session cookie). The port is random and on 127.0.0.1 only.
+
 Requires Rust stable. On Windows nothing else is needed (WebView2 ships with Windows 10/11).
 ```bash
 cargo test --workspace                      # unit + acceptance tests
@@ -74,13 +99,26 @@ header, pages get a strict CSP, and the hook endpoint requires an HMAC-SHA256 si
 per-run secret stored in `~/.agenttracker/collector.json`.
 
 ## Connecting agents
-Use **Connections** in the app — it does the steps below for you, keeps a one-time backup, is safe
-to run repeatedly, and **Disconnect** restores your file (or removes only AgentTracker's entries
-if you've edited it since). Restart the agent afterwards.
+Walkthrough:
+1. Open **Connections**. Each agent card says whether it's found on this PC, whether it's connected,
+   and exactly which events it can report.
+2. Click **Show what will change**. You'll see the exact lines AgentTracker would add to the
+   agent's settings file. Nothing has been written yet.
+3. Click **Yes, connect it** (or **Connect…**). A one-time backup of your file is kept. Doing it
+   twice changes nothing.
+4. Restart the agent, then click **Test** on the card.
+5. To undo, click **Disconnect**. Your file is restored, or, if you've edited it since, only
+   AgentTracker's own entries are removed.
 
-### Claude Code (implemented — needs live validation)
+Per-connector details (docs checked, events, what is and isn't captured): see
+[docs/connectors/claude_code.md](docs/connectors/claude_code.md),
+[docs/connectors/cursor.md](docs/connectors/cursor.md) and
+[docs/connectors/copilot.md](docs/connectors/copilot.md).
+**None of the connectors have been tested against a live agent yet.**
+
+### Claude Code (implemented — not live-tested)
 Edits `%USERPROFILE%\.claude\settings.json`, adding to `hooks` for `SessionStart`,
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop` and `SessionEnd` an entry
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Notification`, `Stop` and `SessionEnd` an entry
 (tool events get `"matcher": "*"`) such as:
 ```json
 { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
@@ -88,10 +126,18 @@ Edits `%USERPROFILE%\.claude\settings.json`, adding to `hooks` for `SessionStart
 ```
 The `--at-owner agenttracker` marker is how AgentTracker recognises (and only ever removes) its own entries.
 
-### Cursor (experimental)
+### Cursor (experimental — not live-tested)
 Edits `%USERPROFILE%\.cursor\hooks.json` (`{"version": 1, "hooks": {...}}`) with the same kind of
-command for `sessionStart`, `postToolUse`, `afterShellExecution`, `afterMCPExecution`,
+command for `sessionStart`, `postToolUse`, `postToolUseFailure`, `afterShellExecution`, `afterMCPExecution`,
 `afterFileEdit`, `stop` and `sessionEnd`. Coverage is partial; see KNOWN_LIMITATIONS.md.
+
+### GitHub Copilot in VS Code (experimental — not live-tested)
+Writes its own file `%USERPROFILE%\.copilot\hooks\agenttracker.json` (respects `COPILOT_HOME`)
+for `sessionStart`, `userPromptSubmitted`, `postToolUse`, `agentStop` and `sessionEnd`. Never
+touches your other hook files. VS Code agent hooks are a Preview feature.
+
+### Codex
+Not started (planned after release). Use manual mode meanwhile.
 
 ### Manual / any other agent
 No hooks. Create a task, take the "before" snapshot, let any tool (or yourself) do the work, then
@@ -102,5 +148,5 @@ See [demo/README.md](demo/README.md) — **Home → Try the demo** creates every
 
 ## Known limitations
 See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md): no live connector testing in the dev environment,
-Cursor is experimental, hash chain ≠ protection from a hostile local agent, observational only,
-no restore, Windows only, license server is a stub.
+Cursor and Copilot are experimental, hash chain ≠ protection from a hostile local agent, observational only,
+no restore, Windows only, license server is a stub. Feature-by-feature status: [docs/STATUS.md](docs/STATUS.md).

@@ -77,6 +77,12 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
     if let Err(e) = discovery.write(&home) {
         eprintln!("could not write collector discovery file: {e}");
     }
+    // Tasks that were running when the app last closed: restart observers and record the gap.
+    match engine.resume_running() {
+        Ok(ids) if !ids.is_empty() => eprintln!("resumed observation for {} task(s)", ids.len()),
+        Ok(_) => {}
+        Err(e) => eprintln!("could not resume running tasks: {e}"),
+    }
     let state = AppState::new(engine, collector, port, Some(launch_token), secret, hook_binary(), data_dir, home.clone());
     Runtime { state, port, home }
 }
@@ -138,6 +144,7 @@ fn main() {
 
     let Runtime { state, port, home } = rt;
     let server_state = state.clone();
+    let close_state = state.clone();
     let home_on_exit = home.clone();
 
     tauri::Builder::default()
@@ -209,8 +216,13 @@ fn main() {
             Ok(())
         })
         // Closing the window hides it; the tray keeps collecting until "Quit".
-        .on_window_event(|window, event| {
+        // Unless "keep running in the tray" is switched off in Settings.
+        .on_window_event(move |window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if close_state.setting("keep_in_tray") == "0" {
+                    window.app_handle().exit(0);
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.hide();
             }
