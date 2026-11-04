@@ -1,0 +1,9 @@
+/target/
+/src-tauri/gen/
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+key.txt
+.env

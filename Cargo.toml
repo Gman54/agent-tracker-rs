@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tracker-common",
+    "crates/agenttracker-core",
+    "crates/agenttracker-hook",
+    "src-tauri",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["AgentTracker"]
+publish = false
+license = "Proprietary"
+
+[workspace.dependencies]
+tracker-common = { path = "crates/tracker-common" }
+agenttracker-core = { path = "crates/agenttracker-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+regex = "1"
+once_cell = "1"
+subtle = "2"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The hook is invoked on every agent tool call: keep it small and fast to start.
+[profile.release.package.agenttracker-hook]
+opt-level = "z"

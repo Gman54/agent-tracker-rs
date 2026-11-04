@@ -1,0 +1,28 @@
+[package]
+name = "tracker-common"
+description = "Shared utilities: redaction, canonical JSON, HMAC, machine id, hash chain, license stub"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+hostname = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile = { workspace = true }

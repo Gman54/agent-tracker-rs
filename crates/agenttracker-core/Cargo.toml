@@ -1,0 +1,25 @@
+[package]
+name = "agenttracker-core"
+description = "AgentTracker core: storage, events, tasks, filesystem snapshots, verifiers, connectors, collector"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracker-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+once_cell = { workspace = true }
+notify = "6"
+globset = "0.4"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { version = "0.4", features = ["util"] }

@@ -1,0 +1,81 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # Baked into the binary by crates/tracker-common/build.rs. Empty -> clearly-marked placeholder.
+      AGENTTRACKER_API_KEY: ${{ secrets.AGENTTRACKER_API_KEY }}
+      AGENTTRACKER_LICENSE_URL: ${{ secrets.AGENTTRACKER_LICENSE_URL || vars.AGENTTRACKER_LICENSE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable + Windows target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Build the hook first: tauri-build (src-tauri) checks that the externalBin exists.
+      - name: Build hook binary
+        run: cargo build --release --target x86_64-pc-windows-msvc -p agenttracker-hook
+
+      # Tauri bundles "externalBin" files named <name>-<target-triple>.exe next to the app exe.
+      - name: Stage hook binary for the bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/agenttracker-hook.exe src-tauri/binaries/agenttracker-hook-x86_64-pc-windows-msvc.exe
+
+      - name: Build release binaries (whole workspace)
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Test (acceptance + unit)
+        run: cargo test --workspace --target x86_64-pc-windows-msvc
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build installers (NSIS + MSI)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          AGENTTRACKER_API_KEY: ${{ secrets.AGENTTRACKER_API_KEY }}
+        with:
+          tauriScript: cargo tauri
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentTracker-windows-x64
+          if-no-files-found: error
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/AgentTracker_*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/msi/AgentTracker_*_x64_en-US.msi

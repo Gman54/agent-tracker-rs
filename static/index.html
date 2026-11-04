@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentTracker</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/static/icon.svg" alt="" class="brand-icon">
+        <div>
+          <div class="brand-name">AgentTracker</div>
+          <div class="brand-sub">Did your AI agent really do it?</div>
+        </div>
+      </div>
+      <nav class="nav" id="nav">
+        <a href="#home" data-screen="home"><span class="nav-ico">🏠</span>Home</a>
+        <a href="#connections" data-screen="connections"><span class="nav-ico">🔌</span>Connections</a>
+        <a href="#create" data-screen="create"><span class="nav-ico">✏️</span>Create Task</a>
+        <a href="#live" data-screen="live"><span class="nav-ico">⏱️</span>Live Task</a>
+        <a href="#results" data-screen="results"><span class="nav-ico">✅</span>Results</a>
+        <a href="#saved" data-screen="saved"><span class="nav-ico">📌</span>Saved Checks</a>
+        <a href="#settings" data-screen="settings"><span class="nav-ico">⚙️</span>Settings</a>
+      </nav>
+      <div class="collect-pill" id="collect-pill">
+        <span class="dot"></span><span id="collect-text">Starting…</span>
+      </div>
+    </aside>
+    <main class="main">
+      <div id="toast" class="toast hidden" role="status"></div>
+      <section id="screen" class="screen" aria-live="polite"></section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

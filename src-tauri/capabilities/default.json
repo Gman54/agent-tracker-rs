@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal permissions. The UI is served from the 127.0.0.1 backend (a remote origin to Tauri), so these IPC permissions are NOT reachable from the page; they exist for Rust-side plugin use only. File access is scoped to the app-local data directory.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "fs:allow-read",
+    "fs:allow-write",
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "$APPLOCALDATA" }, { "path": "$APPLOCALDATA/**" }]
+    }
+  ]
+}

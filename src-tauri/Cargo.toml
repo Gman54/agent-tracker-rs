@@ -1,0 +1,23 @@
+[package]
+name = "agenttracker"
+description = "AgentTracker - checks whether AI agents really did what they reported"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agenttracker"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agenttracker-core = { workspace = true }
+tracker-common = { workspace = true }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }

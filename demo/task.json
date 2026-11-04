@@ -1,0 +1,17 @@
+{
+  "title": "Copy sample files to output folder",
+  "instruction": "Copy every file from the input folder into the expected_output folder. Do not change, rename or delete anything in input.",
+  "connector": "manual",
+  "folders": [
+    { "folder_path": ".", "role": "working" },
+    { "folder_path": "input", "role": "protected" },
+    { "folder_path": "expected_output", "role": "allowed_write" }
+  ],
+  "checks": [
+    { "check_type": "originals_unchanged", "params": {}, "is_required": true },
+    { "check_type": "required_outputs_exist", "params": { "paths": ["expected_output/shopping_list.txt", "expected_output/meeting_notes.txt", "expected_output/ideas.txt"] }, "is_required": true },
+    { "check_type": "inputs_preserved_in_output", "params": { "input": "input", "output": "expected_output" }, "is_required": true },
+    { "check_type": "folder_structure_matches", "params": { "root": "expected_output", "patterns": ["*.txt", ".gitkeep"] }, "is_required": false },
+    { "check_type": "changes_within_scope", "params": {}, "is_required": true }
+  ]
+}
