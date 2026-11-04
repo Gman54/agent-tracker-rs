@@ -9,6 +9,7 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     ("v001", include_str!("../../../migrations/v001_initial.sql")),
     ("v002", include_str!("../../../migrations/v002_check_templates.sql")),
     ("v003", include_str!("../../../migrations/v003_event_extras_chain.sql")),
+    ("v004", include_str!("../../../migrations/v004_runtime.sql")),
 ];
 
 pub struct Migrator;

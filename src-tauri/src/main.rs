@@ -5,7 +5,7 @@
 use agenttracker_core::collector::{Collector, CollectorDiscovery, FALLBACK_FILE};
 use agenttracker_core::db::Db;
 use agenttracker_core::engine::Engine;
-use agenttracker_core::server::{serve, AppState};
+use agenttracker_core::server::{serve_with, AppState};
 use agenttracker_core::{agenttracker_home, APP_NAME, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -134,7 +134,7 @@ fn main() {
         let home = rt.home.clone();
         tokio_rt.block_on(async move {
             let l = tokio::net::TcpListener::from_std(listener).expect("listener");
-            if let Err(e) = serve(l, rt.state).await {
+            if let Err(e) = serve_with(l, rt.state, agenttracker_runtime::http::routes()).await {
                 eprintln!("server stopped: {e}");
             }
         });
@@ -153,7 +153,7 @@ fn main() {
         .setup(move |app| {
             tauri::async_runtime::spawn(async move {
                 let l = tokio::net::TcpListener::from_std(listener).expect("listener");
-                if let Err(e) = serve(l, server_state).await {
+                if let Err(e) = serve_with(l, server_state, agenttracker_runtime::http::routes()).await {
                     eprintln!("server stopped: {e}");
                 }
             });

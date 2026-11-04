@@ -174,6 +174,12 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with(state, Router::new())
+}
+
+/// Builds the router with additional UI routes (e.g. the decision runtime's `/api/ui/runtime/*`).
+/// Extra routes are merged before the guard layer, so they get the same session/CSRF/host checks.
+pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/static/*name", get(static_file))
@@ -205,6 +211,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/license", post(license_set))
         .route("/api/ui/chain/verify", post(chain_verify))
         .route("/api/ui/demo", post(demo_create))
+        .merge(extra)
         .fallback(|| async { err(404, "Not found") })
         .layer(middleware::from_fn_with_state(state.clone(), guards))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -215,6 +222,10 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> s
     axum::serve(listener, build_router(state)).await
 }
 
+pub async fn serve_with(listener: tokio::net::TcpListener, state: Arc<AppState>, extra: Router<Arc<AppState>>) -> std::io::Result<()> {
+    axum::serve(listener, build_router_with(state, extra)).await
+}
+
 // ---- static + launch -------------------------------------------------------------------------------
 const INDEX_HTML: &[u8] = include_bytes!("../../../static/index.html");
 
@@ -223,6 +234,7 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "index.html" => (INDEX_HTML, "text/html; charset=utf-8"),
         "app.js" => (include_bytes!("../../../static/app.js"), "text/javascript; charset=utf-8"),
         "style.css" => (include_bytes!("../../../static/style.css"), "text/css; charset=utf-8"),
+        "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
         _ => return None,
     })
