@@ -6,7 +6,8 @@ use crate::store::{EventStore, ManifestStore, ResultStore, TemplateStore, Verifi
 use crate::task::{Lifecycle, TaskDefinition, TaskStore};
 use crate::verifiers::{overall_verdict, Evidence, VerifierRegistry};
 use crate::{CoreError, Result};
-use std::collections::HashMap;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +24,39 @@ pub struct Engine {
     pub exclude_paths: Vec<PathBuf>,
     observers: Mutex<HashMap<String, Vec<ObserverHandle>>>,
     hints: Mutex<HashMap<String, Vec<ChangeHint>>>,
+    /// Known holes in live observation per task (observer failed to start, app restarted, ...).
+    gaps: Mutex<HashMap<String, Vec<String>>>,
+    /// Idempotency keys for "Verify now": key → (task_id, run_id, ms).
+    verify_keys: Mutex<HashMap<String, (String, String, i64)>>,
+    verifying: Mutex<HashSet<String>>,
+}
+
+/// How long a repeated idempotency key returns the earlier run instead of re-running.
+pub const VERIFY_DEDUPE_MS: i64 = 30_000;
+
+/// Live Task view: what was observed independently, and where observation has holes.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveView {
+    pub observing: bool,
+    pub change_count: usize,
+    /// Most recent independently observed file changes (newest last, at most 200).
+    pub recent_changes: Vec<ChangeHint>,
+    pub gaps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyOutcome {
+    pub run: VerificationRun,
+    /// True when this request repeated a recent idempotency key and the earlier run was returned.
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PurgeReport {
+    pub tasks_deleted: usize,
+    pub events_deleted: usize,
+    /// Old tasks kept because they are still active (their evidence is needed).
+    pub kept_active: Vec<String>,
 }
 
 impl Engine {
@@ -38,6 +72,9 @@ impl Engine {
             exclude_paths,
             observers: Mutex::new(HashMap::new()),
             hints: Mutex::new(HashMap::new()),
+            gaps: Mutex::new(HashMap::new()),
+            verify_keys: Mutex::new(HashMap::new()),
+            verifying: Mutex::new(HashSet::new()),
             db,
         })
     }
@@ -70,9 +107,112 @@ impl Engine {
     /// ready → running. Starts live change observers (best effort; hints only).
     pub fn start(&self, task_id: &str) -> Result<TaskDefinition> {
         let t = self.tasks.transition(task_id, Lifecycle::Running)?;
-        let handles: Vec<ObserverHandle> = t.snapshot_roots().into_iter().filter_map(|r| Observer::start(PathBuf::from(r)).ok()).collect();
-        self.observers.lock().unwrap_or_else(|p| p.into_inner()).insert(task_id.to_string(), handles);
+        self.start_observers(&t);
         Ok(t)
+    }
+
+    fn start_observers(&self, t: &TaskDefinition) {
+        let mut handles = vec![];
+        for r in t.snapshot_roots() {
+            match Observer::start(PathBuf::from(&r)) {
+                Ok(h) => handles.push(h),
+                Err(e) => self.add_gap(&t.id, format!("Live watching couldn't start for {r} ({e}). The final check still compares full snapshots.")),
+            }
+        }
+        self.observers.lock().unwrap_or_else(|p| p.into_inner()).insert(t.id.clone(), handles);
+    }
+
+    pub fn add_gap(&self, task_id: &str, msg: String) {
+        self.gaps.lock().unwrap_or_else(|p| p.into_inner()).entry(task_id.to_string()).or_default().push(msg);
+    }
+
+    /// After an app restart: restart live watching for tasks that were running and record the
+    /// gap (changes made while AgentTracker was closed are only seen by the final snapshot).
+    pub fn resume_running(&self) -> Result<Vec<String>> {
+        let mut resumed = vec![];
+        for t in self.tasks.list()? {
+            if t.lifecycle == Lifecycle::Running && !self.observers.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&t.id) {
+                self.add_gap(&t.id, "AgentTracker was restarted while this task was running. Live watching resumed; changes made while it was closed will still be found by the final snapshot comparison.".into());
+                self.start_observers(&t);
+                resumed.push(t.id.clone());
+            }
+            if t.lifecycle == Lifecycle::Verifying {
+                // A verification interrupted by a restart never finished; allow a fresh one.
+                let _ = self.tasks.transition(&t.id, Lifecycle::Error);
+            }
+        }
+        Ok(resumed)
+    }
+
+    pub fn live_view(&self, task_id: &str) -> LiveView {
+        let change_count = self.live_hint_count(task_id);
+        let hints = self.hints.lock().unwrap_or_else(|p| p.into_inner());
+        let all = hints.get(task_id).cloned().unwrap_or_default();
+        let recent_changes = all[all.len().saturating_sub(200)..].to_vec();
+        let mut gaps = self.gaps.lock().unwrap_or_else(|p| p.into_inner()).get(task_id).cloned().unwrap_or_default();
+        let obs = self.observers.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(hs) = obs.get(task_id) {
+            for h in hs {
+                for e in h.errors() {
+                    gaps.push(format!("The folder watcher reported a problem for {}: {e}", h.root.display()));
+                }
+            }
+        }
+        if change_count >= 100_000 {
+            gaps.push("So many changes happened that live watching stopped recording details. The final check is unaffected.".into());
+        }
+        LiveView { observing: obs.contains_key(task_id), change_count, recent_changes, gaps }
+    }
+
+    /// "Verify now" with double-click protection. The same `key` within [`VERIFY_DEDUPE_MS`]
+    /// returns the earlier run; a different key (an intentional re-run) verifies again.
+    pub fn verify_with_key(&self, task_id: &str, key: Option<&str>) -> Result<VerifyOutcome> {
+        let now = crate::now_ms();
+        if let Some(k) = key {
+            let mut keys = self.verify_keys.lock().unwrap_or_else(|p| p.into_inner());
+            keys.retain(|_, (_, _, ts)| now - *ts < VERIFY_DEDUPE_MS);
+            if let Some((tid, run_id, _)) = keys.get(k).cloned() {
+                if tid == task_id {
+                    if let Some(run) = self.results.get_run(&run_id)? {
+                        return Ok(VerifyOutcome { run, deduplicated: true });
+                    }
+                }
+            }
+        }
+        {
+            let mut v = self.verifying.lock().unwrap_or_else(|p| p.into_inner());
+            if !v.insert(task_id.to_string()) {
+                return Err(CoreError::Invalid("This task is already being checked — the result will appear in a moment.".into()));
+            }
+        }
+        let r = self.verify(task_id);
+        self.verifying.lock().unwrap_or_else(|p| p.into_inner()).remove(task_id);
+        let run = r?;
+        if let Some(k) = key {
+            self.verify_keys.lock().unwrap_or_else(|p| p.into_inner()).insert(k.to_string(), (task_id.to_string(), run.id.clone(), now));
+        }
+        Ok(VerifyOutcome { run, deduplicated: false })
+    }
+
+    /// Deletes finished tasks (completed / cancelled / error) last updated before `cutoff_ms`,
+    /// with their snapshots, results and events. Refuses to touch active tasks.
+    pub fn purge_older_than(&self, cutoff_ms: i64) -> Result<PurgeReport> {
+        let mut rep = PurgeReport::default();
+        for t in self.tasks.list()? {
+            if t.updated_at >= cutoff_ms {
+                continue;
+            }
+            if !matches!(t.lifecycle, Lifecycle::Completed | Lifecycle::Cancelled | Lifecycle::Error) {
+                rep.kept_active.push(t.title.clone());
+                continue;
+            }
+            self.stop_observers(&t.id);
+            rep.events_deleted += self.db.delete_task_data(&t.id)?;
+            rep.tasks_deleted += 1;
+            self.hints.lock().unwrap_or_else(|p| p.into_inner()).remove(&t.id);
+            self.gaps.lock().unwrap_or_else(|p| p.into_inner()).remove(&t.id);
+        }
+        Ok(rep)
     }
 
     fn stop_observers(&self, task_id: &str) {

@@ -81,6 +81,24 @@ impl Db {
         self.conn.clone()
     }
 
+    /// Deletes one task and all data tied to it; returns the number of events removed.
+    /// The tamper-evident chain keeps its redacted entries so later chain checks still verify.
+    pub fn delete_task_data(&self, task_id: &str) -> Result<usize> {
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM manifest_entries WHERE manifest_id IN (SELECT id FROM manifests WHERE task_id = ?1)", [task_id])?;
+        tx.execute("DELETE FROM manifests WHERE task_id = ?1", [task_id])?;
+        tx.execute("DELETE FROM check_results WHERE run_id IN (SELECT id FROM verification_runs WHERE task_id = ?1)", [task_id])?;
+        tx.execute("DELETE FROM verification_runs WHERE task_id = ?1", [task_id])?;
+        let n = tx.execute("DELETE FROM events WHERE task_id = ?1", [task_id])?;
+        for t in ["task_checks", "task_folders", "task_definition_snapshots"] {
+            tx.execute(&format!("DELETE FROM {t} WHERE task_id = ?1"), [task_id])?;
+        }
+        tx.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self.conn().query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }

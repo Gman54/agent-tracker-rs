@@ -24,7 +24,7 @@ use std::time::Duration;
 
 pub const NAME: &str = "cursor";
 
-pub const HOOK_EVENTS: &[&str] = &["sessionStart", "postToolUse", "afterShellExecution", "afterMCPExecution", "afterFileEdit", "stop", "sessionEnd"];
+pub const HOOK_EVENTS: &[&str] = &["sessionStart", "postToolUse", "postToolUseFailure", "afterShellExecution", "afterMCPExecution", "afterFileEdit", "stop", "sessionEnd"];
 
 pub fn info() -> ConnectorInfo {
     ConnectorInfo {
@@ -108,6 +108,10 @@ impl CursorConnector {
             hooks_installed,
             notes,
         }
+    }
+
+    pub fn preview(&self, hook_binary_path: &Path) -> Result<super::ConfigPreview> {
+        json_hooks::preview(&CursorFormat, NAME, &self.hooks_path, HOOK_EVENTS, hook_binary_path)
     }
 
     pub fn install(&self, hook_binary_path: &Path) -> Result<InstallReport> {

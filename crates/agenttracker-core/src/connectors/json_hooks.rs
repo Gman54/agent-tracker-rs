@@ -1,7 +1,7 @@
 //! Shared install/uninstall flow for agents that configure hooks in a JSON file.
 //! Guarantees: unrelated settings are preserved; the original is backed up once; repeated installs
 //! are idempotent; uninstall removes only entries carrying [`OWNER_MARKER`].
-use super::{file_sha, hook_command, is_owned_command, load_state, read_json_file, save_state, write_json_file, InstallReport, InstallState, UninstallReport};
+use super::{file_sha, hook_command, is_owned_command, load_state, read_json_file, save_state, write_json_file, ConfigPreview, InstallReport, InstallState, UninstallReport};
 use crate::{CoreError, Result};
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -38,25 +38,13 @@ pub(crate) fn owned_events<F: HooksFormat>(fmt: &F, cfg: &Value) -> Vec<(String,
     out
 }
 
-pub(crate) fn install<F: HooksFormat>(fmt: &F, connector: &str, config_path: &Path, state_file: &Path, events: &[&str], hook_binary: &Path) -> Result<InstallReport> {
-    let existing = read_json_file(config_path)?;
-    let created_file = existing.is_none();
-    let mut cfg = existing.clone().unwrap_or_else(|| Value::Object(Map::new()));
+/// Pure merge: computes the config AgentTracker would write, without touching disk.
+/// Returns (merged config, added events, updated events).
+pub(crate) fn merge<F: HooksFormat>(fmt: &F, connector: &str, existing: Option<&Value>, config_path: &Path, events: &[&str], hook_binary: &Path) -> Result<(Value, Vec<String>, Vec<String>)> {
+    let mut cfg = existing.cloned().unwrap_or_else(|| Value::Object(Map::new()));
     let Some(root) = cfg.as_object_mut() else {
         return Err(CoreError::Invalid(format!("{} doesn't contain a JSON object; AgentTracker won't modify it", config_path.display())));
     };
-    let prev_state = load_state(state_file);
-    let already_ours = existing.as_ref().map(|c| !owned_events(fmt, c).is_empty()).unwrap_or(false);
-    let hooks_key_existed = root.contains_key("hooks");
-
-    // Back up the user's original only on the first install (never back up our own output).
-    let mut backup_path = prev_state.as_ref().and_then(|s| s.backup_path.clone());
-    if !created_file && !already_ours && backup_path.is_none() {
-        let b = config_path.with_extension(format!("json.agenttracker-backup-{}", crate::now_ms()));
-        std::fs::copy(config_path, &b)?;
-        backup_path = Some(b.to_string_lossy().into_owned());
-    }
-
     fmt.ensure_root(root);
     let hooks = root.entry("hooks").or_insert_with(|| Value::Object(Map::new()));
     let Some(hooks) = hooks.as_object_mut() else {
@@ -69,6 +57,64 @@ pub(crate) fn install<F: HooksFormat>(fmt: &F, connector: &str, config_path: &Pa
             Upsert::Updated => updated.push(ev.to_string()),
             Upsert::Unchanged => {}
         }
+    }
+    Ok((cfg, added, updated))
+}
+
+/// "Show the exact config change before install": before/after text plus a line diff.
+pub(crate) fn preview<F: HooksFormat>(fmt: &F, connector: &str, config_path: &Path, events: &[&str], hook_binary: &Path) -> Result<ConfigPreview> {
+    let existing = read_json_file(config_path)?;
+    let (merged, added, updated) = merge(fmt, connector, existing.as_ref(), config_path, events, hook_binary)?;
+    let before = existing.as_ref().map(|v| serde_json::to_string_pretty(v).unwrap_or_default() + "\n").unwrap_or_default();
+    let after = serde_json::to_string_pretty(&merged)? + "\n";
+    let diff = line_diff(&before, &after);
+    Ok(ConfigPreview { config_path: config_path.to_string_lossy().into_owned(), file_exists: existing.is_some(), changes: !added.is_empty() || !updated.is_empty(), added, updated, before, after, diff })
+}
+
+/// Minimal LCS line diff: each line prefixed with "  ", "+ " or "- ".
+pub fn line_diff(before: &str, after: &str) -> Vec<String> {
+    let a: Vec<&str> = before.lines().collect();
+    let b: Vec<&str> = after.lines().collect();
+    let (n, m) = (a.len(), b.len());
+    let mut l = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[i][j] = if a[i] == b[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+        }
+    }
+    let (mut i, mut j, mut out) = (0, 0, vec![]);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            out.push(format!("  {}", a[i]));
+            i += 1;
+            j += 1;
+        } else if l[i + 1][j] >= l[i][j + 1] {
+            out.push(format!("- {}", a[i]));
+            i += 1;
+        } else {
+            out.push(format!("+ {}", b[j]));
+            j += 1;
+        }
+    }
+    out.extend(a[i..].iter().map(|s| format!("- {s}")));
+    out.extend(b[j..].iter().map(|s| format!("+ {s}")));
+    out
+}
+
+pub(crate) fn install<F: HooksFormat>(fmt: &F, connector: &str, config_path: &Path, state_file: &Path, events: &[&str], hook_binary: &Path) -> Result<InstallReport> {
+    let existing = read_json_file(config_path)?;
+    let created_file = existing.is_none();
+    let (cfg, added, updated) = merge(fmt, connector, existing.as_ref(), config_path, events, hook_binary)?;
+    let prev_state = load_state(state_file);
+    let already_ours = existing.as_ref().map(|c| !owned_events(fmt, c).is_empty()).unwrap_or(false);
+    let hooks_key_existed = existing.as_ref().map(|c| c.get("hooks").is_some()).unwrap_or(false);
+
+    // Back up the user's original only on the first install (never back up our own output).
+    let mut backup_path = prev_state.as_ref().and_then(|s| s.backup_path.clone());
+    if !created_file && !already_ours && backup_path.is_none() {
+        let b = config_path.with_extension(format!("json.agenttracker-backup-{}", crate::now_ms()));
+        std::fs::copy(config_path, &b)?;
+        backup_path = Some(b.to_string_lossy().into_owned());
     }
     let written = write_json_file(config_path, &cfg)?;
     let state = InstallState {

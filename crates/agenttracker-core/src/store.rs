@@ -298,6 +298,14 @@ impl ResultStore {
         Ok(())
     }
 
+    pub fn get_run(&self, run_id: &str) -> Result<Option<VerificationRun>> {
+        let tid: Option<String> = self.db.conn().query_row("SELECT task_id FROM verification_runs WHERE id = ?1", [run_id], |r| r.get(0)).optional()?;
+        Ok(match tid {
+            Some(t) => self.runs_for_task(&t)?.into_iter().find(|r| r.id == run_id),
+            None => None,
+        })
+    }
+
     pub fn runs_for_task(&self, task_id: &str) -> Result<Vec<VerificationRun>> {
         let conn = self.db.conn();
         let mut st = conn.prepare("SELECT id, task_id, definition_version, started_at, finished_at, overall_verdict FROM verification_runs WHERE task_id = ?1 ORDER BY started_at DESC")?;
@@ -394,6 +402,10 @@ impl TemplateStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(v)
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> Result<bool> {
+        Ok(self.db.conn().execute("UPDATE check_templates SET name = ?2 WHERE id = ?1", params![id, name])? > 0)
     }
 
     pub fn delete(&self, id: &str) -> Result<bool> {

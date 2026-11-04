@@ -2,6 +2,7 @@
 //! (merging, backing up, never clobbering unrelated settings), test the connection, and normalize
 //! hook payloads into [`AgentEvent`]s.
 pub mod claude_code;
+pub mod copilot;
 pub mod cursor;
 pub(crate) mod json_hooks;
 pub mod manual;
@@ -81,6 +82,55 @@ pub struct UninstallReport {
     pub method: String,
 }
 
+/// Exact change an install would make, shown to the user before they confirm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigPreview {
+    pub config_path: String,
+    pub file_exists: bool,
+    /// False when AgentTracker's hooks are already installed exactly as they would be written.
+    pub changes: bool,
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub before: String,
+    pub after: String,
+    /// Line diff, each line prefixed with "  ", "+ " or "- ".
+    pub diff: Vec<String>,
+}
+
+/// User-facing connection state (spec: connected / disconnected / degraded / unsupported version).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorState {
+    /// Hooks installed, agent found, and no recent capture errors.
+    Connected,
+    /// Hooks not installed (or the agent isn't present).
+    Disconnected,
+    /// Hooks installed but something is off (recent capture errors, hook program missing, agent not found).
+    Degraded,
+    /// The agent reported a version/payload shape this connector can't interpret.
+    UnsupportedVersion,
+}
+
+/// Derives the state from detection plus recent collector health. Pure so it can be tested.
+pub fn compute_state(det: &DetectResult, hook_program_ok: bool, recent_capture_errors: usize, unsupported_seen: bool) -> (ConnectorState, String) {
+    if !det.hooks_installed {
+        return (ConnectorState::Disconnected, if det.agent_found { "Not connected yet.".into() } else { "The agent wasn't found on this computer.".into() });
+    }
+    if unsupported_seen {
+        return (ConnectorState::UnsupportedVersion, "The agent sent data in a format this version of AgentTracker doesn't understand. Agent activity may be incomplete; file checks still work.".into());
+    }
+    if !hook_program_ok {
+        return (ConnectorState::Degraded, "Hooks are installed, but the AgentTracker hook program can't be found. Try reconnecting.".into());
+    }
+    if recent_capture_errors > 0 {
+        return (ConnectorState::Degraded, format!("{recent_capture_errors} recent message(s) from the agent couldn't be understood."));
+    }
+    if !det.agent_found {
+        return (ConnectorState::Degraded, "Hooks are installed, but the agent itself wasn't found.".into());
+    }
+    (ConnectorState::Connected, "Connected.".into())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestStep {
     pub name: String,
@@ -125,6 +175,10 @@ pub fn hook_command(hook_binary: &Path, connector: &str, event: &str) -> String 
 pub fn is_owned_command(cmd: &str) -> bool {
     cmd.contains(OWNER_MARKER)
 }
+
+/// Key normalizers put in the CaptureError payload when a payload doesn't have the documented
+/// shape (treated as an "unsupported version" signal).
+pub const UNSUPPORTED_MARKER: &str = "unsupported_payload";
 
 /// Extracts the hook binary path from one of our commands.
 pub fn hook_path_from_command(cmd: &str) -> Option<PathBuf> {
@@ -216,6 +270,7 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     match env.connector.as_str() {
         claude_code::NAME => claude_code::normalize(env),
         cursor::NAME => cursor::normalize(env),
+        copilot::NAME => copilot::normalize(env),
         _ => {
             let mut ev = base_event(env, EventType::CaptureError);
             ev.payload_redacted = serde_json::json!({"error": format!("unknown connector \"{}\"", env.connector), "hook_event": env.hook_event});
@@ -238,5 +293,5 @@ pub(crate) fn base_event(env: &HookEnvelope, t: EventType) -> AgentEvent {
 }
 
 pub fn registry() -> Vec<ConnectorInfo> {
-    vec![claude_code::info(), cursor::info(), manual::info()]
+    vec![claude_code::info(), cursor::info(), copilot::info(), manual::info()]
 }

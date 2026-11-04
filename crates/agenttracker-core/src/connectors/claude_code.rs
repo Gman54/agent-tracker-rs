@@ -21,8 +21,8 @@ use std::time::Duration;
 pub const NAME: &str = "claude_code";
 
 /// Hook events AgentTracker installs. Tool events use matcher "*".
-pub const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"];
-const TOOL_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
+pub const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "SessionEnd"];
+const TOOL_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "PostToolUseFailure"];
 
 pub fn info() -> ConnectorInfo {
     ConnectorInfo {
@@ -136,6 +136,10 @@ impl ClaudeConnector {
             hooks_installed,
             notes,
         }
+    }
+
+    pub fn preview(&self, hook_binary_path: &Path) -> Result<super::ConfigPreview> {
+        json_hooks::preview(&ClaudeFormat, NAME, &self.settings_path, HOOK_EVENTS, hook_binary_path)
     }
 
     pub fn install(&self, hook_binary_path: &Path) -> Result<InstallReport> {
