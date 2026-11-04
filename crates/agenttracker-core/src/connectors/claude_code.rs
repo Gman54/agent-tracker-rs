@@ -102,10 +102,35 @@ pub(crate) fn find_claude_installs(home: &Path, appdata: Option<PathBuf>, locala
     if let Some(l) = &localappdata {
         cli.push(l.join("Microsoft").join("WinGet").join("Links").join("claude.exe"));
     }
-    let cli: Vec<PathBuf> = cli.into_iter().filter(|p| p.is_file()).collect();
+    let mut cli: Vec<PathBuf> = cli.into_iter().filter(|p| p.is_file()).collect();
+
+    // Claude desktop app (Code tab) keeps its own copy of Claude Code:
+    //   MSIX:     %LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude-code\<version>\claude.exe
+    //   Non-MSIX: %APPDATA%\Claude\claude-code\<version>\claude.exe
+    let packages = msix_claude_packages(localappdata.as_deref());
+    let mut desktop_roots: Vec<PathBuf> = packages.iter().map(|p| p.join("LocalCache").join("Roaming").join("Claude").join("claude-code")).collect();
+    if let Some(a) = &appdata {
+        desktop_roots.push(a.join("Claude").join("claude-code"));
+    }
+    for root in &desktop_roots {
+        cli.extend(desktop_cli_versions(root));
+    }
 
     let mut bundled = vec![];
+    for p in packages {
+        bundled.push(("Claude desktop app", p));
+    }
+    if let Some(a) = &appdata {
+        let p = a.join("Claude");
+        if p.join("claude-code").is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+    }
     if let Some(l) = &localappdata {
+        let p = l.join("Claude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
         let p = l.join("AnthropicClaude");
         if p.is_dir() {
             bundled.push(("Claude desktop app", p));
@@ -123,6 +148,43 @@ pub(crate) fn find_claude_installs(home: &Path, appdata: Option<PathBuf>, locala
         }
     }
     (cli, bundled)
+}
+
+/// `%LOCALAPPDATA%\Packages\Claude_*` folders (the Microsoft Store / MSIX desktop app), sorted by name.
+fn msix_claude_packages(localappdata: Option<&Path>) -> Vec<PathBuf> {
+    let Some(l) = localappdata else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(l.join("Packages")) else { return vec![] };
+    let mut v: Vec<PathBuf> = rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("Claude_") && e.path().is_dir()).map(|e| e.path()).collect();
+    v.sort();
+    v
+}
+
+/// `<root>\<version>\claude.exe` for every version folder, newest version first.
+fn desktop_cli_versions(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    let mut found: Vec<(Vec<u64>, String, PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let exe = e.path().join("claude.exe");
+            exe.is_file().then(|| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                (version_key(&name), name, exe)
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    found.into_iter().map(|(_, _, p)| p).collect()
+}
+
+/// Numeric parts of a version folder name ("2.1.10" -> [2, 1, 10]) so 2.1.10 sorts above 2.1.9.
+fn version_key(name: &str) -> Vec<u64> {
+    name.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap_or(0)).collect()
+}
+
+/// True for a claude.exe that ships inside the Claude desktop app (lives under a `Claude\claude-code` folder).
+fn is_desktop_bundled(p: &Path) -> bool {
+    let parts: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+    parts.windows(2).any(|w| w[0] == "claude" && w[1] == "claude-code")
 }
 
 pub struct ClaudeConnector {
@@ -163,20 +225,29 @@ impl ClaudeConnector {
             let (cli, bundled) = find_claude_installs(&crate::user_home(), std::env::var_os("APPDATA").map(PathBuf::from), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
             for p in &cli {
                 if let Some(v) = probe_version(&[p.to_string_lossy().as_ref()], Duration::from_secs(4)) {
-                    notes.push(format!("Claude Code found at {} (it isn't on the PATH this app sees).", p.display()));
+                    if is_desktop_bundled(p) {
+                        notes.push(format!("Found the Claude Code that comes with the Claude desktop app, at {}.", p.display()));
+                    } else {
+                        notes.push(format!("Claude Code found at {} (it isn't on the PATH this app sees).", p.display()));
+                    }
                     version = Some(v);
                     break;
                 }
             }
             if version.is_none() {
                 if let Some(p) = cli.first() {
-                    notes.push(format!("Found {} but it didn't answer `--version`.", p.display()));
-                    version = Some("Found (version unknown)".into());
+                    if is_desktop_bundled(p) {
+                        notes.push(format!("Found the Claude Code that comes with the Claude desktop app, at {}. It didn't tell us its version, which is normal for the built-in copy.", p.display()));
+                        version = Some("Claude desktop app (built-in Claude Code)".into());
+                    } else {
+                        notes.push(format!("Found {} but it didn't answer `--version`.", p.display()));
+                        version = Some("Found (version unknown)".into());
+                    }
                 }
             }
             if version.is_none() {
                 if let Some((label, p)) = bundled.first() {
-                    notes.push(format!("{label} found at {}. Hook support there is less reliable than the `claude` command line; if nothing shows up, run a session from a terminal with `claude`.", p.display()));
+                    notes.push(format!("{label} found at {}. It has Claude Code built in. If nothing shows up after you start a Claude session, try running `claude` from a terminal instead.", p.display()));
                     version = Some(format!("{label} (built-in Claude Code)"));
                 }
             }
@@ -189,7 +260,7 @@ impl ClaudeConnector {
             }
         }
         if version.is_none() {
-            notes.push("The `claude` command wasn't found on PATH or in the usual install folders. Hooks can still be installed; they take effect when Claude Code runs.".into());
+            notes.push("We couldn't spot Claude Code in the usual places, but that's okay. The hooks are ready and will start working as soon as Claude Code runs. Try starting a Claude session (for example in the Code tab of the Claude desktop app), then check back here.".into());
         }
         let hooks_installed = read_json_file(&self.settings_path).ok().flatten().map(|c| !json_hooks::owned_events(&ClaudeFormat, &c).is_empty()).unwrap_or(false);
         DetectResult {
@@ -310,5 +381,53 @@ mod tests {
         assert_eq!(bundled.len(), 2);
         assert_eq!(bundled[0].0, "Claude desktop app");
         assert_eq!(bundled[1].0, "Claude Code editor extension");
+    }
+
+    fn fake_exe(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join("claude.exe");
+        std::fs::write(&exe, b"").unwrap();
+        exe
+    }
+
+    #[test]
+    fn finds_msix_desktop_app_newest_version_first() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let local = t.path().join("local");
+        let pkg = local.join("Packages").join("Claude_pzs8sxrjxfjjc");
+        let cc = pkg.join("LocalCache").join("Roaming").join("Claude").join("claude-code");
+        let older = fake_exe(&cc.join("2.1.9"));
+        let newer = fake_exe(&cc.join("2.1.10"));
+        // A folder without claude.exe and an unrelated package are ignored.
+        std::fs::create_dir_all(cc.join("2.2.0")).unwrap();
+        std::fs::create_dir_all(local.join("Packages").join("Microsoft.Something_abc")).unwrap();
+
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local));
+        assert_eq!(cli, vec![newer.clone(), older]);
+        assert!(is_desktop_bundled(&newer));
+        assert_eq!(bundled, vec![("Claude desktop app", pkg)]);
+    }
+
+    #[test]
+    fn finds_appdata_desktop_app_layout() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let appdata = t.path().join("roaming");
+        let local = t.path().join("local");
+        let exe = fake_exe(&appdata.join("Claude").join("claude-code").join("1.0.5"));
+        std::fs::create_dir_all(local.join("Claude").join("logs")).unwrap();
+
+        let (cli, bundled) = find_claude_installs(&home, Some(appdata.clone()), Some(local.clone()));
+        assert_eq!(cli, vec![exe.clone()]);
+        assert!(is_desktop_bundled(&exe));
+        assert!(!is_desktop_bundled(&home.join(".local/bin/claude.exe")));
+        assert_eq!(bundled, vec![("Claude desktop app", appdata.join("Claude")), ("Claude desktop app", local.join("Claude"))]);
+    }
+
+    #[test]
+    fn version_folders_sort_numerically() {
+        assert!(version_key("2.1.10") > version_key("2.1.9"));
+        assert!(version_key("10.0.0") > version_key("9.9.9"));
     }
 }

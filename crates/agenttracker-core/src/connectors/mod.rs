@@ -126,7 +126,7 @@ pub fn compute_state(det: &DetectResult, hook_program_ok: bool, recent_capture_e
         return (ConnectorState::Degraded, format!("{recent_capture_errors} recent message(s) from the agent couldn't be understood."));
     }
     if !det.agent_found {
-        return (ConnectorState::Degraded, "Hooks are installed, but the agent itself wasn't found.".into());
+        return (ConnectorState::Degraded, "Hooks are installed. We couldn't find the agent yet, but the hooks will work once it runs. Try starting a session.".into());
     }
     (ConnectorState::Connected, "Connected.".into())
 }
