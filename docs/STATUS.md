@@ -43,3 +43,8 @@ run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 | Live Cursor test | Not done | Needs a live agent |
 | Live Copilot test | Not done | Needs a live agent |
 | License server | Stub | Format check only (see KNOWN_LIMITATIONS.md) |
+| Decision runtime (`agenttracker-runtime`) | Implemented | **23 simulated tests pass** (`cargo test -p agenttracker-runtime`, scripted provider). See docs/runtime/CAPABILITY_REPORT.md |
+| Runtime live model test | Partial | Ollama `qwen2.5:1.5b` (CPU): 3 runs, **no valid tool action produced**. Not supported. Other models untested |
+| Runtime with LM Studio | Not tested | No LM Studio server available in the sandbox |
+| Runtime replay key DPAPI wrapping | Written | `cfg(windows)`, **not compiled in the sandbox** |
+| Agent Runtime screen + "Why this action?" panel | Implemented | Browser-verified on the headless preview server; screenshots in docs/runtime/screenshots/ |

@@ -53,7 +53,28 @@ pub fn run_for_decision(db: &Db, decision_id: &str) -> Result<()> {
     if let (Some(tool), Some(args)) = (d["tool"].as_str(), d.get("args")) {
         protected_conflict(db, &sid, Some(decision_id), None, tool, args)?;
     }
+    // A final response that claims work was done, while no file change was observed in the session.
+    if d["kind"] == "response" {
+        let text = d["proposal"]["response_text"].as_str().unwrap_or("").to_string();
+        if claims_completion(&text) {
+            let changes: i64 = db.conn().query_row("SELECT COUNT(*) FROM rt_changes WHERE session_id=?1", [&sid], |r| r.get(0))?;
+            if changes == 0 {
+                finding(db, &sid, Some(decision_id), None, "completion_claim_without_observed_change", "deterministic",
+                    "The final response appears to claim completed work (keyword match), but no file change was independently observed in this session.".into(),
+                    json!([{"response_text": tracker_common::redaction::redact_text(&text)}]))?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// Keyword heuristic for "the work is done" claims. Deliberately simple and documented as such.
+pub fn claims_completion(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["has been copied", "have been copied", "was copied", "has been created", "has been written", "have been written",
+     "has been moved", "has been organized", "has been organised", "successfully copied", "successfully created", "task is complete", "task completed", "i copied", "i created", "i wrote"]
+        .iter()
+        .any(|k| t.contains(k))
 }
 
 fn protected_conflict(db: &Db, sid: &str, decision_id: Option<&str>, action_id: Option<&str>, tool: &str, args: &Value) -> Result<bool> {

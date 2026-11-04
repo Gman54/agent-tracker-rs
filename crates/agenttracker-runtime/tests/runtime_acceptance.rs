@@ -566,6 +566,24 @@ fn deterministic_check_flags_claimed_success_with_failed_tool() {
     assert_eq!(std::fs::read_to_string(dir.join("exists.txt")).unwrap(), "x");
 }
 
+/// Shape observed in the live qwen2.5:1.5b run: no tool action, but a final response claiming the copy happened.
+#[test]
+fn completion_claim_without_any_action_is_flagged() {
+    let db = Db::open_in_memory().unwrap();
+    let (_t, dir) = folder();
+    let resp = json!({"instruction_refs": ["instruction_2"], "evidence_refs": [], "stated_rationale": "No further action needed.", "assumptions": [],
+        "proposed_action": null, "expected_effect": "The file will be copied.", "uncertainty": [], "needs_clarification": false,
+        "response_text": "The file 'a.txt' has been copied as requested."}).to_string();
+    let rt = rt_with(&db, ScriptedProvider::sequence("simulated", vec![resp]));
+    let o = rt.start_task(&spec(&dir, "copy originals/a.txt to b.txt")).unwrap();
+    rt.run(&o.session_id).unwrap();
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM rt_actions"), 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM rt_findings WHERE check_type='completion_claim_without_observed_change' AND basis='deterministic'"), 1);
+    assert!(!dir.join("b.txt").exists());
+    // A truthful "nothing to do" response is not flagged.
+    assert!(!agenttracker_runtime::checks::claims_completion("No action was taken; please clarify the destination."));
+}
+
 #[test]
 fn inferred_analysis_is_labelled_and_cannot_modify_records() {
     let db = Db::open_in_memory().unwrap();

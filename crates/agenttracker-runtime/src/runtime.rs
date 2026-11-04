@@ -411,7 +411,12 @@ impl Runtime {
                     last_errors = errs.iter().map(|e| format!("{}: {}", e.code, e.message)).collect::<Vec<_>>().join("; ");
                     repair = vec![
                         ChatMessage { role: "assistant".into(), content: resp.content.chars().take(4000).collect() },
-                        ChatMessage { role: "user".into(), content: format!("The runtime rejected that proposal and nothing was executed. Problems: {last_errors}. Return one corrected decision proposal JSON object.") },
+                        ChatMessage { role: "user".into(), content: format!(
+                            "The runtime rejected that proposal and nothing was executed. Problems: {last_errors}. \
+                             If a file operation is still needed, set proposed_action to {{\"tool\": ..., \"arguments\": {{...}}}} using exactly these argument names: {}. \
+                             If the task is finished, set proposed_action to null and put your answer in response_text. Return one corrected decision proposal JSON object.",
+                            tools::TOOLS.iter().map(|t| format!("{}({})", t.name, t.args.iter().map(|(a, _)| *a).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ")
+                        ) },
                     ];
                 }
             }

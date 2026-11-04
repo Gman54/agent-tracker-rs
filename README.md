@@ -20,14 +20,23 @@ actually done.
 - Lets you save a report (HTML or JSON) and turn a failure into a saved check for next time.
 
 ## What it doesn't do
-- It never blocks, pauses or undoes anything an agent does. It only watches and checks.
+- It never blocks, pauses or undoes anything an externally connected agent does. It only watches and
+  checks. (Models running *inside* the AgentTracker decision runtime can only act through its four
+  confined tools, and those are enforced.)
 - It can't restore files. Snapshots are fingerprints, not copies.
 - It doesn't send anything off your computer.
 
 ## What it is
-- A Windows desktop app (Tauri 2, Rust) with a tray icon and a calm, friendly 7-screen UI:
-  **Home, Connections, New Task, Live Task, Results, Saved Checks, Settings**, plus a 3-step
-  welcome wizard the first time you open it.
+- A Windows desktop app (Tauri 2, Rust) with a tray icon and a clean, professional UI:
+  **Home, Connections, New Task, Live Task, Results, Saved Checks, Agent Runtime, Settings**, plus a
+  3-step welcome wizard the first time you open it.
+- An **instrumented decision runtime** (`crates/agenttracker-runtime`) for local models (Ollama,
+  LM Studio, other OpenAI-compatible servers). Before any tool runs, the model must submit a
+  structured decision proposal, which is validated and saved. The **Why this action?** panel then
+  shows the recorded context, the model's *stated rationale*, its cited evidence and the linked
+  execution result. See [docs/runtime/](docs/runtime/) and the
+  [capability report](docs/runtime/CAPABILITY_REPORT.md). It does not reveal internal model
+  reasoning or prove what caused an action.
 - A tiny hook program (`agenttracker-hook`) your agent calls on each event. It signs the event and
   hands it to the app over 127.0.0.1; if the app isn't running it saves a redacted copy to replay later.
 - A verifier: "before" and "after" SHA-256 manifests + checks such as *Originals unchanged*,
@@ -49,9 +58,10 @@ actually done.
 crates/tracker-common/      redaction, canonical JSON, HMAC/loopback security, machine id, license stub, hash chain
 crates/agenttracker-core/   DB + migrations, event & task model, FS observer, verifiers, connectors, queue, collector, HTTP server
 crates/agenttracker-hook/   the hook binary agents invoke
+crates/agenttracker-runtime/ instrumented model-and-agent decision runtime (separate module, docs/runtime/INTERFACE.md)
 src-tauri/                  Tauri 2 shell: tray (Open / Pause Collection / Quit), window, settings
 static/                     HTML/CSS/JS UI (no build step)
-migrations/                 embedded SQL migrations v001..v003
+migrations/                 embedded SQL migrations v001..v004 (v004 = runtime tables)
 tests/                      acceptance tests (fake-agent contract tests)
 demo/                       harmless demo task — see demo/README.md
 .github/workflows/build.yml Windows build + NSIS/MSI installers
@@ -97,6 +107,15 @@ checks the `Host` header, the window opens a **one-time launch token** that beco
 `SameSite=Strict` session cookie, state-changing UI calls need the `x-requested-with: agenttracker`
 header, pages get a strict CSP, and the hook endpoint requires an HMAC-SHA256 signature with a
 per-run secret stored in `~/.agenttracker/collector.json`.
+
+## Decision runtime (local models)
+Setup for Windows/PowerShell: [docs/runtime/SETUP.md](docs/runtime/SETUP.md). Interface, tables and
+routes: [docs/runtime/INTERFACE.md](docs/runtime/INTERFACE.md). Provider notes:
+[docs/runtime/PROVIDERS.md](docs/runtime/PROVIDERS.md). What has and has not been tested:
+[docs/runtime/CAPABILITY_REPORT.md](docs/runtime/CAPABILITY_REPORT.md). No model is marked
+supported yet. The only live model tried (`qwen2.5:1.5b`) did not produce a valid tool action.
+
+![Why this action?](docs/runtime/screenshots/03_why_panel_fixture_b.png)
 
 ## Connecting agents
 Walkthrough:

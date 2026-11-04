@@ -76,3 +76,14 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
 - Changes made while AgentTracker was closed aren't seen live; the Live Task screen lists this as
   a gap, and the final snapshot comparison still catches them.
 - The UI is English only.
+
+## 11. Decision runtime
+- Records show the application-level request, the model's stated rationale and the observed
+  execution. They do not show internal model computation, provider-side templates or hidden
+  prompts, and they do not prove which input caused an action.
+- No model is marked supported. `qwen2.5:1.5b` was tried live and did not produce a valid tool action.
+- LM Studio is untested. Windows DPAPI key wrapping for replay captures has not been compiled.
+- The "completion claim" check is a keyword heuristic and will miss rephrased claims.
+- Influence tests replay only the decision stage, and seeds do not guarantee reproducibility.
+- The runtime enforces protected paths for its own tools only. Externally connected agents are
+  still observed, not controlled.
