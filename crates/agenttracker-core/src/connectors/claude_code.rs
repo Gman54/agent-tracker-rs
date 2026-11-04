@@ -84,6 +84,47 @@ impl HooksFormat for ClaudeFormat {
     }
 }
 
+/// Looks in the documented / common install locations for Claude Code.
+/// Returns (stand-alone CLI executables, apps that bundle Claude Code). Pure apart from
+/// `exists()` checks so it can be tested with a fake home folder.
+pub(crate) fn find_claude_installs(home: &Path, appdata: Option<PathBuf>, localappdata: Option<PathBuf>) -> (Vec<PathBuf>, Vec<(&'static str, PathBuf)>) {
+    let mut cli = vec![
+        // Native installer (Windows: %USERPROFILE%\.local\bin\claude.exe; macOS/Linux: ~/.local/bin/claude).
+        home.join(".local").join("bin").join("claude.exe"),
+        home.join(".local").join("bin").join("claude"),
+        home.join(".claude").join("local").join("claude.exe"),
+        home.join(".claude").join("local").join("claude"),
+    ];
+    if let Some(a) = &appdata {
+        cli.push(a.join("npm").join("claude.cmd"));
+        cli.push(a.join("npm").join("claude.exe"));
+    }
+    if let Some(l) = &localappdata {
+        cli.push(l.join("Microsoft").join("WinGet").join("Links").join("claude.exe"));
+    }
+    let cli: Vec<PathBuf> = cli.into_iter().filter(|p| p.is_file()).collect();
+
+    let mut bundled = vec![];
+    if let Some(l) = &localappdata {
+        let p = l.join("AnthropicClaude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+        let p = l.join("Programs").join("Claude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+    }
+    for ext_root in [home.join(".vscode").join("extensions"), home.join(".cursor").join("extensions")] {
+        if let Ok(rd) = std::fs::read_dir(&ext_root) {
+            if let Some(e) = rd.flatten().find(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("anthropic.claude-code")) {
+                bundled.push(("Claude Code editor extension", e.path()));
+            }
+        }
+    }
+    (cli, bundled)
+}
+
 pub struct ClaudeConnector {
     pub settings_path: PathBuf,
     pub state_dir: PathBuf,
@@ -113,9 +154,33 @@ impl ClaudeConnector {
     }
 
     pub fn detect(&self) -> DetectResult {
-        let version = probe_version(&["claude", "claude.cmd", "claude.exe"], Duration::from_secs(4));
         let config_exists = self.settings_path.exists();
         let mut notes = vec![];
+        let mut version = probe_version(&["claude", "claude.cmd", "claude.exe"], Duration::from_secs(4));
+        if version.is_none() {
+            // Not on PATH (common when the installer updated PATH after this app's parent
+            // process started, or when Claude Code only ships inside another app).
+            let (cli, bundled) = find_claude_installs(&crate::user_home(), std::env::var_os("APPDATA").map(PathBuf::from), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+            for p in &cli {
+                if let Some(v) = probe_version(&[p.to_string_lossy().as_ref()], Duration::from_secs(4)) {
+                    notes.push(format!("Claude Code found at {} (it isn't on the PATH this app sees).", p.display()));
+                    version = Some(v);
+                    break;
+                }
+            }
+            if version.is_none() {
+                if let Some(p) = cli.first() {
+                    notes.push(format!("Found {} but it didn't answer `--version`.", p.display()));
+                    version = Some("Found (version unknown)".into());
+                }
+            }
+            if version.is_none() {
+                if let Some((label, p)) = bundled.first() {
+                    notes.push(format!("{label} found at {}. Hook support there is less reliable than the `claude` command line; if nothing shows up, run a session from a terminal with `claude`.", p.display()));
+                    version = Some(format!("{label} (built-in Claude Code)"));
+                }
+            }
+        }
         if !config_exists {
             for alt in Self::alternate_paths() {
                 if alt.exists() {
@@ -124,7 +189,7 @@ impl ClaudeConnector {
             }
         }
         if version.is_none() {
-            notes.push("The `claude` command wasn't found on PATH. Hooks can still be installed; they take effect when Claude Code runs.".into());
+            notes.push("The `claude` command wasn't found on PATH or in the usual install folders. Hooks can still be installed; they take effect when Claude Code runs.".into());
         }
         let hooks_installed = read_json_file(&self.settings_path).ok().flatten().map(|c| !json_hooks::owned_events(&ClaudeFormat, &c).is_empty()).unwrap_or(false);
         DetectResult {
@@ -222,4 +287,28 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     };
     ev.redact();
     Some(ev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_claude_outside_path() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let local = t.path().join("local");
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local.clone()));
+        assert!(cli.is_empty() && bundled.is_empty());
+
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/claude.exe"), b"").unwrap();
+        std::fs::create_dir_all(local.join("AnthropicClaude")).unwrap();
+        std::fs::create_dir_all(home.join(".vscode/extensions/anthropic.claude-code-2.1.0")).unwrap();
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local));
+        assert_eq!(cli, vec![home.join(".local/bin/claude.exe")]);
+        assert_eq!(bundled.len(), 2);
+        assert_eq!(bundled[0].0, "Claude desktop app");
+        assert_eq!(bundled[1].0, "Claude Code editor extension");
+    }
 }

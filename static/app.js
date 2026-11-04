@@ -573,6 +573,7 @@ function connectorCard(c) {
       <dt>Settings file</dt><dd>${det.config_path ? `<code>${esc(det.config_path)}</code>` : '—'}</dd>
     </dl>
     ${c.state_note ? `<div class="note ${c.state === 'connected' ? 'note-plain' : 'note-warn'}">${esc(c.state_note)}</div>` : ''}
+    ${(det.notes || []).length ? `<ul class="small muted conn-notes">${det.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
     <div><div class="small muted">Events available from this agent</div><ul class="cap-list">${caps}</ul></div>
     <div class="row">${buttons}</div>
     <div class="conn-out" id="conn-out-${name}"></div>

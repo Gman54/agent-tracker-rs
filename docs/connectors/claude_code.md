@@ -34,3 +34,15 @@
 - If AgentTracker isn't running, events go to `~/.agenttracker/fallback_queue.jsonl` (redacted)
   and are replayed on next start.
 - Event-to-task matching uses the agent's working folder.
+
+## How Claude Code is detected
+
+1. `claude --version` on the PATH the AgentTracker window sees.
+2. If that fails: the usual install folders — `%USERPROFILE%\.local\bin\claude.exe` (native installer),
+   `%USERPROFILE%\.claude\local\`, `%APPDATA%\npm\claude.cmd`, `%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe`.
+3. If no stand-alone `claude` is found: the Claude desktop app (`%LOCALAPPDATA%\AnthropicClaude`) or the
+   Claude Code VS Code/Cursor extension counts as "found (built-in Claude Code)".
+
+Hooks in `~/.claude/settings.json` are documented to apply to the desktop app too, but users have reported them
+not firing there (anthropics/claude-code#30953). Not verified by us either way. The `claude` command in a terminal is
+the most reliable way to get events.
