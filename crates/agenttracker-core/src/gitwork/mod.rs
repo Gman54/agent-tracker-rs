@@ -115,6 +115,18 @@ pub fn repo_display_name(root: &str) -> String {
     t.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(t).to_string()
 }
 
+/// The remote-tracking branches and the commits they point at, used to tell whether a check
+/// brought in anything new. `origin/HEAD` is left out: newer Git (2.48+, as shipped with Git for
+/// Windows) creates it on the first fetch, which isn't a change on the remote.
+pub fn remote_branch_snapshot(root: &Path) -> Vec<String> {
+    cli::run(root, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.split(' ').next().unwrap_or("").ends_with("/HEAD"))
+        .map(str::to_string)
+        .collect()
+}
+
 fn fetch_key(id: &str) -> String {
     format!("git_last_fetch:{id}")
 }
@@ -224,10 +236,9 @@ impl<'a> RepoStore<'a> {
         if cli::try_line(root, &["remote"]).is_none() {
             return Err(CoreError::Invalid("This project has no remote to check. It only lives on this computer.".into()));
         }
-        let refs = || cli::run(root, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"]).unwrap_or_default();
-        let before = refs();
+        let before = remote_branch_snapshot(root);
         cli::fetch(root, timeout)?;
-        let changed = refs() != before;
+        let changed = remote_branch_snapshot(root) != before;
         let fetched_at = crate::now_ms();
         self.db.set_setting(&fetch_key(id), &fetched_at.to_string())?;
         let message = if changed { "New changes came in from the remote." } else { "Already up to date with the remote." };

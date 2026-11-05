@@ -631,3 +631,14 @@ fn check_all_projects_checks_many_projects() {
     assert_eq!(out.up_to_date, ids.len());
     assert!(out.results.iter().all(|r| r.last_fetched_at.is_some()));
 }
+
+#[test]
+fn remote_head_pointer_is_not_a_new_change() {
+    // Newer Git creates origin/HEAD on the first fetch; that alone must not count as "new changes".
+    let p = Proj::new();
+    let before = gitwork::remote_branch_snapshot(&p.root);
+    git(&p.root, &["remote", "set-head", "origin", "main"]);
+    assert!(git(&p.root, &["for-each-ref", "refs/remotes/origin/HEAD"]).contains("origin/HEAD"));
+    assert_eq!(gitwork::remote_branch_snapshot(&p.root), before);
+    assert!(!before.is_empty());
+}
