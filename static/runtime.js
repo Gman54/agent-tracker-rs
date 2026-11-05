@@ -250,7 +250,7 @@ async function renderSession(id) {
       </div>
       <div class="card"><h3>Proposal attempts</h3>
         <table class="table"><thead><tr><th>Step</th><th>Attempt</th><th>Result</th></tr></thead><tbody>
-        ${d.attempts.map(a => `<tr><td>${esc(a.step)}</td><td>${esc(a.attempt + 1)}</td><td>${a.valid ? pill('green', 'Accepted') : `${pill('red', 'Rejected')}<div class="small muted">${esc((a.errors || []).map(e => `${e.code}: ${e.message}`).join('; '))}</div>`}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">None</td></tr>'}
+        ${d.attempts.map(a => `<tr><td>${esc(a.step)}</td><td>${esc(a.attempt + 1)}</td><td>${a.valid ? pill('green', 'Accepted') : `${pill('red', 'Rejected')}<div class="small muted">${esc((a.errors || []).map(e => `${e.code}: ${e.message}`).join('; '))}</div><details class="mt-xs"><summary class="small">What the model sent back</summary>${(a.raw_redacted || '').trim() ? `<pre class="ctx-body">${esc(a.raw_redacted)}</pre>` : '<p class="small muted">Nothing. The reply was empty.</p>'}</details>`}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">None</td></tr>'}
         </tbody></table></div>
     </div>
     <h2 class="section-title">Decisions and actions</h2>

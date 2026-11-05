@@ -182,6 +182,15 @@ impl Provider for OpenAiCompatProvider {
         for mode in modes {
             match self.post(&self.body(req, mode)) {
                 Ok(v) => {
+                    // Some servers answer HTTP 200 with an error body or an empty message (e.g. a prompt
+                    // longer than the loaded context). Treat that as a problem, not as a model reply.
+                    if let Some(problem) = empty_reply_problem(&v) {
+                        last_err = format!("{} mode: {problem}", mode_name(mode));
+                        if self.cfg.structured_mode == StructuredMode::Auto {
+                            continue;
+                        }
+                        return Err(RtError::Provider(last_err));
+                    }
                     let msg = &v["choices"][0]["message"];
                     let content = msg["content"].as_str().unwrap_or("").to_string();
                     // Servers differ: some expose `reasoning_content`, some `reasoning`, most nothing.
@@ -198,6 +207,24 @@ impl Provider for OpenAiCompatProvider {
         }
         Err(RtError::Provider(last_err))
     }
+}
+
+/// Returns a plain-language problem when a successful HTTP response carries no usable reply.
+pub fn empty_reply_problem(v: &Value) -> Option<String> {
+    if let Some(e) = v.get("error").filter(|e| !e.is_null()) {
+        let text = e.get("message").and_then(Value::as_str).map(String::from).or_else(|| e.as_str().map(String::from)).unwrap_or_else(|| e.to_string());
+        return Some(format!("the server reported an error: {}", text.chars().take(400).collect::<String>()));
+    }
+    let Some(choice) = v["choices"].get(0) else {
+        return Some("the server's answer had no reply in it".into());
+    };
+    let content = choice["message"]["content"].as_str().unwrap_or("");
+    if content.trim().is_empty() {
+        let finish = choice["finish_reason"].as_str().unwrap_or("unknown");
+        let hint = if finish == "length" { " (it ran out of room; try a larger Max output tokens or Context Length)" } else { "" };
+        return Some(format!("the model sent back an empty reply, finish reason: {finish}{hint}"));
+    }
+    None
 }
 
 pub fn mode_name(m: StructuredMode) -> &'static str {
@@ -256,5 +283,84 @@ impl Provider for ScriptedProvider {
             *c - 1
         };
         (self.script)(req, i)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    #[test]
+    fn empty_reply_problem_spots_errors_and_empty_content() {
+        assert!(empty_reply_problem(&json!({"error": "context overflow"})).unwrap().contains("context overflow"));
+        assert!(empty_reply_problem(&json!({"error": {"message": "too long"}})).unwrap().contains("too long"));
+        assert!(empty_reply_problem(&json!({"choices": []})).is_some());
+        assert!(empty_reply_problem(&json!({"choices": [{"message": {"content": "  "}, "finish_reason": "length"}]})).unwrap().contains("ran out of room"));
+        assert!(empty_reply_problem(&json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})).is_none());
+    }
+
+    /// Fake server: empty reply when `response_format` is json_schema, 400 for json_object (like LM Studio),
+    /// and a real reply with no response_format. Returns (endpoint, received modes).
+    fn fake_server(n: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let (mut s, _) = l.accept().unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() { break; }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); }
+                }
+                let mut body = vec![0; len];
+                r.read_exact(&mut body).unwrap();
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                let mode = v["response_format"]["type"].as_str().unwrap_or("none").to_string();
+                let (code, out) = match mode.as_str() {
+                    "json_schema" => (200, json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})),
+                    "json_object" => (400, json!({"error": "'response_format.type' must be 'json_schema' or 'text'"})),
+                    _ => (200, json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})),
+                };
+                seen.push(mode);
+                let b = out.to_string();
+                write!(s, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).unwrap();
+            }
+            seen
+        });
+        (format!("http://127.0.0.1:{port}/v1"), h)
+    }
+
+    fn cfg(endpoint: String, mode: StructuredMode) -> ProviderConfig {
+        ProviderConfig { kind: ProviderKind::OpenAiCompatible, endpoint, model: "m".into(), structured_mode: mode, ..Default::default() }
+    }
+
+    fn req() -> ChatRequest {
+        ChatRequest { messages: vec![ChatMessage { role: "user".into(), content: "hi".into() }], schema: json!({"type": "object"}), seed: None }
+    }
+
+    #[test]
+    fn auto_moves_past_empty_schema_reply_and_remembers_prompt_only() {
+        let (ep, h) = fake_server(4);
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::Auto)).unwrap();
+        let r = p.complete(&req()).unwrap();
+        assert_eq!(r.content, "{\"ok\":true}");
+        assert_eq!(r.structured_mode_used, "prompt_only");
+        // Second call goes straight to the mode that worked.
+        assert_eq!(p.complete(&req()).unwrap().structured_mode_used, "prompt_only");
+        assert_eq!(h.join().unwrap(), vec!["json_schema", "json_object", "none", "none"]);
+    }
+
+    #[test]
+    fn fixed_schema_mode_reports_empty_reply_plainly() {
+        let (ep, h) = fake_server(1);
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::JsonSchema)).unwrap();
+        let e = p.complete(&req()).unwrap_err().to_string();
+        assert!(e.contains("empty reply"), "{e}");
+        h.join().unwrap();
     }
 }

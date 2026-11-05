@@ -155,7 +155,7 @@ async fn session_get(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
         let decisions = store::rows(&conn, "SELECT d.id, d.step, d.kind, d.tool, d.args, d.approval_required, d.proposal, d.revises_decision_id, d.created_at, a.id AS action_id,
             (SELECT state FROM rt_action_states x WHERE x.action_id=a.id ORDER BY seq DESC LIMIT 1) AS state, (SELECT COUNT(*) FROM rt_approvals p WHERE p.decision_id=d.id) AS approved
             FROM rt_decisions d LEFT JOIN rt_actions a ON a.decision_id=d.id WHERE d.session_id=?1 ORDER BY d.created_at", &[&id])?;
-        let attempts = store::rows(&conn, "SELECT id, step, attempt, valid, errors, created_at FROM rt_proposal_attempts WHERE session_id=?1 ORDER BY created_at", &[&id])?;
+        let attempts = store::rows(&conn, "SELECT id, step, attempt, valid, errors, raw_redacted, created_at FROM rt_proposal_attempts WHERE session_id=?1 ORDER BY created_at", &[&id])?;
         let findings = store::rows(&conn, "SELECT * FROM rt_findings WHERE session_id=?1 ORDER BY created_at", &[&id])?;
         let requests = store::rows(&conn, "SELECT id, step, attempt, purpose, provider, model, model_digest, status, error, structured_output_mode, started_at, finished_at FROM rt_model_requests WHERE session_id=?1 ORDER BY started_at", &[&id])?;
         Ok(json!({"session": s, "decisions": decisions, "attempts": attempts, "findings": findings, "requests": requests}))

@@ -359,7 +359,7 @@ impl Runtime {
                 Ok(r) => r,
                 Err(e) => {
                     conn.execute("UPDATE rt_model_requests SET status='transport_error', error=?2, finished_at=?3 WHERE id=?1", params![req_id, redact_text(&e.to_string()), now_ms()])?;
-                    return Ok(StepOutcome::Paused(format!("The model provider could not be reached: {e}")));
+                    return Ok(StepOutcome::Paused(format!("The model provider did not give a usable reply: {e}")));
                 }
             };
             let tx = conn.unchecked_transaction()?;
