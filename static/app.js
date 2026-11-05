@@ -1334,6 +1334,13 @@ async function render_settings() {
       </div>
 
       <div class="card">
+        <h3>Code changes (Git)</h3>
+        <label class="toggle-row"><input type="checkbox" id="s-gittrack" ${v.git_tracking !== '0' ? 'checked' : ''}>
+          <span><b>Remember agent edits in Git projects</b><br><span class="small muted">Keeps a copy of each file just before and after the agent edits it, so Code changes can compare it with what you commit. Stays on this computer.</span></span></label>
+        <div class="row mt-xs"><button class="btn btn-primary" data-act="save-gittrack">Save</button></div>
+      </div>
+
+      <div class="card">
         <h3>Collection</h3>
         <p>${s.paused ? status('warn', 'Paused — agent messages are queued but not recorded') : status('ok', 'On: receiving agent messages')}</p>
         <button class="btn ${s.paused ? 'btn-primary' : 'btn-secondary'}" data-act="collection-toggle">${s.paused ? 'Resume collection' : 'Pause collection'}</button>
@@ -1389,6 +1396,7 @@ actions['save-retention'] = () => saveSettings({ retention_days: Number($('#s-re
 actions['save-redaction'] = () => saveSettings({ redaction_patterns: $('#s-redact').value }, 'Saved. Those phrases will be hidden from now on.');
 actions['save-startup'] = () => saveSettings({ start_with_windows: $('#s-autostart').checked, keep_in_tray: $('#s-tray').checked }, 'Startup settings saved.');
 actions['save-autotasks'] = () => saveSettings({ auto_tasks: $('#s-autotasks').checked }, 'Saved.');
+actions['save-gittrack'] = () => saveSettings({ git_tracking: $('#s-gittrack').checked }, 'Saved.');
 actions['save-export'] = () => saveSettings({ export_dir: $('#s-export').value.trim() }, 'Export folder saved.');
 actions.purge = async () => {
   if (!confirm('Delete finished tasks older than your “Keep data for” setting? Active tasks are never deleted.')) return;

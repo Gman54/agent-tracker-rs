@@ -7,6 +7,7 @@ pub mod demo;
 pub mod engine;
 pub mod event;
 pub mod fs_observer;
+pub mod gitwork;
 pub mod queue;
 pub mod report;
 pub mod server;

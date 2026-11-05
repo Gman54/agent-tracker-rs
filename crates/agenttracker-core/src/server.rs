@@ -51,6 +51,7 @@ pub const SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("auto_verify", "0"),
     ("auto_tasks", "1"),
     ("export_dir", ""),
+    ("git_tracking", "1"),
 ];
 
 impl AppState {
@@ -212,6 +213,13 @@ pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> 
         .route("/api/ui/license", post(license_set))
         .route("/api/ui/chain/verify", post(chain_verify))
         .route("/api/ui/demo", post(demo_create))
+        .route("/api/ui/git/repos", get(git_repos_list).post(git_repo_add))
+        .route("/api/ui/git/repos/:id", delete(git_repo_remove))
+        .route("/api/ui/git/repos/:id/github", post(git_repo_github))
+        .route("/api/ui/git/github-token", post(git_token_set))
+        .route("/api/ui/git/open-link", post(git_open_link))
+        .route("/api/ui/git/repos/:id/commits", get(git_commits))
+        .route("/api/ui/git/repos/:id/commits/:sha", get(git_commit_inspect))
         .merge(extra)
         .fallback(|| async { err(404, "Not found") })
         .layer(middleware::from_fn_with_state(state.clone(), guards))
@@ -236,6 +244,7 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "app.js" => (include_bytes!("../../../static/app.js"), "text/javascript; charset=utf-8"),
         "style.css" => (include_bytes!("../../../static/style.css"), "text/css; charset=utf-8"),
         "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
+        "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
         _ => return None,
     })
@@ -800,5 +809,97 @@ async fn task_live(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>
     match r {
         Ok(v) => ok(v),
         Err(resp) => resp,
+    }
+}
+
+// ---- git tracking ------------------------------------------------------------------------------------
+async fn git_repos_list(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).list()).await {
+        Ok(Ok(repos)) => j(
+            200,
+            json!({
+                "repos": repos,
+                "has_token": crate::gitwork::has_token(&st.engine.db),
+                "tracking": st.setting("git_tracking") != "0",
+            }),
+        ),
+        Ok(Err(e)) => core_err(e),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_add(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let Some(path) = body.get("path").and_then(Value::as_str).map(str::to_string) else { return err(400, "Pick a folder first") };
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).add(&path)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_remove(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).remove(&id).map(|_| json!({"removed": true})))
+}
+
+async fn git_repo_github(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>) -> Response {
+    let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).set_github(&id, enabled))
+}
+
+async fn git_token_set(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let token = body.get("token").and_then(Value::as_str).unwrap_or("");
+    if token.trim().chars().any(char::is_whitespace) {
+        return err(400, "That doesn't look like a GitHub token.");
+    }
+    match crate::gitwork::set_token(&st.engine.db, token) {
+        Ok(()) => j(200, json!({"has_token": crate::gitwork::has_token(&st.engine.db)})),
+        Err(e) => core_err(e),
+    }
+}
+
+async fn git_commits(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(50);
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::matching::list_commits(std::path::Path::new(&repo.root), limit)
+    })
+    .await
+    {
+        Ok(r) => ok(r.map(|c| json!({"commits": c}))),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_commit_inspect(State(st): State<Arc<AppState>>, UrlPath((id, sha)): UrlPath<(String, String)>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::inspect_with_github(&db, &repo, &sha)
+    })
+    .await
+    {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// Opens a GitHub page in the default browser. Only https://github.com/ links are allowed.
+async fn git_open_link(Json(body): Json<Value>) -> Response {
+    let url = body.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    let safe = url.starts_with("https://github.com/") && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains('"');
+    if !safe {
+        return err(400, "Only GitHub links can be opened from here.");
+    }
+    #[cfg(windows)]
+    let r = crate::connectors::hidden_command("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+    match r {
+        Ok(_) => j(200, json!({"opened": true})),
+        Err(e) => err(500, &format!("Couldn't open the browser: {e}")),
     }
 }

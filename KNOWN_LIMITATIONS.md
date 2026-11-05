@@ -87,3 +87,23 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
 - Influence tests replay only the decision stage, and seeds do not guarantee reproducibility.
 - The runtime enforces protected paths for its own tools only. Externally connected agents are
   still observed, not controlled.
+
+## 12. Code changes (Git tracking)
+- Only edits made with the agent's file-edit tools are attributed (Claude Code Edit/Write-style
+  tools, Cursor `afterFileEdit`, Copilot edit tools). Changes an agent makes through shell commands
+  (`sed`, `echo > file`, scripts) are not attributed to it and show up as "work from someone else".
+- A clean "before" snapshot is only taken for Claude Code (at `PreToolUse`). For other agents the
+  before text comes from what the agent reported, or is missing, and the match basis is weaker.
+- Reworded lines are matched by text similarity (60% or more). That is a judgement, not proof, and
+  the screen says so.
+- Rebase, squash, amend and cherry-pick give commits new ids. Matching still works line by line,
+  but with lower confidence.
+- "Remote branch updated" is checked against this computer's remote-tracking branches, which only
+  move when you push or fetch here, or against GitHub if you turned that on for the project.
+- "Agent ran git push" is based on the agent's own tool report. Whether it succeeded comes from the
+  exit status the agent reported.
+- Binary files and files over 512 KB are compared by Git blob id only, not line by line.
+- The GitHub token is stored in AgentTracker's local settings database without extra encryption.
+  Use a fine-grained, read-only token limited to the projects you pick.
+- GitHub links were tested against a local mock server only, not the real GitHub API. Nothing in
+  this feature has been tested with a live agent or on Windows yet.

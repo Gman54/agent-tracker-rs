@@ -564,3 +564,17 @@ input[type="number"], input[type="password"], input[type="url"] { font: inherit;
 
 .table td .btn { white-space: nowrap; }
 .table td.mono { min-width: 110px; }
+
+/* ---------- Code changes ---------- */
+.fact-card p { margin: .2em 0 .5em; }
+.fact-card details ul { margin: 6px 0 0; padding-left: 18px; }
+.edit-card ul { margin: 4px 0 0; padding-left: 18px; }
+.compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.compare-title { font-weight: 600; font-size: .88rem; margin-bottom: 4px; }
+.compare .diff { max-height: 320px; }
+.diff .diff-gap { color: var(--muted); display: block; border-top: 1px dashed var(--line); margin: 4px 0; }
+.line-proposed { background: var(--blue-soft); color: var(--blue-dark); padding: 1px 4px; border-radius: 4px; }
+.line-shipped { background: var(--mint-soft); color: var(--green); padding: 1px 4px; border-radius: 4px; }
+.m0 { margin: 0; }
+details > summary { cursor: pointer; }
+@media (max-width: 900px) { .compare { grid-template-columns: 1fr; } }

@@ -1,12 +1,14 @@
 # AgentTracker: status
 
-Last updated: 2026-11-04 (Phase 3). Every line below says exactly how far that feature has been checked.
+Last updated: 2026-11-04 (Code changes / Git tracking). Every line below says exactly how far that feature has been checked.
 "Fake-agent tested" means an automated test sends hand-built hook payloads in the documented
 format and does real file work. **No real Claude Code, Cursor or Copilot process was involved.**
 
-**Automated tests:** `cargo test --workspace` → **39 passed, 0 failed** (29 acceptance tests,
-3 core unit tests and 7 tracker-common unit tests). `cargo check --workspace` is clean. Both were
-run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
+**Automated tests:** `cargo test --workspace --exclude agenttracker` → **86 passed, 0 failed**
+(including 12 Git tracking acceptance tests, 12 core unit tests, 23 runtime tests and 7
+tracker-common unit tests). `cargo check -p agenttracker` and
+`cargo check -p agenttracker-core --target x86_64-pc-windows-gnu` are clean. All of this was run on
+Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 
 | Feature | Status | How it was checked |
 |---|---|---|
@@ -26,7 +28,7 @@ run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 | GitHub Copilot (VS Code agent) connector | Implemented, **Experimental** | 4 fake-agent tests (install idempotent, uninstall preserves unrelated, payload normalization, unsupported version). **Not live-tested** |
 | Manual mode (just a folder) | Implemented | Fake-agent tested; browser demo run end to end |
 | Codex connector | Not started | Planned post-release |
-| UI: 7 screens (Home, Connections, New Task, Live Task, Results, Saved Checks, Settings) | Implemented | Browser-verified on loopback (headless app, Chrome). No console errors. Screenshots in `docs/screenshots/` |
+| UI: 8 screens (Home, Connections, New Task, Live Task, Results, Saved Checks, Code changes, Settings) | Implemented | Browser-verified on loopback (headless app, Chrome). No console errors. Screenshots in `docs/screenshots/` (Code changes was checked separately on the headless preview; no screenshot saved) |
 | Welcome wizard (3 steps) | Implemented | Browser-verified |
 | Report export (HTML / JSON) | Implemented | API checked on loopback (200, attachment download). Not opened in a desktop download flow |
 | Create check from incident | Implemented | `/api/ui/incident/propose` maps a failed check to a saved check. API checked; returns a plain-English "nothing to turn into a rule" message for passed checks |
@@ -47,4 +49,8 @@ run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 | Runtime live model test | Partial | Ollama `qwen2.5:1.5b` (CPU): 3 runs, **no valid tool action produced**. Not supported. Other models untested |
 | Runtime with LM Studio | Not tested | No LM Studio server available in the sandbox |
 | Runtime replay key DPAPI wrapping | Written | `cfg(windows)`, **not compiled in the sandbox** |
+| Git tracking (Code changes screen): agent edits matched to commits | **Supported** (fake-agent) | The three required cases pass with real git repos and a local bare remote: agent edits and pushes, agent edits and a human pushes, a human revises the agent's edit before committing (`tests/tests/git_tracking.rs`, 12/12, 3 runs in a row). Partial staging, mixed commits, missing evidence, failed pushes and `echo git push` are also tested. Commit screen with "What the agent proposed" vs "What actually shipped" browser-verified on the headless preview. **Not live-tested with a real agent or on Windows** |
+| Four separate facts (edit attribution, commit authorship, agent ran git push, remote branch updated) | Implemented | Asserted per case in the acceptance tests; unknown stays "Unknown" / "Not seen" |
+| GitHub commit and pull request links (optional, read-only token) | Implemented | Tested against a **local mock server only** (checks the token is sent, no prompt text is sent, token not in the report). **Not tested against the real GitHub API** |
+| Open GitHub link in your browser | Implemented | **Not tested** (button not clicked in the preview; Windows `rundll32` path not run) |
 | Agent Runtime screen + "Why this action?" panel | Implemented | Browser-verified on the headless preview server; screenshots in docs/runtime/screenshots/ |

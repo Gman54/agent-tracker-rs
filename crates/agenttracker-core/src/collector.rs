@@ -171,6 +171,10 @@ impl Collector {
     pub fn accept(&self, body: &[u8]) -> Result<String> {
         let v: Value = serde_json::from_slice(body).unwrap_or_else(|e| json!({"connector": "unknown", "malformed": e.to_string()}));
         let connector = v.get("connector").and_then(Value::as_str).unwrap_or("unknown").to_string();
+        // A file's "before" state only exists right now, before the agent's edit runs.
+        if !self.is_paused() {
+            crate::gitwork::capture::pre_snapshot(&self.db, &v);
+        }
         self.queue.enqueue(&connector, &v)
     }
 
@@ -206,6 +210,7 @@ impl Collector {
                 }
                 if self.events.insert(&ev)? {
                     st.stored += 1;
+                    crate::gitwork::capture::observe(&self.db, &ev);
                     self.maybe_auto_finish(&ev);
                 } else {
                     st.duplicates += 1;

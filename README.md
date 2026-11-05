@@ -165,6 +165,24 @@ click *check it*. File checks work the same.
 ## Try it
 See [demo/README.md](demo/README.md) — **Home → Try the demo** creates everything for you.
 
+## Code changes (Git)
+See which of an agent's edits ended up in a commit, and whether they shipped as written.
+1. Open **Code changes** in the sidebar. Under **Add a project folder**, type or **Browse...** to
+   any folder inside a Git repository, then click **Add**. Edits are remembered from then on.
+2. Click the project to see its recent commits, then click a commit.
+3. The commit screen answers four questions separately: did the agent make these edits, who made
+   the commit, did the agent run `git push`, and has the remote branch got this commit. Each answer
+   says how we know, and stays "Unknown" or "Not seen" when there's no evidence.
+4. Each agent edit shows whether it shipped as is, was changed before shipping, or was left out,
+   with the decision record it came from. When someone changed it, you see "What the agent
+   proposed" next to "What actually shipped".
+
+Optional GitHub links (read-only): create a fine-grained personal access token limited to the
+repositories you want, with **Contents: Read** and **Pull requests: Read**, paste it into the
+GitHub card on the Code changes screen, then tick **Show GitHub links for ...** on each project you want.
+Only the repository name, commit ids and branch names are sent to GitHub. Prompts, reasoning records and file contents
+always stay on your computer. Tracking can be turned off in **Settings → Code changes (Git)**.
+
 ## Known limitations
 See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md): no live connector testing in the dev environment,
 Cursor and Copilot are experimental, hash chain ≠ protection from a hostile local agent, observational only,
