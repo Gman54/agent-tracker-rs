@@ -1006,3 +1006,72 @@ fn test_copilot_unsupported_version() {
     assert_eq!(fx.engine.events.count().unwrap(), 2);
     assert_eq!(fx.engine.events.by_session("cp-ok").unwrap().len(), 1);
 }
+
+/// Automatic tasks: a prompt with a working folder starts a task, and "Stop" checks it.
+#[test]
+fn automatic_task_starts_on_prompt_and_checks_on_stop() {
+    use agenttracker_core::task::Lifecycle;
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-auto", "cwd": cwd, "prompt": "Create notes.txt with a greeting"})));
+    let tasks = fx.engine.tasks.list().unwrap();
+    assert_eq!(tasks.len(), 1, "one automatic task");
+    let t = &tasks[0];
+    assert!(t.is_auto());
+    assert_eq!(t.lifecycle, Lifecycle::Running);
+    assert_eq!(t.title, "Create notes.txt with a greeting");
+
+    let file = work.join("notes.txt");
+    std::fs::write(&file, "hello").unwrap();
+    fx.deliver(claude_envelope("PostToolUse", 2_000, json!({"session_id": "s-auto", "cwd": cwd, "tool_name": "Write", "tool_input": {"file_path": file.to_string_lossy()}, "tool_response": {"success": true}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-auto", "cwd": cwd})));
+
+    let t = fx.engine.tasks.get(&t.id).unwrap();
+    assert_eq!(t.lifecycle, Lifecycle::Completed);
+    let runs = fx.engine.results.runs_for_task(&t.id).unwrap();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(status_of(run, "required_outputs_exist"), CheckStatus::Passed);
+    assert_eq!(status_of(run, "edits_inside_folder"), CheckStatus::Passed);
+    assert_eq!(status_of(run, "no_unexpected_deletions"), CheckStatus::Passed);
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Passed));
+}
+
+/// Automatic tasks: a deleted file and an edit outside the folder are both caught.
+#[test]
+fn automatic_task_catches_deletion_and_outside_edit() {
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-bad", "cwd": cwd, "prompt": "Tidy up"})));
+    std::fs::remove_file(work.join("keep.txt")).unwrap();
+    let outside = fx.dir.path().join("elsewhere.txt");
+    std::fs::write(&outside, "x").unwrap();
+    fx.deliver(claude_envelope("PostToolUse", 2_000, json!({"session_id": "s-bad", "cwd": cwd, "tool_name": "Write", "tool_input": {"file_path": outside.to_string_lossy()}, "tool_response": {"success": true}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-bad", "cwd": cwd})));
+    let t = &fx.engine.tasks.list().unwrap()[0];
+    let run = &fx.engine.results.runs_for_task(&t.id).unwrap()[0];
+    assert_eq!(status_of(run, "no_unexpected_deletions"), CheckStatus::Failed);
+    assert_eq!(status_of(run, "edits_inside_folder"), CheckStatus::Failed);
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Failed));
+}
+
+/// Automatic tasks can be turned off in Settings.
+#[test]
+fn automatic_tasks_respect_the_setting() {
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    fx.db.set_setting("auto_tasks", "0").unwrap();
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-off", "cwd": work.to_string_lossy(), "prompt": "Hi"})));
+    assert!(fx.engine.tasks.list().unwrap().is_empty());
+}

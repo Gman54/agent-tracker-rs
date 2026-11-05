@@ -125,9 +125,15 @@ pub struct TaskDefinition {
     pub session_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// "manual" (set up by the user) or "auto" (started when an agent received a prompt).
+    #[serde(default = "manual")]
+    pub origin: String,
 }
 
 impl TaskDefinition {
+    pub fn is_auto(&self) -> bool {
+        self.origin == "auto"
+    }
     pub fn folders_with(&self, role: FolderRole) -> Vec<String> {
         self.folders.iter().filter(|f| f.role == role).map(|f| f.folder_path.clone()).collect()
     }
@@ -210,7 +216,7 @@ impl TaskStore {
         let conn = self.db.conn();
         let row = conn
             .query_row(
-                "SELECT id, title, instruction, definition_version, lifecycle, created_at, updated_at, connector, session_id FROM tasks WHERE id = ?1",
+                "SELECT id, title, instruction, definition_version, lifecycle, created_at, updated_at, connector, session_id, origin FROM tasks WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
@@ -223,6 +229,7 @@ impl TaskStore {
                         r.get::<_, i64>(6)?,
                         r.get::<_, String>(7)?,
                         r.get::<_, Option<String>>(8)?,
+                        r.get::<_, String>(9)?,
                     ))
                 },
             )
@@ -257,6 +264,7 @@ impl TaskStore {
             created_at: row.5,
             updated_at: row.6,
             connector: row.7,
+            origin: row.9,
         })
     }
 
@@ -300,6 +308,12 @@ impl TaskStore {
         tx.commit()?;
         drop(conn);
         self.get(id)
+    }
+
+    /// Marks how the task was created ("manual" or "auto").
+    pub fn set_origin(&self, id: &str, origin: &str) -> Result<()> {
+        self.db.conn().execute("UPDATE tasks SET origin = ?2 WHERE id = ?1", params![id, origin])?;
+        Ok(())
     }
 
     pub fn set_session(&self, id: &str, session_id: &str) -> Result<()> {

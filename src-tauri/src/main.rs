@@ -61,7 +61,6 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
     let collector = Collector::new(&db);
     let paused = db.get_setting("paused").ok().flatten().as_deref() == Some("1");
     collector.set_paused(paused);
-    collector.spawn_worker(home.join(FALLBACK_FILE));
 
     // Never snapshot our own database or connector state. (Not the whole data dir: the demo
     // task's sample folder lives inside it and must be snapshotted.)
@@ -71,6 +70,10 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
         .chain(std::iter::once(home.clone()))
         .collect();
     let engine = Engine::new(db, excludes);
+    // Lets agent prompts start automatic tasks; the worker starts after this so queued
+    // offline events are handled the same way.
+    collector.set_engine(engine.clone());
+    collector.spawn_worker(home.join(FALLBACK_FILE));
 
     let secret = security::token_urlsafe(32);
     let discovery = CollectorDiscovery { port, secret: secret.clone(), pid: std::process::id(), started_at: tracker_common::now_ms() };

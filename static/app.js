@@ -206,7 +206,18 @@ const CHECKS = {
     desc: 'Files in a folder must match the name patterns you give.',
     params: { root: 'output', patterns: ['*.txt'], required_patterns: [], allow_other: false },
   },
+  no_unexpected_deletions: {
+    name: 'Nothing got deleted by surprise',
+    desc: 'Every file from the “before” snapshot must still be there afterwards.',
+    params: { allowed_deletions: [] },
+  },
+  edits_inside_folder: {
+    name: 'The agent only changed files in the project folder',
+    desc: 'Every file the agent said it made or edited must be inside the project folder.',
+    params: {},
+  },
 };
+const autoLabel = t => (t && t.origin === 'auto' ? 'Started automatically' : '');
 const checkName = t => (CHECKS[t] && CHECKS[t].name) || t;
 
 const EVENT_LABELS = {
@@ -443,7 +454,7 @@ function taskRow(t) {
   return `<button class="task-row" data-act="open-task" data-id="${esc(t.id)}" data-lc="${esc(t.lifecycle)}">
     <span class="task-row-main">
       <span class="task-row-title">${esc(t.title || 'Untitled task')}</span>
-      <span class="task-row-meta">${esc(connectorName(t.connector))} · updated ${esc(when(t.updated_at))}</span>
+      <span class="task-row-meta">${esc(connectorName(t.connector))}${autoLabel(t) ? ` · ${autoLabel(t)}` : ''} · updated ${esc(when(t.updated_at))}</span>
     </span>
     ${lifecyclePill(t.lifecycle)}
   </button>`;
@@ -968,7 +979,7 @@ async function render_live() {
     <div class="card card-soft">
       <div class="row">
         ${lifecyclePill(t.lifecycle)}
-        <span class="small muted">${esc(connectorName(t.connector))} · ${t.folders.map(f => esc(f.folder_path)).join(', ')}</span>
+        <span class="small muted">${esc(connectorName(t.connector))}${autoLabel(t) ? ` · ${autoLabel(t)}` : ''} · ${t.folders.map(f => esc(f.folder_path)).join(', ')}</span>
         <span class="spacer"></span>
         ${liveActions(t)}
       </div>
@@ -1094,7 +1105,7 @@ async function render_results() {
 
   screenEl.innerHTML = `
     <div class="page-head row row-between">
-      <div><h1>${esc(task.title)}</h1><p class="lead">Checked ${esc(when(run.finished_at))} · ${esc(connectorName(task.connector))}</p></div>
+      <div><h1>${esc(task.title)}</h1><p class="lead">Checked ${esc(when(run.finished_at))} · ${esc(connectorName(task.connector))}${autoLabel(task) ? ` · ${autoLabel(task)}` : ''}</p></div>
       <div class="row">
         ${tasksWithRuns.length > 1 ? taskPicker(tasksWithRuns, task.id, 'results-task') : ''}
         ${runs.length > 1 ? `<select data-change="results-run" aria-label="Choose a check run">${runs.map((r, i) => `<option value="${esc(r.id)}" ${r.id === run.id ? 'selected' : ''}>${i === 0 ? 'Latest' : 'Earlier'} check · ${esc(new Date(r.finished_at || r.started_at).toLocaleString())}</option>`).join('')}</select>` : ''}
@@ -1194,6 +1205,8 @@ function describeParams(type, p) {
     case 'inputs_preserved_in_output': return `From “${p.input || '?'}” into “${p.output || '?'}”`;
     case 'changes_within_scope': return `Allowed to change: ${list(p.allowed)}`;
     case 'folder_structure_matches': return `In “${p.root || '.'}”: ${list(p.patterns)}`;
+    case 'no_unexpected_deletions': return `Allowed to delete: ${list(p.allowed_deletions)}`;
+    case 'edits_inside_folder': return p.folder ? `Folder: ${p.folder}` : 'Folder: the project folder';
     default: return JSON.stringify(p);
   }
 }
@@ -1314,6 +1327,13 @@ async function render_settings() {
       </div>
 
       <div class="card">
+        <h3>Automatic tasks</h3>
+        <label class="toggle-row"><input type="checkbox" id="s-autotasks" ${v.auto_tasks !== '0' ? 'checked' : ''}>
+          <span><b>Start a task automatically when I give an agent a job</b><br><span class="small muted">Takes a “before” snapshot of the folder the agent works in, then checks the result when the agent says it’s done. You can still set up a task yourself for stricter rules.</span></span></label>
+        <div class="row mt-xs"><button class="btn btn-primary" data-act="save-autotasks">Save</button></div>
+      </div>
+
+      <div class="card">
         <h3>Collection</h3>
         <p>${s.paused ? status('warn', 'Paused — agent messages are queued but not recorded') : status('ok', 'On: receiving agent messages')}</p>
         <button class="btn ${s.paused ? 'btn-primary' : 'btn-secondary'}" data-act="collection-toggle">${s.paused ? 'Resume collection' : 'Pause collection'}</button>
@@ -1368,6 +1388,7 @@ async function saveSettings(obj, okMsg) {
 actions['save-retention'] = () => saveSettings({ retention_days: Number($('#s-retention').value) }, 'Saved. Data will be retained for that period.');
 actions['save-redaction'] = () => saveSettings({ redaction_patterns: $('#s-redact').value }, 'Saved. Those phrases will be hidden from now on.');
 actions['save-startup'] = () => saveSettings({ start_with_windows: $('#s-autostart').checked, keep_in_tray: $('#s-tray').checked }, 'Startup settings saved.');
+actions['save-autotasks'] = () => saveSettings({ auto_tasks: $('#s-autotasks').checked }, 'Saved.');
 actions['save-export'] = () => saveSettings({ export_dir: $('#s-export').value.trim() }, 'Export folder saved.');
 actions.purge = async () => {
   if (!confirm('Delete finished tasks older than your “Keep data for” setting? Active tasks are never deleted.')) return;

@@ -49,6 +49,7 @@ pub const SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("start_with_windows", "0"),
     ("keep_in_tray", "1"),
     ("auto_verify", "0"),
+    ("auto_tasks", "1"),
     ("export_dir", ""),
 ];
 
