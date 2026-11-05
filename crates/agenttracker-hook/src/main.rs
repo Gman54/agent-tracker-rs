@@ -8,6 +8,10 @@
 //! 4. If the collector is unreachable, appends the (redacted) envelope to
 //!    ~/.agenttracker/fallback_queue.jsonl.
 //! 5. Always exits 0 and prints nothing to stdout, so it never blocks or alters agent work.
+//!
+//! On Windows this is a GUI-subsystem program so no console window flashes each time an
+//! agent runs a hook. Piped stdin/stdout from the agent still work as normal.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -103,7 +107,8 @@ fn main() {
     let args = match parse_args() {
         Ok(a) => a,
         Err(version) => {
-            println!("{version}");
+            // Never panic if there is no stdout (e.g. started without a console).
+            let _ = writeln!(std::io::stdout(), "{version}");
             return;
         }
     };

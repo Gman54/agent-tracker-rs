@@ -629,7 +629,7 @@ fn apply_autostart(enabled: bool) -> std::result::Result<(), String> {
     {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut cmd = std::process::Command::new("reg");
+        let mut cmd = crate::connectors::hidden_command("reg");
         if enabled {
             cmd.args(["add", key, "/v", "AgentTracker", "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
         } else {
