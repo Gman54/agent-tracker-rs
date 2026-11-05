@@ -665,3 +665,49 @@ fn local_by_default_endpoint_policy() {
     assert!(c.validate().is_ok());
     assert!(!serde_json::to_string(&agenttracker_runtime::config::ProviderConfig { api_key: Some("secret".into()), ..Default::default() }).unwrap().contains("secret"));
 }
+
+/// Regression: opening a session page used to read settings while still holding the database lock,
+/// which deadlocked that request and every later one (the whole app froze). Serves the real runtime
+/// routes on a local port and requires the session page, a second visit and the settings to answer
+/// within 10 seconds each, so a deadlock fails the test instead of hanging it.
+#[test]
+fn session_page_answers_and_does_not_freeze_later_requests() {
+    use agenttracker_core::collector::Collector;
+    use agenttracker_core::engine::Engine;
+    use agenttracker_core::server::AppState;
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = Db::open(&data.path().join("agenttracker.db")).unwrap();
+    // One finished Demo A session to open.
+    let (_dir, s) = demo::prepare(data.path(), Demo::A).unwrap();
+    let rt = rt_with(&db, demo::fixture_provider(Demo::A));
+    let sid = rt.start_task(&s).unwrap().session_id;
+    rt.run(&sid).unwrap();
+
+    let collector = Collector::new(&db);
+    let engine = Engine::new(db, vec![data.path().join("agenttracker.db"), home.clone()]);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = AppState::new(engine, collector, port, None, "test-secret".into(), None, data.path().to_path_buf(), home);
+    // The runtime routes alone (the core server's login/CSRF guards are not under test here).
+    let app = agenttracker_runtime::http::routes().with_state(state);
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async move {
+            axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), app).await.unwrap();
+        });
+    });
+
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+    let get = |path: &str| -> Value {
+        agent.get(&format!("http://127.0.0.1:{port}{path}")).call().unwrap_or_else(|e| panic!("GET {path} did not answer within 10 s: {e}")).into_json().unwrap()
+    };
+    let first = get(&format!("/api/ui/runtime/sessions/{sid}"));
+    assert_eq!(first["session"]["id"], sid.as_str());
+    assert_eq!(first["model_context_tokens"], 8192);
+    let second = get(&format!("/api/ui/runtime/sessions/{sid}"));
+    assert_eq!(second["session"]["id"], sid.as_str());
+    let cfg = get("/api/ui/runtime/config");
+    assert_eq!(cfg["config"]["provider"]["model_context_tokens"], 8192);
+}
