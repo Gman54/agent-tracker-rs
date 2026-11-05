@@ -630,6 +630,32 @@ fn path_confinement_rejects_escapes() {
 }
 
 #[test]
+fn context_length_setting_defaults_round_trips_and_is_clamped() {
+    use agenttracker_runtime::http::load_config;
+    let db = Db::open_in_memory().unwrap();
+    // A config saved before the setting existed loads with 8,192.
+    let mut old = serde_json::to_value(RuntimeConfig::default()).unwrap();
+    old["provider"].as_object_mut().unwrap().remove("model_context_tokens");
+    old["provider"]["model"] = json!("qwen2.5-coder-7b-instruct");
+    db.set_setting("rt_config", &old.to_string()).unwrap();
+    let c = load_config(&db);
+    assert_eq!(c.provider.model_context_tokens, 8192);
+    assert_eq!(c.provider.model, "qwen2.5-coder-7b-instruct");
+    // A new value survives save and load (same path as the settings endpoint: serde_json to the rt_config setting).
+    let mut c2 = c.clone();
+    c2.provider.model_context_tokens = 32768;
+    db.set_setting("rt_config", &serde_json::to_string(&c2).unwrap()).unwrap();
+    assert_eq!(load_config(&db).provider.model_context_tokens, 32768);
+    // Values from the form are kept in a sensible range; null means the default.
+    for (sent, got) in [(json!(100), 512), (json!(5_000_000u64), 1_048_576), (json!(16384.4), 16384), (Value::Null, 8192)] {
+        let mut v = serde_json::to_value(&c2).unwrap();
+        v["provider"]["model_context_tokens"] = sent;
+        let back: RuntimeConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.provider.model_context_tokens, got);
+    }
+}
+
+#[test]
 fn local_by_default_endpoint_policy() {
     let mut c = agenttracker_runtime::config::ProviderConfig { model: "m".into(), ..Default::default() };
     assert!(c.validate().is_ok());

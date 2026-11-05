@@ -158,7 +158,8 @@ async fn session_get(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
         let attempts = store::rows(&conn, "SELECT id, step, attempt, valid, errors, raw_redacted, created_at FROM rt_proposal_attempts WHERE session_id=?1 ORDER BY created_at", &[&id])?;
         let findings = store::rows(&conn, "SELECT * FROM rt_findings WHERE session_id=?1 ORDER BY created_at", &[&id])?;
         let requests = store::rows(&conn, "SELECT id, step, attempt, purpose, provider, model, model_digest, status, error, structured_output_mode, started_at, finished_at, json_extract(payload_redacted, '$.prompt_chars') AS prompt_chars, json_extract(settings, '$.max_tokens') AS max_tokens, response_redacted FROM rt_model_requests WHERE session_id=?1 ORDER BY started_at", &[&id])?;
-        Ok(json!({"session": s, "decisions": decisions, "attempts": attempts, "findings": findings, "requests": requests}))
+        let model_context_tokens = load_config(&st.engine.db).provider.model_context_tokens;
+        Ok(json!({"session": s, "decisions": decisions, "attempts": attempts, "findings": findings, "requests": requests, "model_context_tokens": model_context_tokens}))
     })
     .await
 }

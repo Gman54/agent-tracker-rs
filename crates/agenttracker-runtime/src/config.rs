@@ -53,6 +53,10 @@ pub struct ProviderConfig {
     /// see the provider's tokenizer; this is an application-level estimate).
     #[serde(default = "d_context_chars")]
     pub context_limit_chars: usize,
+    /// The model server's context window in tokens (LM Studio: "Context Length" on the Load tab).
+    /// Only used to warn when a prompt may not fit. Clamped to 512..=1,048,576 on load and save.
+    #[serde(default = "d_context_tokens", deserialize_with = "de_context_tokens")]
+    pub model_context_tokens: u32,
     #[serde(default = "d_timeout")]
     pub timeout_secs: u64,
     #[serde(default = "d_mode")]
@@ -66,6 +70,16 @@ fn d_max_tokens() -> u32 {
 }
 fn d_context_chars() -> usize {
     24_000
+}
+pub const MIN_CONTEXT_TOKENS: u32 = 512;
+pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
+fn d_context_tokens() -> u32 {
+    8192
+}
+/// Keeps the context length in a sensible range; accepts any number (or null, meaning the default).
+fn de_context_tokens<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let v: Option<f64> = Option::deserialize(d)?;
+    Ok(v.filter(|x| x.is_finite()).map(|x| x.round().clamp(MIN_CONTEXT_TOKENS as f64, MAX_CONTEXT_TOKENS as f64) as u32).unwrap_or_else(d_context_tokens))
 }
 fn d_timeout() -> u64 {
     300
@@ -86,6 +100,7 @@ impl Default for ProviderConfig {
             seed: None,
             max_tokens: d_max_tokens(),
             context_limit_chars: d_context_chars(),
+            model_context_tokens: d_context_tokens(),
             timeout_secs: d_timeout(),
             structured_mode: StructuredMode::Auto,
             allow_remote: false,
@@ -114,7 +129,7 @@ impl ProviderConfig {
         serde_json::json!({
             "temperature": self.temperature, "top_p": self.top_p, "seed": self.seed,
             "max_tokens": self.max_tokens, "context_limit_chars": self.context_limit_chars,
-            "timeout_secs": self.timeout_secs, "structured_mode": self.structured_mode,
+            "model_context_tokens": self.model_context_tokens, "timeout_secs": self.timeout_secs, "structured_mode": self.structured_mode,
             "auth": if self.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false) { "bearer (value not recorded)" } else { "none" },
         })
     }

@@ -171,6 +171,7 @@ async function renderProvider(body) {
         ${num('p-seed', 'Seed', p.seed, 'Seeds do not guarantee reproducible output.')}
         ${num('p-maxtok', 'Max output tokens', p.max_tokens)}
         ${num('p-ctx', 'Context limit (characters)', p.context_limit_chars)}
+        ${num('p-ctxtok', 'Context length (tokens)', p.model_context_tokens ?? 8192, "Use the same number as Context Length in LM Studio's Load tab.")}
         ${num('p-timeout', 'Request timeout (seconds)', p.timeout_secs)}
         ${num('l-retries', 'Max validation retries', lim.max_validation_retries)}
         ${num('l-steps', 'Max agent steps', lim.max_steps)}
@@ -195,7 +196,7 @@ actions.rtSave = async () => {
     ...c,
     provider: { ...c.provider, kind: $('#p-kind').value, endpoint: $('#p-endpoint').value.trim(), model: $('#p-model').value.trim(), structured_mode: $('#p-mode').value,
       temperature: numOr('#p-temp', null), top_p: numOr('#p-topp', null), seed: numOr('#p-seed', null), max_tokens: numOr('#p-maxtok', 700),
-      context_limit_chars: numOr('#p-ctx', 24000), timeout_secs: numOr('#p-timeout', 300), allow_remote: $('#p-remote').checked },
+      context_limit_chars: numOr('#p-ctx', 24000), model_context_tokens: numOr('#p-ctxtok', 8192), timeout_secs: numOr('#p-timeout', 300), allow_remote: $('#p-remote').checked },
     limits: { ...c.limits, max_validation_retries: numOr('#l-retries', 2), max_steps: numOr('#l-steps', 6), max_tool_calls: numOr('#l-tools', 4) },
     replay_capture: $('#r-capture').checked,
     replay_retention_days: numOr('#r-days', 7),
@@ -265,20 +266,24 @@ async function renderSession(id) {
     ${d.findings.length ? `<h2 class="section-title">Findings</h2>${d.findings.map(findingCard).join('')}` : ''}
     <h2 class="section-title">Model requests</h2>
     <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th>Model</th><th>Structured output</th><th>Prompt size</th><th>Status</th><th>Duration</th></tr></thead><tbody>
-      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
+      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r, d.model_context_tokens)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
     </tbody></table></div>`;
 }
-// Rough guide: about 4 characters per token. 8,192 is LM Studio's usual default Context Length.
-const CONTEXT_GUIDE_TOKENS = 8192;
-function promptSize(r) {
+// Rough guide: about 4 characters per token. The context length comes from the provider settings
+// (falls back to 8,192, LM Studio's usual default Context Length).
+const DEFAULT_CONTEXT_TOKENS = 8192;
+// "an 8,192", "an 11,000", "a 32,768": the article follows how the number is said aloud.
+const ctxArticle = n => { const lead = n.toLocaleString('en-US').split(',')[0]; return lead.startsWith('8') || lead === '11' || lead === '18' ? 'an' : 'a'; };
+function promptSize(r, contextTokens) {
+  const ctx = Number(contextTokens) > 0 ? Number(contextTokens) : DEFAULT_CONTEXT_TOKENS;
   const chars = Number(r.prompt_chars);
   if (r.prompt_chars == null || !Number.isFinite(chars)) return '<span class="muted">—</span>';
   const tokens = Math.round(chars / 4 / 100) * 100;
   const shown = tokens > 0 ? tokens : Math.max(1, Math.round(chars / 4));
   const maxTok = Number(r.max_tokens) || 0;
-  const tooLong = Math.round(chars / 4) + maxTok > CONTEXT_GUIDE_TOKENS;
+  const tooLong = Math.round(chars / 4) + maxTok > ctx;
   return `about ${shown.toLocaleString('en-US')} tokens (${chars.toLocaleString('en-US')} characters)` +
-    (tooLong ? `<div class="small mt-xs" style="color:#92400e;background:#fffbeb;border-radius:6px;padding:4px 8px">May be too long for an 8,192-token context. In LM Studio, raise Context Length.</div>` : '');
+    (tooLong ? `<div class="small mt-xs" style="color:#92400e;background:#fffbeb;border-radius:6px;padding:4px 8px">May be too long for ${ctxArticle(ctx)} ${ctx.toLocaleString('en-US')}-token context. In LM Studio, raise Context Length, then set the same number on the Model provider tab here.</div>` : '');
 }
 function replyDetails(r) {
   if (r.status === 'sent') return '';

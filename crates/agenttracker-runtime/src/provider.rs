@@ -62,6 +62,8 @@ pub struct OpenAiCompatProvider {
     info: ProviderInfo,
     /// Mode that worked last time (Auto mode remembers it per provider instance).
     learned_mode: Mutex<Option<StructuredMode>>,
+    /// Auto: set once the server refuses json_object (LM Studio does), so later calls skip it.
+    skip_json_object: std::sync::atomic::AtomicBool,
 }
 
 impl OpenAiCompatProvider {
@@ -73,6 +75,7 @@ impl OpenAiCompatProvider {
             cfg,
             agent,
             learned_mode: Mutex::new(None),
+            skip_json_object: std::sync::atomic::AtomicBool::new(false),
         };
         let (digest, details) = p.lookup_model_metadata();
         p.info.model_digest = digest;
@@ -174,7 +177,10 @@ impl Provider for OpenAiCompatProvider {
         let modes: Vec<StructuredMode> = match self.cfg.structured_mode {
             StructuredMode::Auto => match *self.learned_mode.lock().unwrap_or_else(|p| p.into_inner()) {
                 Some(m) => vec![m],
-                None => vec![StructuredMode::JsonSchema, StructuredMode::JsonObject, StructuredMode::PromptOnly],
+                None => [StructuredMode::JsonSchema, StructuredMode::JsonObject, StructuredMode::PromptOnly]
+                    .into_iter()
+                    .filter(|m| !(*m == StructuredMode::JsonObject && self.skip_json_object.load(std::sync::atomic::Ordering::Relaxed)))
+                    .collect(),
             },
             m => vec![m],
         };
@@ -211,7 +217,12 @@ impl Provider for OpenAiCompatProvider {
                     return Ok(ChatResponse { content, provider_reasoning: reasoning, structured_mode_used: mode_name(mode).into(), raw: v });
                 }
                 // 400/422: the server rejected this response_format; try the next mode.
-                Err((Some(code), m)) if code == 400 || code == 422 => last_err = format!("HTTP {code}: {m}"),
+                Err((Some(code), m)) if code == 400 || code == 422 => {
+                    if mode == StructuredMode::JsonObject && self.cfg.structured_mode == StructuredMode::Auto {
+                        self.skip_json_object.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    last_err = format!("HTTP {code}: {m}");
+                }
                 Err((code, m)) => return Err(RtError::Provider(format!("{}{m}", code.map(|c| format!("HTTP {c}: ")).unwrap_or_default()))),
             }
         }
@@ -401,6 +412,19 @@ mod tests {
         let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::Auto)).unwrap();
         assert_eq!(p.complete(&req()).unwrap().content, "Sure, here you go");
         assert_eq!(h.join().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn auto_skips_json_object_after_the_server_refuses_it() {
+        // Every mode gives text without JSON, so nothing is learned; json_object (400) is tried only once.
+        let (ep, h) = fake_server_with(5, |mode| match mode {
+            "json_object" => (400, json!({"error": "'response_format.type' must be 'json_schema' or 'text'"})),
+            _ => (200, json!({"choices": [{"message": {"content": "Sure"}, "finish_reason": "stop"}]})),
+        });
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::Auto)).unwrap();
+        p.complete(&req()).unwrap();
+        p.complete(&req()).unwrap();
+        assert_eq!(h.join().unwrap(), vec!["json_schema", "json_object", "none", "json_schema", "none"]);
     }
 
     #[test]
