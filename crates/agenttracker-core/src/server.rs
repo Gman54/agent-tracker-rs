@@ -216,6 +216,7 @@ pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> 
         .route("/api/ui/git/repos", get(git_repos_list).post(git_repo_add))
         .route("/api/ui/git/repos/:id", delete(git_repo_remove))
         .route("/api/ui/git/repos/:id/github", post(git_repo_github))
+        .route("/api/ui/git/repos/:id/fetch", post(git_repo_fetch))
         .route("/api/ui/git/github-token", post(git_token_set))
         .route("/api/ui/git/open-link", post(git_open_link))
         .route("/api/ui/git/repos/:id/commits", get(git_commits))
@@ -845,6 +846,15 @@ async fn git_repo_remove(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<S
 async fn git_repo_github(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>) -> Response {
     let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     ok(crate::gitwork::RepoStore::new(&st.engine.db).set_github(&id, enabled))
+}
+
+/// "Check the remote now": git fetch in the project (only remote-tracking branches change).
+async fn git_repo_fetch(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch(&id)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
 }
 
 async fn git_token_set(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {

@@ -100,6 +100,11 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
   but with lower confidence.
 - "Remote branch updated" is checked against this computer's remote-tracking branches, which only
   move when you push or fetch here, or against GitHub if you turned that on for the project.
+  **Check the remote now** runs `git fetch --all --prune` to refresh them. It relies on Git's own
+  saved sign-in: it never asks for a password in a terminal, but on Windows Git Credential Manager
+  may open its own sign-in window for an HTTPS remote. It stops after 2 minutes. It was tested only
+  with local bare remotes, not against github.com or on Windows. "Last checked" only counts checks
+  made from AgentTracker, not fetches you run yourself.
 - "Agent ran git push" is based on the agent's own tool report. Whether it succeeded comes from the
   exit status the agent reported.
 - Binary files and files over 512 KB are compared by Git blob id only, not line by line.

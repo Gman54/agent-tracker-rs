@@ -1,7 +1,15 @@
-//! Thin, read-only wrappers around the `git` command line. Nothing here changes a repository.
+//! Thin wrappers around the `git` command line. Everything here is read-only, except [`fetch`],
+//! which only updates the remote-tracking branches (like `origin/main`). It never touches
+//! the user's files, local branches, staging area or stash.
 use crate::{CoreError, Result};
 use sha1::{Digest, Sha1};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+/// How long "Check the remote now" waits before giving up.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Largest file we keep as text evidence.
 pub const MAX_TEXT_BYTES: usize = 512 * 1024;
@@ -30,6 +38,75 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
 /// Like [`run`] but trimmed, and None on any failure.
 pub fn try_line(dir: &Path, args: &[&str]) -> Option<String> {
     run(dir, args).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Runs `git fetch --all --prune` so the remote-tracking branches match the remotes.
+/// Never asks for a password in a terminal; gives up after `timeout`. Returns git's own output.
+pub fn fetch(dir: &Path, timeout: Duration) -> Result<String> {
+    let mut child = command(dir, &["fetch", "--all", "--prune", "--no-progress"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CoreError::Invalid(format!("Couldn't run git ({e}). Is Git installed?")))?;
+    let reader = |mut s: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let out = reader(Box::new(child.stdout.take().expect("piped stdout")));
+    let err = reader(Box::new(child.stderr.take().expect("piped stderr")));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CoreError::Invalid(format!(
+                    "Checking the remote took longer than {} seconds, so we stopped. Check your internet connection and try again.",
+                    timeout.as_secs()
+                )));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(CoreError::Invalid(format!("Couldn't run git ({e}).")))
+        }
+    };
+    let stdout = out.join().unwrap_or_default();
+    let stderr = err.join().unwrap_or_default();
+    if status.success() {
+        Ok(format!("{stdout}{stderr}").trim().to_string())
+    } else {
+        Err(CoreError::Invalid(friendly_fetch_error(&stderr)))
+    }
+}
+
+/// Turns git's fetch error into plain words, keeping git's own text at the end for reference.
+pub fn friendly_fetch_error(stderr: &str) -> String {
+    let raw = scrub(stderr.trim());
+    let l = raw.to_ascii_lowercase();
+    let plain = if ["authentication failed", "permission denied", "could not read username", "could not read password", "terminal prompts disabled", "invalid username or password", "access denied", "returned error: 403"]
+        .iter()
+        .any(|k| l.contains(k))
+    {
+        "The remote wouldn't let us in. Git needs to be signed in to this remote. Try a git fetch or git pull yourself once (that usually saves your sign-in), then check again."
+    } else if ["repository not found", "does not appear to be a git repository", "not found"].iter().any(|k| l.contains(k)) {
+        "The remote couldn't find this project. It may have been renamed, moved or deleted, or you may not have access to it."
+    } else if ["could not resolve host", "unable to access", "connection timed out", "connection refused", "network is unreachable", "failed to connect", "could not connect", "operation timed out", "no route to host"]
+        .iter()
+        .any(|k| l.contains(k))
+    {
+        "We couldn't reach the remote. Check your internet connection and try again."
+    } else {
+        "Git couldn't check the remote."
+    };
+    if raw.is_empty() {
+        plain.to_string()
+    } else {
+        format!("{plain} (Git said: {})", raw.lines().map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "))
+    }
 }
 
 /// Walks up from `path` looking for a `.git` folder or file, without starting git.
@@ -157,5 +234,17 @@ mod tests {
     fn blob_ids_match_git() {
         // `printf 'hello\n' | git hash-object --stdin`
         assert_eq!(blob_id(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a");
+    }
+
+    #[test]
+    fn fetch_errors_in_plain_words() {
+        let auth = friendly_fetch_error("fatal: could not read Username for 'https://github.com': terminal prompts disabled");
+        assert!(auth.starts_with("The remote wouldn't let us in."), "{auth}");
+        assert!(auth.contains("Git said: fatal: could not read Username"));
+        let net = friendly_fetch_error("fatal: unable to access 'https://github.com/x/y/': Could not resolve host: github.com");
+        assert!(net.starts_with("We couldn't reach the remote."), "{net}");
+        let gone = friendly_fetch_error("remote: Repository not found.\nfatal: repository 'https://github.com/x/y/' not found");
+        assert!(gone.starts_with("The remote couldn't find this project."), "{gone}");
+        assert_eq!(friendly_fetch_error(""), "Git couldn't check the remote.");
     }
 }

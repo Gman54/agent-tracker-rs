@@ -921,14 +921,14 @@ fn remote_fact(root: &Path, c: &CommitInfo) -> Fact {
         Fact {
             status: "not_observed",
             label: "No remote branch on this computer includes this commit yet.".into(),
-            evidence: vec!["Checked the remote-tracking branches on this computer. They update when you push or fetch, so a push from another computer wouldn't show here until you fetch.".into()],
+            evidence: vec!["Checked the remote-tracking branches on this computer. They update when you push or fetch, so a push from another computer won't show here until you use \"Check the remote now\".".into()],
             detail: serde_json::json!({"branches": []}),
         }
     } else {
         Fact {
             status: "confirmed",
             label: format!("The remote branch {} includes this commit.", branches.join(", ")),
-            evidence: vec![format!("Git's remote-tracking branch {} on this computer contains this commit. Git only moves it after a successful push or a fetch, so it reflects the remote as of then.", branches.join(", "))],
+            evidence: vec![format!("Git's remote-tracking branch {} on this computer contains this commit. Git only moves it after a successful push or a fetch (such as \"Check the remote now\"), so it reflects the remote as of then.", branches.join(", "))],
             detail: serde_json::json!({"branches": branches, "basis": "local_remote_tracking"}),
         }
     }

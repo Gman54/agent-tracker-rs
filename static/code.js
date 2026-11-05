@@ -140,6 +140,31 @@ changes['git-github'] = async el => {
 };
 
 // =====================================================================================================
+// Check the remote now (git fetch; only the remote-tracking branches change)
+// =====================================================================================================
+function remoteCheckBox(r) {
+  if (!r || !r.remote_url) {
+    return '<p class="small muted m0">This project has no remote, so there is nothing to check.</p>';
+  }
+  const last = r.last_fetched_at ? `Last checked: ${esc(when(r.last_fetched_at))}` : 'Not checked from here yet';
+  return `<div class="row row-between">
+      <p class="small m0"><span class="muted">${last}.</span> Checking asks the remote for its latest branches. Your files and branches are not changed.</p>
+      <button class="btn btn-secondary btn-small" data-act="git-fetch" data-id="${esc(r.id)}">Check the remote now</button>
+    </div>`;
+}
+actions['git-fetch'] = async (d, el) => {
+  const label = el.textContent;
+  el.textContent = 'Checking...';
+  try {
+    const r = await api('POST', `/api/ui/git/repos/${encodeURIComponent(d.id)}/fetch`);
+    showToast(r.message, r.changed ? 'success' : 'info');
+  } finally {
+    if (el.isConnected) el.textContent = label;
+  }
+  await RENDER.code();
+};
+
+// =====================================================================================================
 // Commits
 // =====================================================================================================
 async function renderCommits(repoId) {
@@ -151,6 +176,7 @@ async function renderCommits(repoId) {
       <h1>${esc(repoName(r))}</h1>
       <p class="lead">Pick a commit to see which agent edits are in it and how they compare with what the agent proposed.</p>
     </div>
+    <div class="card card-soft">${remoteCheckBox(r)}</div>
     <div class="card">${commits.length ? `<table class="table">
       <thead><tr><th>Commit</th><th>Author</th><th>When</th></tr></thead>
       <tbody>${commits.map(c => `
@@ -172,12 +198,13 @@ const FACT_TITLES = [
   ['remote_update', 'Does the remote branch have it?'],
 ];
 
-function factCard([key, title], f) {
+function factCard([key, title], f, repo) {
   return `
     <div class="card fact-card">
       <div class="row row-between"><h3>${esc(title)}</h3>${pill(...(FACT_PILL[f.status] || ['', f.status]))}</div>
       <p>${esc(f.label)}</p>
       ${f.evidence && f.evidence.length ? `<details class="small"><summary>How we know</summary><ul>${f.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul></details>` : ''}
+      ${key === 'remote_update' && repo && repo.remote_url ? `<div class="mt-xs">${remoteCheckBox(repo)}</div>` : ''}
     </div>`;
 }
 
@@ -261,7 +288,7 @@ async function renderCommit(repoId, sha) {
         <b>${s.other_lines}</b> come from someone else.</p>
     </div>
     <h2 class="mt">Four separate questions</h2>
-    <div class="grid-2">${FACT_TITLES.map(t => factCard(t, r.facts[t[0]])).join('')}</div>
+    <div class="grid-2">${FACT_TITLES.map(t => factCard(t, r.facts[t[0]], r.repo)).join('')}</div>
     ${ghLinks}
     <h2 class="mt">Agent edits in this commit</h2>
     ${r.edits.length ? r.edits.map(m => editCard(m, byPath[m.path])).join('')

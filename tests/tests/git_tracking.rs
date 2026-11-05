@@ -413,3 +413,101 @@ fn repo_store_rejects_non_repos_and_dedupes() {
     RepoStore::new(&p.fx.db).remove(&a.id).unwrap();
     assert!(RepoStore::new(&p.fx.db).list().unwrap().is_empty());
 }
+
+// ---- "Check the remote now" (git fetch) -----------------------------------------------------------
+
+#[test]
+fn check_remote_now_picks_up_a_push_made_elsewhere() {
+    let p = Proj::new();
+    // A commit made here but pushed from another computer (a second clone).
+    std::fs::write(p.root.join("notes.txt"), "todo\ndone\n").unwrap();
+    git(&p.root, &["commit", "-q", "-am", "notes"]);
+    let sha = p.head();
+    let other = p.fx.dir.path().join("other");
+    git(p.fx.dir.path(), &["clone", "-q", p.fx.dir.path().join("remote.git").to_str().unwrap(), other.to_str().unwrap()]);
+    git(&other, &["fetch", "-q", p.root.to_str().unwrap(), "main"]);
+    git(&other, &["push", "-q", "origin", "FETCH_HEAD:main"]);
+
+    let repo = p.repo();
+    assert_eq!(repo.last_fetched_at, None);
+    let before = p.report();
+    assert_eq!(before.facts.remote_update.status, "not_observed", "{:?}", before.facts.remote_update);
+    assert!(before.facts.remote_update.evidence.iter().any(|e| e.contains("Check the remote now")));
+
+    let store = RepoStore::new(&p.fx.db);
+    let out = store.fetch(&repo.id).expect("fetch");
+    assert!(out.changed);
+    assert_eq!(out.message, "New changes came in from the remote.");
+    assert_eq!(out.repo.last_fetched_at, Some(out.fetched_at));
+    assert_eq!(store.get(&repo.id).unwrap().last_fetched_at, Some(out.fetched_at));
+    assert_eq!(store.list().unwrap()[0].last_fetched_at, Some(out.fetched_at));
+
+    let after = gitwork::inspect_with_github(&p.fx.db, &store.get(&repo.id).unwrap(), &sha).expect("inspect");
+    assert_eq!(after.facts.remote_update.status, "confirmed", "{:?}", after.facts.remote_update);
+    assert_eq!(after.repo.last_fetched_at, Some(out.fetched_at));
+    // Fetch only moved origin/main; the local branch and working files are untouched.
+    assert_eq!(p.head(), sha);
+    assert_eq!(git(&p.root, &["status", "--porcelain"]), "");
+
+    let again = store.fetch(&repo.id).expect("second fetch");
+    assert!(!again.changed);
+    assert_eq!(again.message, "Already up to date with the remote.");
+
+    // Forgetting the project also forgets when it was last checked.
+    store.remove(&repo.id).unwrap();
+    assert_eq!(p.fx.db.get_setting(&format!("git_last_fetch:{}", repo.id)).unwrap(), None);
+}
+
+#[test]
+fn check_remote_now_sees_new_branches_from_elsewhere() {
+    let p = Proj::new();
+    let other = p.fx.dir.path().join("other");
+    git(p.fx.dir.path(), &["clone", "-q", p.fx.dir.path().join("remote.git").to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join("extra.txt"), "hi\n").unwrap();
+    git(&other, &["add", "extra.txt"]);
+    git(&other, &["commit", "-q", "-m", "extra"]);
+    git(&other, &["push", "-q", "origin", "HEAD:feature"]);
+    let pushed = git(&other, &["rev-parse", "HEAD"]);
+
+    let repo = p.repo();
+    let out = RepoStore::new(&p.fx.db).fetch(&repo.id).expect("fetch");
+    assert!(out.changed);
+    assert_eq!(gitwork::matching::local_remote_branches(&p.root, &pushed), vec!["origin/feature".to_string()]);
+}
+
+#[test]
+fn check_remote_now_explains_problems_in_plain_words() {
+    let p = Proj::new();
+    let store = RepoStore::new(&p.fx.db);
+
+    // No remote at all.
+    let solo = p.fx.dir.path().join("solo");
+    std::fs::create_dir_all(&solo).unwrap();
+    git(&solo, &["init", "-q", "-b", "main"]);
+    std::fs::write(solo.join("a.txt"), "a\n").unwrap();
+    git(&solo, &["add", "a.txt"]);
+    git(&solo, &["commit", "-q", "-m", "a"]);
+    let r = store.add(solo.to_str().unwrap()).unwrap();
+    let e = store.fetch(&r.id).unwrap_err().to_string();
+    assert!(e.contains("This project has no remote to check. It only lives on this computer."), "{e}");
+    assert_eq!(store.get(&r.id).unwrap().last_fetched_at, None);
+
+    // The remote has gone away: friendly words first, git's own text after.
+    let repo = p.repo();
+    std::fs::rename(p.fx.dir.path().join("remote.git"), p.fx.dir.path().join("moved.git")).unwrap();
+    let e = store.fetch(&repo.id).unwrap_err().to_string();
+    assert!(e.contains("The remote couldn't find this project."), "{e}");
+    assert!(e.contains("Git said:"), "{e}");
+    assert_eq!(store.get(&repo.id).unwrap().last_fetched_at, None);
+
+    // A fetch that runs past the time limit is stopped. A zero limit stops even a quick local
+    // fetch, which exercises the same path as a remote that never answers.
+    std::fs::rename(p.fx.dir.path().join("moved.git"), p.fx.dir.path().join("remote.git")).unwrap();
+    let e = store.fetch_with_timeout(&repo.id, std::time::Duration::ZERO).unwrap_err().to_string();
+    assert!(e.contains("took longer than 0 seconds"), "{e}");
+
+    // The project folder was deleted.
+    std::fs::remove_dir_all(&solo).unwrap();
+    let e = store.fetch(&r.id).unwrap_err().to_string();
+    assert!(e.contains("can't be found any more"), "{e}");
+}

@@ -176,6 +176,12 @@ See which of an agent's edits ended up in a commit, and whether they shipped as 
 4. Each agent edit shows whether it shipped as is, was changed before shipping, or was left out,
    with the decision record it came from. When someone changed it, you see "What the agent
    proposed" next to "What actually shipped".
+5. If you pushed from another computer (or GitHub has changes you haven't pulled), click
+   **Check the remote now** on the commit list or next to "Does the remote branch have it?". It runs
+   `git fetch --all --prune`, which only updates Git's copy of the remote branches (like `origin/main`).
+   Your files, your branches and anything you haven't committed are left alone. The screen shows
+   when you last checked. It uses the same sign-in Git already uses on your computer; if Git can't
+   sign in, it tells you in plain words and nothing is changed. It gives up after 2 minutes.
 
 Optional GitHub links (read-only): create a fine-grained personal access token limited to the
 repositories you want, with **Contents: Read** and **Pull requests: Read**, paste it into the

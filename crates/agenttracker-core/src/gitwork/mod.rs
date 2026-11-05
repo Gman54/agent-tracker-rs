@@ -26,6 +26,22 @@ pub struct Repo {
     pub github_repo: Option<String>,
     pub github_enabled: bool,
     pub added_at: i64,
+    /// When "Check the remote now" last finished successfully (ms), if ever.
+    pub last_fetched_at: Option<i64>,
+}
+
+/// Result of "Check the remote now".
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchOutcome {
+    /// True when any remote-tracking branch moved, appeared or disappeared.
+    pub changed: bool,
+    pub message: String,
+    pub fetched_at: i64,
+    pub repo: Repo,
+}
+
+fn fetch_key(id: &str) -> String {
+    format!("git_last_fetch:{id}")
 }
 
 fn row_to_repo(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
@@ -38,6 +54,7 @@ fn row_to_repo(r: &rusqlite::Row) -> rusqlite::Result<Repo> {
         github_repo: r.get(5)?,
         github_enabled: r.get::<_, i64>(6)? != 0,
         added_at: r.get(7)?,
+        last_fetched_at: None,
     })
 }
 
@@ -97,15 +114,49 @@ impl<'a> RepoStore<'a> {
     pub fn list(&self) -> Result<Vec<Repo>> {
         let conn = self.db.conn();
         let mut st = conn.prepare(&format!("SELECT {COLS} FROM git_repos ORDER BY added_at"))?;
-        let rows = st.query_map([], row_to_repo)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = st.query_map([], row_to_repo)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(st);
+        drop(conn);
+        for r in &mut rows {
+            self.fill_fetched(r);
+        }
         Ok(rows)
     }
 
+    fn fill_fetched(&self, r: &mut Repo) {
+        r.last_fetched_at = self.db.get_setting(&fetch_key(&r.id)).ok().flatten().and_then(|v| v.parse().ok());
+    }
+
     pub fn get(&self, id: &str) -> Result<Repo> {
-        let conn = self.db.conn();
-        conn.query_row(&format!("SELECT {COLS} FROM git_repos WHERE id=?1"), [id], row_to_repo)
-            .optional()?
-            .ok_or_else(|| CoreError::NotFound(format!("repository {id}")))
+        let found = self.db.conn().query_row(&format!("SELECT {COLS} FROM git_repos WHERE id=?1"), [id], row_to_repo).optional()?;
+        let mut r = found.ok_or_else(|| CoreError::NotFound(format!("repository {id}")))?;
+        self.fill_fetched(&mut r);
+        Ok(r)
+    }
+
+    /// "Check the remote now": runs `git fetch --all --prune` in the project. Only the
+    /// remote-tracking branches change; the user's files and branches are left alone.
+    pub fn fetch(&self, id: &str) -> Result<FetchOutcome> {
+        self.fetch_with_timeout(id, cli::FETCH_TIMEOUT)
+    }
+
+    pub fn fetch_with_timeout(&self, id: &str, timeout: std::time::Duration) -> Result<FetchOutcome> {
+        let repo = self.get(id)?;
+        let root = Path::new(&repo.root);
+        if !root.is_dir() {
+            return Err(CoreError::Invalid("This project's folder can't be found any more. It may have been moved or deleted.".into()));
+        }
+        if cli::try_line(root, &["remote"]).is_none() {
+            return Err(CoreError::Invalid("This project has no remote to check. It only lives on this computer.".into()));
+        }
+        let refs = || cli::run(root, &["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"]).unwrap_or_default();
+        let before = refs();
+        cli::fetch(root, timeout)?;
+        let changed = refs() != before;
+        let fetched_at = crate::now_ms();
+        self.db.set_setting(&fetch_key(id), &fetched_at.to_string())?;
+        let message = if changed { "New changes came in from the remote." } else { "Already up to date with the remote." };
+        Ok(FetchOutcome { changed, message: message.into(), fetched_at, repo: self.get(id)? })
     }
 
     /// Forgets the repository in AgentTracker only; the folder itself is untouched.
@@ -114,6 +165,7 @@ impl<'a> RepoStore<'a> {
         if n == 0 {
             return Err(CoreError::NotFound(format!("repository {id}")));
         }
+        self.db.conn().execute("DELETE FROM settings WHERE key=?1", [fetch_key(id)])?;
         Ok(())
     }
 
