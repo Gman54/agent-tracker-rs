@@ -52,7 +52,9 @@ async function renderProjects() {
     ${d.tracking ? '' : `<div class="note note-warn mb-sm">Recording agent edits for Git is turned off, so new edits won't show up here.
       <button class="btn btn-small btn-secondary" data-act="git-tracking-on">Turn it on</button></div>`}
     <div class="card">
-      <div class="card-head"><h3>Your projects</h3></div>
+      <div class="card-head row row-between"><h3>Your projects</h3>
+        ${repos.length ? `<button class="btn btn-secondary btn-small" data-act="git-fetch-all" data-count="${repos.length}">Check all projects</button>` : ''}</div>
+      ${repos.length ? checkAllBox(repos) : ''}
       ${repos.length ? `<div class="task-list">${repos.map(projectRow).join('')}</div>`
         : emptyState('box', 'No projects yet', 'Add the folder of a project that uses Git. AgentTracker will remember edits your agent makes there from now on.')}
       <label class="field mt"><span class="field-label">Add a project folder</span>
@@ -81,6 +83,7 @@ function projectRow(r) {
         <div class="task-row-title">${esc(repoName(r))}</div>
         <div class="task-row-meta mono">${esc(r.root)}</div>
         <div class="task-row-meta">${r.remote_url ? `Remote: ${esc(r.remote_url)}` : 'No remote'}</div>
+        ${r.remote_url ? `<div class="task-row-meta">${r.last_fetched_at ? `Last checked: ${esc(when(r.last_fetched_at))}` : 'Not checked from here yet'}</div>` : ''}
         ${gh ? `<label class="toggle-row small"><input type="checkbox" data-change="git-github" data-id="${esc(r.id)}" ${r.github_enabled ? 'checked' : ''}>
           <span>Show GitHub links for <b>${esc(gh)}</b></span></label>` : ''}
       </div>
@@ -90,6 +93,37 @@ function projectRow(r) {
       </div>
     </div>`;
 }
+
+// "Check all projects": the last result stays on screen until the page is left.
+let lastCheckAll = null;
+const CHECK_PILL = {
+  changed: ['green', 'New changes'],
+  up_to_date: ['blue', 'Up to date'],
+  skipped: ['', 'Only on this computer'],
+  failed: ['red', 'Couldn\'t check'],
+};
+function checkAllBox(repos) {
+  if (!lastCheckAll) {
+    return '<p class="small muted mt-xs">"Check all projects" asks every project\'s remote for its latest branches, a few at a time. Your files and branches are not changed.</p>';
+  }
+  const ids = new Set(repos.map(r => r.id));
+  const rows = lastCheckAll.results.filter(x => ids.has(x.repo_id));
+  return `<div class="card card-soft mt-xs" aria-live="polite">
+      <p class="m0"><b>${esc(lastCheckAll.summary)}</b></p>
+      <ul class="small mt-xs">${rows.map(x => `<li>${pill(...(CHECK_PILL[x.status] || ['', x.status]))} <b>${esc(x.name)}</b>: ${esc(x.message)}${x.last_fetched_at ? ` <span class="muted">(last checked ${esc(when(x.last_fetched_at))})</span>` : ''}</li>`).join('')}</ul>
+    </div>`;
+}
+actions['git-fetch-all'] = async (d, el) => {
+  const n = Number(d.count) || 0;
+  el.textContent = `Checking ${n} project${n === 1 ? '' : 's'}...`;
+  try {
+    lastCheckAll = await api('POST', '/api/ui/git/fetch-all');
+    showToast(lastCheckAll.summary, lastCheckAll.failed ? 'warn' : 'success');
+  } finally {
+    if (el.isConnected) el.textContent = 'Check all projects';
+  }
+  if ((state.param || '') === '' && location.hash.startsWith('#code')) await renderProjects();
+};
 
 actions['git-browse'] = async () => {
   const r = await api('POST', '/api/ui/pick-folder');

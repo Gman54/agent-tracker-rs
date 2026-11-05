@@ -182,6 +182,12 @@ See which of an agent's edits ended up in a commit, and whether they shipped as 
    Your files, your branches and anything you haven't committed are left alone. The screen shows
    when you last checked. It uses the same sign-in Git already uses on your computer; if Git can't
    sign in, it tells you in plain words and nothing is changed. It gives up after 2 minutes.
+6. To check every project at once, click **Check all projects** at the top of **Your projects**.
+   It checks up to 4 projects at the same time, skips projects that only live on this computer,
+   and keeps going if one project has a problem. You get a short summary (for example
+   "2 checked: 1 had new changes, 1 up to date. 1 couldn't be checked.") and a line for each
+   project with its result in plain words. "Last checked" is only updated for projects that
+   were checked successfully.
 
 Optional GitHub links (read-only): create a fine-grained personal access token limited to the
 repositories you want, with **Contents: Read** and **Pull requests: Read**, paste it into the

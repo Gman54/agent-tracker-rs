@@ -40,6 +40,81 @@ pub struct FetchOutcome {
     pub repo: Repo,
 }
 
+/// How many projects "Check all projects" checks at the same time.
+pub const FETCH_ALL_WORKERS: usize = 4;
+
+/// One project's line in "Check all projects".
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectCheck {
+    pub repo_id: String,
+    pub name: String,
+    pub root: String,
+    /// "changed", "up_to_date", "skipped" (no remote) or "failed".
+    pub status: &'static str,
+    pub message: String,
+    pub last_fetched_at: Option<i64>,
+}
+
+/// Result of "Check all projects".
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchAllOutcome {
+    pub results: Vec<ProjectCheck>,
+    pub checked: usize,
+    pub changed: usize,
+    pub up_to_date: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub summary: String,
+}
+
+impl FetchAllOutcome {
+    fn from_results(results: Vec<ProjectCheck>) -> Self {
+        let n = |s: &str| results.iter().filter(|r| r.status == s).count();
+        let (changed, up_to_date, failed, skipped) = (n("changed"), n("up_to_date"), n("failed"), n("skipped"));
+        let checked = changed + up_to_date;
+        let summary = fetch_all_summary(results.len(), checked, changed, up_to_date, failed, skipped);
+        Self { results, checked, changed, up_to_date, failed, skipped, summary }
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A short, friendly line such as "3 checked: 1 had new changes, 2 up to date. 1 couldn't be checked."
+pub fn fetch_all_summary(total: usize, checked: usize, changed: usize, up_to_date: usize, failed: usize, skipped: usize) -> String {
+    if total == 0 {
+        return "There are no projects to check yet.".into();
+    }
+    let mut out = if checked > 0 {
+        let mut parts = vec![];
+        if changed > 0 {
+            parts.push(format!("{changed} had new changes"));
+        }
+        if up_to_date > 0 {
+            parts.push(format!("{up_to_date} up to date"));
+        }
+        format!("{} checked: {}.", checked, parts.join(", "))
+    } else if failed > 0 {
+        "None could be checked.".to_string()
+    } else {
+        "Nothing needed checking.".to_string()
+    };
+    if failed > 0 {
+        out.push_str(&format!(" {} couldn't be checked.", failed));
+    }
+    if skipped > 0 {
+        out.push_str(&format!(" {} only on this computer, so skipped.", plural(skipped, "project is", "projects are")));
+    }
+    out
+}
+
+/// Last part of a project folder, for display.
+pub fn repo_display_name(root: &str) -> String {
+    let t = root.trim_end_matches(['/', '\\']);
+    t.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(t).to_string()
+}
+
 fn fetch_key(id: &str) -> String {
     format!("git_last_fetch:{id}")
 }
@@ -159,6 +234,48 @@ impl<'a> RepoStore<'a> {
         Ok(FetchOutcome { changed, message: message.into(), fetched_at, repo: self.get(id)? })
     }
 
+    /// "Check all projects": checks every project's remote. Projects without a remote are
+    /// skipped, a failure in one project never stops the others, and up to
+    /// [`FETCH_ALL_WORKERS`] projects are checked at the same time so one slow remote doesn't
+    /// hold up the rest. Each project keeps its own time limit.
+    pub fn fetch_all(&self) -> Result<FetchAllOutcome> {
+        self.fetch_all_with_timeout(cli::FETCH_TIMEOUT)
+    }
+
+    pub fn fetch_all_with_timeout(&self, timeout: std::time::Duration) -> Result<FetchAllOutcome> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        let repos = self.list()?;
+        let slots: Vec<Mutex<Option<ProjectCheck>>> = repos.iter().map(|_| Mutex::new(None)).collect();
+        let next = AtomicUsize::new(0);
+        let workers = FETCH_ALL_WORKERS.min(repos.len()).max(1);
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(repo) = repos.get(i) else { break };
+                    let check = self.check_one(repo, timeout);
+                    *slots[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(check);
+                });
+            }
+        });
+        let results: Vec<ProjectCheck> = slots.into_iter().map(|m| m.into_inner().unwrap_or_else(|p| p.into_inner()).expect("every project checked")).collect();
+        Ok(FetchAllOutcome::from_results(results))
+    }
+
+    fn check_one(&self, repo: &Repo, timeout: std::time::Duration) -> ProjectCheck {
+        let name = repo_display_name(&repo.root);
+        let mk = |status: &'static str, message: String, last: Option<i64>| ProjectCheck { repo_id: repo.id.clone(), name: name.clone(), root: repo.root.clone(), status, message, last_fetched_at: last };
+        let root = Path::new(&repo.root);
+        if root.is_dir() && cli::try_line(root, &["remote"]).is_none() {
+            return mk("skipped", "Only on this computer, so there's nothing to check.".into(), repo.last_fetched_at);
+        }
+        match self.fetch_with_timeout(&repo.id, timeout) {
+            Ok(o) => mk(if o.changed { "changed" } else { "up_to_date" }, o.message, Some(o.fetched_at)),
+            Err(e) => mk("failed", e.to_string(), repo.last_fetched_at),
+        }
+    }
+
     /// Forgets the repository in AgentTracker only; the folder itself is untouched.
     pub fn remove(&self, id: &str) -> Result<()> {
         let n = self.db.conn().execute("DELETE FROM git_repos WHERE id=?1", [id])?;
@@ -219,4 +336,20 @@ pub fn inspect_with_github(db: &Db, repo: &Repo, rev: &str) -> Result<matching::
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_all_summary_reads_naturally() {
+        assert_eq!(fetch_all_summary(4, 3, 1, 2, 1, 0), "3 checked: 1 had new changes, 2 up to date. 1 couldn't be checked.");
+        assert_eq!(fetch_all_summary(2, 2, 0, 2, 0, 0), "2 checked: 2 up to date.");
+        assert_eq!(fetch_all_summary(2, 0, 0, 0, 1, 1), "None could be checked. 1 couldn't be checked. 1 project is only on this computer, so skipped.");
+        assert_eq!(fetch_all_summary(2, 0, 0, 0, 0, 2), "Nothing needed checking. 2 projects are only on this computer, so skipped.");
+        assert_eq!(fetch_all_summary(0, 0, 0, 0, 0, 0), "There are no projects to check yet.");
+        assert_eq!(repo_display_name(r"C:\Users\Greg\proj\"), "proj");
+        assert_eq!(repo_display_name("/home/g/site"), "site");
+    }
 }

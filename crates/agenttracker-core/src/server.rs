@@ -217,6 +217,7 @@ pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> 
         .route("/api/ui/git/repos/:id", delete(git_repo_remove))
         .route("/api/ui/git/repos/:id/github", post(git_repo_github))
         .route("/api/ui/git/repos/:id/fetch", post(git_repo_fetch))
+        .route("/api/ui/git/fetch-all", post(git_fetch_all))
         .route("/api/ui/git/github-token", post(git_token_set))
         .route("/api/ui/git/open-link", post(git_open_link))
         .route("/api/ui/git/repos/:id/commits", get(git_commits))
@@ -852,6 +853,15 @@ async fn git_repo_github(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<S
 async fn git_repo_fetch(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
     let db = st.engine.db.clone();
     match blocking(move || crate::gitwork::RepoStore::new(&db).fetch(&id)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// "Check all projects": fetches every project's remote; one failure never stops the rest.
+async fn git_fetch_all(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch_all()).await {
         Ok(r) => ok(r),
         Err(resp) => resp,
     }

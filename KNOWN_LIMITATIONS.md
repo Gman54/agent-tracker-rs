@@ -105,6 +105,11 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
   may open its own sign-in window for an HTTPS remote. It stops after 2 minutes. It was tested only
   with local bare remotes, not against github.com or on Windows. "Last checked" only counts checks
   made from AgentTracker, not fetches you run yourself.
+  **Check all projects** runs the same check for every project, up to 4 at a time, each with its
+  own 2-minute limit, so with many slow remotes it can take several minutes; the screen waits
+  for all of them before showing the summary. If several projects use HTTPS remotes that need
+  signing in, Windows may show more than one Git sign-in window. The result list is kept only
+  until you leave the Code changes screen.
 - "Agent ran git push" is based on the agent's own tool report. Whether it succeeded comes from the
   exit status the agent reported.
 - Binary files and files over 512 KB are compared by Git blob id only, not line by line.

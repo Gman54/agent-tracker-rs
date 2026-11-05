@@ -511,3 +511,123 @@ fn check_remote_now_explains_problems_in_plain_words() {
     let e = store.fetch(&r.id).unwrap_err().to_string();
     assert!(e.contains("can't be found any more"), "{e}");
 }
+
+// ---- "Check all projects" -------------------------------------------------------------------------
+
+/// A one-commit repo at `dir`, optionally with an origin.
+fn small_repo(dir: &Path, origin: Option<&Path>) {
+    std::fs::create_dir_all(dir).unwrap();
+    git(dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    git(dir, &["add", "a.txt"]);
+    git(dir, &["commit", "-q", "-m", "a"]);
+    if let Some(o) = origin {
+        git(dir, &["remote", "add", "origin", o.to_str().unwrap()]);
+    }
+}
+
+#[test]
+fn check_all_projects_keeps_going_past_problems() {
+    let p = Proj::new();
+    let base = p.fx.dir.path();
+
+    // 1. "proj": someone pushed from another computer.
+    let other = base.join("other");
+    git(base, &["clone", "-q", base.join("remote.git").to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join("extra.txt"), "hi\n").unwrap();
+    git(&other, &["add", "extra.txt"]);
+    git(&other, &["commit", "-q", "-m", "extra"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let pushed = git(&other, &["rev-parse", "HEAD"]);
+
+    // 2. "tidy": already up to date with its own remote.
+    let tidy_remote = base.join("tidy.git");
+    git(base, &["init", "-q", "--bare", "-b", "main", tidy_remote.to_str().unwrap()]);
+    let tidy = base.join("tidy");
+    small_repo(&tidy, Some(&tidy_remote));
+    git(&tidy, &["push", "-q", "-u", "origin", "main"]);
+
+    // 3. "solo": no remote at all.
+    let solo = base.join("solo");
+    small_repo(&solo, None);
+
+    // 4. "broken": its remote points at a folder that doesn't exist.
+    let broken = base.join("broken");
+    small_repo(&broken, Some(&base.join("gone.git")));
+
+    let store = RepoStore::new(&p.fx.db);
+    let ids: Vec<String> = [&p.root, &tidy, &solo, &broken].iter().map(|d| store.add(d.to_str().unwrap()).unwrap().id).collect();
+
+    let out = store.fetch_all().expect("fetch all");
+    assert_eq!(out.results.len(), 4);
+    let by = |id: &str| out.results.iter().find(|r| r.repo_id == id).unwrap().clone();
+    let (a, b, c, d) = (by(&ids[0]), by(&ids[1]), by(&ids[2]), by(&ids[3]));
+    assert_eq!((a.name.as_str(), a.status), ("proj", "changed"), "{a:?}");
+    assert_eq!(a.message, "New changes came in from the remote.");
+    assert_eq!((b.name.as_str(), b.status), ("tidy", "up_to_date"), "{b:?}");
+    assert_eq!((c.name.as_str(), c.status), ("solo", "skipped"), "{c:?}");
+    assert_eq!(c.message, "Only on this computer, so there's nothing to check.");
+    assert_eq!((d.name.as_str(), d.status), ("broken", "failed"), "{d:?}");
+    assert!(d.message.contains("Git said:"), "{}", d.message);
+    assert!(!d.message.is_empty() && !d.message.starts_with("fatal"), "{}", d.message);
+
+    assert_eq!((out.checked, out.changed, out.up_to_date, out.failed, out.skipped), (2, 1, 1, 1, 1));
+    assert_eq!(out.summary, "2 checked: 1 had new changes, 1 up to date. 1 couldn't be checked. 1 project is only on this computer, so skipped.");
+
+    // "Last checked" is saved only for the projects that were really checked.
+    assert!(a.last_fetched_at.is_some() && b.last_fetched_at.is_some());
+    assert_eq!(c.last_fetched_at, None);
+    assert_eq!(d.last_fetched_at, None);
+    let saved: Vec<Option<i64>> = ids.iter().map(|id| store.get(id).unwrap().last_fetched_at).collect();
+    assert_eq!(saved, vec![a.last_fetched_at, b.last_fetched_at, None, None]);
+
+    // The push from elsewhere is now visible, and nothing local changed.
+    assert_eq!(gitwork::matching::local_remote_branches(&p.root, &pushed), vec!["origin/main".to_string()]);
+    assert_eq!(git(&p.root, &["status", "--porcelain"]), "");
+    assert_ne!(p.head(), pushed);
+
+    // Running it again: everything that can be checked is up to date.
+    let again = store.fetch_all().expect("fetch all again");
+    assert_eq!((again.checked, again.changed, again.up_to_date, again.failed, again.skipped), (2, 0, 2, 1, 1));
+}
+
+#[test]
+fn check_all_projects_handles_a_missing_folder_and_no_projects() {
+    let p = Proj::new();
+    let store = RepoStore::new(&p.fx.db);
+    let empty = store.fetch_all().expect("no projects");
+    assert!(empty.results.is_empty());
+    assert_eq!(empty.summary, "There are no projects to check yet.");
+
+    // A project whose folder was deleted counts as a problem, not as "no remote".
+    let gone = p.fx.dir.path().join("gone");
+    small_repo(&gone, Some(&p.fx.dir.path().join("remote.git")));
+    let gone_id = store.add(gone.to_str().unwrap()).unwrap().id;
+    let main_id = p.repo().id;
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    let out = store.fetch_all().expect("fetch all");
+    let g = out.results.iter().find(|r| r.repo_id == gone_id).unwrap();
+    assert_eq!(g.status, "failed");
+    assert!(g.message.contains("can't be found any more"), "{}", g.message);
+    let m = out.results.iter().find(|r| r.repo_id == main_id).unwrap();
+    assert_eq!(m.status, "up_to_date", "{m:?}");
+    assert_eq!(out.summary, "1 checked: 1 up to date. 1 couldn't be checked.");
+}
+
+#[test]
+fn check_all_projects_checks_many_projects() {
+    // More projects than workers: every one still gets exactly one result, in list order.
+    let p = Proj::new();
+    let store = RepoStore::new(&p.fx.db);
+    let mut ids = vec![p.repo().id];
+    for i in 0..(gitwork::FETCH_ALL_WORKERS + 2) {
+        let d = p.fx.dir.path().join(format!("clone{i}"));
+        git(p.fx.dir.path(), &["clone", "-q", p.fx.dir.path().join("remote.git").to_str().unwrap(), d.to_str().unwrap()]);
+        ids.push(store.add(d.to_str().unwrap()).unwrap().id);
+    }
+    let out = store.fetch_all().expect("fetch all");
+    assert_eq!(out.results.iter().map(|r| r.repo_id.clone()).collect::<Vec<_>>(), ids);
+    assert_eq!(out.up_to_date, ids.len());
+    assert!(out.results.iter().all(|r| r.last_fetched_at.is_some()));
+}
