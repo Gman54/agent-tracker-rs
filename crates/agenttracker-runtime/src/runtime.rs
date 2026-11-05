@@ -338,6 +338,7 @@ impl Runtime {
                 "exact_messages_sha256": context::messages_sha(&req_msgs),
                 "redaction_changed_payload": redaction_changed || red_req.iter().zip(&req_msgs).any(|(a, b)| a != b),
                 "capture_scope": "application-level payload only",
+                "prompt_chars": req_msgs.iter().map(|m| m.content.chars().count()).sum::<usize>(),
             });
             let captured = if self.cfg.replay_capture { self.vault.is_some() } else { false };
             {

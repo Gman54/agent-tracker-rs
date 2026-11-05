@@ -179,6 +179,8 @@ impl Provider for OpenAiCompatProvider {
             m => vec![m],
         };
         let mut last_err = String::new();
+        // Last non-empty reply without JSON, so it can still be shown (and rejected) if no mode does better.
+        let mut last_content: Option<(String, StructuredMode)> = None;
         for mode in modes {
             match self.post(&self.body(req, mode)) {
                 Ok(v) => {
@@ -193,6 +195,14 @@ impl Provider for OpenAiCompatProvider {
                     }
                     let msg = &v["choices"][0]["message"];
                     let content = msg["content"].as_str().unwrap_or("").to_string();
+                    // Auto: a reply with words but no JSON object in it means this mode isn't working
+                    // with this model; try the next one. Fixed modes hand the reply on unchanged.
+                    if self.cfg.structured_mode == StructuredMode::Auto && crate::proposal::extract_json(&content).is_err() {
+                        let preview: String = content.trim().chars().take(120).collect();
+                        last_err = format!("{} mode: the model replied without any JSON in it (\"{preview}\")", mode_name(mode));
+                        last_content = Some((content, mode));
+                        continue;
+                    }
                     // Servers differ: some expose `reasoning_content`, some `reasoning`, most nothing.
                     let reasoning = msg["reasoning_content"].as_str().or_else(|| msg["reasoning"].as_str()).filter(|s| !s.trim().is_empty()).map(String::from);
                     if self.cfg.structured_mode == StructuredMode::Auto {
@@ -204,6 +214,9 @@ impl Provider for OpenAiCompatProvider {
                 Err((Some(code), m)) if code == 400 || code == 422 => last_err = format!("HTTP {code}: {m}"),
                 Err((code, m)) => return Err(RtError::Provider(format!("{}{m}", code.map(|c| format!("HTTP {c}: ")).unwrap_or_default()))),
             }
+        }
+        if let Some((content, mode)) = last_content {
+            return Ok(ChatResponse { content, provider_reasoning: None, structured_mode_used: mode_name(mode).into(), raw: Value::Null });
         }
         Err(RtError::Provider(last_err))
     }
@@ -303,6 +316,14 @@ mod tests {
     /// Fake server: empty reply when `response_format` is json_schema, 400 for json_object (like LM Studio),
     /// and a real reply with no response_format. Returns (endpoint, received modes).
     fn fake_server(n: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        fake_server_with(n, |mode| match mode {
+            "json_schema" => (200, json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})),
+            "json_object" => (400, json!({"error": "'response_format.type' must be 'json_schema' or 'text'"})),
+            _ => (200, json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})),
+        })
+    }
+
+    fn fake_server_with(n: usize, answer: fn(&str) -> (u16, Value)) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let h = std::thread::spawn(move || {
@@ -321,11 +342,7 @@ mod tests {
                 r.read_exact(&mut body).unwrap();
                 let v: Value = serde_json::from_slice(&body).unwrap();
                 let mode = v["response_format"]["type"].as_str().unwrap_or("none").to_string();
-                let (code, out) = match mode.as_str() {
-                    "json_schema" => (200, json!({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})),
-                    "json_object" => (400, json!({"error": "'response_format.type' must be 'json_schema' or 'text'"})),
-                    _ => (200, json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})),
-                };
+                let (code, out) = answer(&mode);
                 seen.push(mode);
                 let b = out.to_string();
                 write!(s, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).unwrap();
@@ -353,6 +370,37 @@ mod tests {
         // Second call goes straight to the mode that worked.
         assert_eq!(p.complete(&req()).unwrap().structured_mode_used, "prompt_only");
         assert_eq!(h.join().unwrap(), vec!["json_schema", "json_object", "none", "none"]);
+    }
+
+    fn plain_text_then_json(mode: &str) -> (u16, Value) {
+        let content = if mode == "json_schema" { "Sure, here you go" } else { "{\"ok\":true}" };
+        (200, json!({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}))
+    }
+
+    #[test]
+    fn auto_moves_past_plain_text_reply_without_json() {
+        let (ep, h) = fake_server_with(2, plain_text_then_json);
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::Auto)).unwrap();
+        let r = p.complete(&req()).unwrap();
+        assert_eq!(r.content, "{\"ok\":true}");
+        assert_eq!(r.structured_mode_used, "json_object");
+        assert_eq!(h.join().unwrap(), vec!["json_schema", "json_object"]);
+    }
+
+    #[test]
+    fn fixed_schema_mode_passes_plain_text_on_unchanged() {
+        let (ep, h) = fake_server_with(1, plain_text_then_json);
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::JsonSchema)).unwrap();
+        assert_eq!(p.complete(&req()).unwrap().content, "Sure, here you go");
+        assert_eq!(h.join().unwrap(), vec!["json_schema"]);
+    }
+
+    #[test]
+    fn auto_hands_back_plain_text_when_no_mode_gives_json() {
+        let (ep, h) = fake_server_with(3, |_| (200, json!({"choices": [{"message": {"content": "Sure, here you go"}, "finish_reason": "stop"}]})));
+        let p = OpenAiCompatProvider::new(cfg(ep, StructuredMode::Auto)).unwrap();
+        assert_eq!(p.complete(&req()).unwrap().content, "Sure, here you go");
+        assert_eq!(h.join().unwrap().len(), 3);
     }
 
     #[test]

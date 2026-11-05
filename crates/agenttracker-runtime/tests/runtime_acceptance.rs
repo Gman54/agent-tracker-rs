@@ -92,6 +92,13 @@ fn demo_a_fixture_links_decision_to_observed_copy() {
     assert!(changes.iter().any(|c| c["rel_path"] == "organized/2026/photo.jpg" && c["change_kind"] == "added"), "{changes:?}");
     assert!(!changes.iter().any(|c| c["rel_path"] == "originals/photo.jpg"));
     assert_eq!(b["decision"]["proposal"]["stated_rationale"].as_str().unwrap().is_empty(), false);
+    // Prompt size and reply are available for the Model requests table (same query shape as http.rs).
+    let reqs = q(&db, "SELECT json_extract(payload_redacted, '$.prompt_chars') AS prompt_chars, response_redacted FROM rt_model_requests ORDER BY started_at");
+    assert!(!reqs.is_empty());
+    for r in &reqs {
+        assert!(r["prompt_chars"].as_i64().unwrap() > 0, "{r:?}");
+        assert!(r["response_redacted"]["content"].is_string(), "{r:?}");
+    }
 }
 
 #[test]

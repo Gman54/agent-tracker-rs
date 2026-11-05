@@ -264,9 +264,28 @@ async function renderSession(id) {
       </tbody></table></div>
     ${d.findings.length ? `<h2 class="section-title">Findings</h2>${d.findings.map(findingCard).join('')}` : ''}
     <h2 class="section-title">Model requests</h2>
-    <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th>Model</th><th>Structured output</th><th>Status</th><th>Duration</th></tr></thead><tbody>
-      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
+    <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th>Model</th><th>Structured output</th><th>Prompt size</th><th>Status</th><th>Duration</th></tr></thead><tbody>
+      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
     </tbody></table></div>`;
+}
+// Rough guide: about 4 characters per token. 8,192 is LM Studio's usual default Context Length.
+const CONTEXT_GUIDE_TOKENS = 8192;
+function promptSize(r) {
+  const chars = Number(r.prompt_chars);
+  if (r.prompt_chars == null || !Number.isFinite(chars)) return '<span class="muted">—</span>';
+  const tokens = Math.round(chars / 4 / 100) * 100;
+  const shown = tokens > 0 ? tokens : Math.max(1, Math.round(chars / 4));
+  const maxTok = Number(r.max_tokens) || 0;
+  const tooLong = Math.round(chars / 4) + maxTok > CONTEXT_GUIDE_TOKENS;
+  return `about ${shown.toLocaleString('en-US')} tokens (${chars.toLocaleString('en-US')} characters)` +
+    (tooLong ? `<div class="small mt-xs" style="color:#92400e;background:#fffbeb;border-radius:6px;padding:4px 8px">May be too long for an 8,192-token context. In LM Studio, raise Context Length.</div>` : '');
+}
+function replyDetails(r) {
+  if (r.status === 'sent') return '';
+  const resp = r.response_redacted;
+  const content = resp && typeof resp === 'object' ? resp.content : resp;
+  const text = typeof content === 'string' ? content : (content == null ? '' : JSON.stringify(content));
+  return `<details class="mt-xs"><summary class="small">What came back</summary>${text.trim() ? `<pre class="ctx-body">${esc(text)}</pre>` : '<p class="small muted">Nothing came back.</p>'}</details>`;
 }
 actions.rtApprove = async d => {
   const r = await api('POST', `/api/ui/runtime/decisions/${d.id}/approve`);
