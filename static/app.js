@@ -169,7 +169,7 @@ const ACTIVE = ['draft', 'baselining', 'ready', 'running', 'verifying'];
 const VERDICT = {
   passed: { cls: 'verdict-pass', icon: '✓', text: 'All required checks passed.', short: 'Passed', pill: 'green', kind: 'ok' },
   failed: { cls: 'verdict-fail', icon: '✗', text: 'One or more checks need attention.', short: 'Needs attention', pill: 'red', kind: 'bad' },
-  unable_to_verify: { cls: 'verdict-unknown', icon: '?', text: "? We couldn't confirm everything.", short: "Couldn't confirm", pill: 'amber', kind: 'warn' },
+  unable_to_verify: { cls: 'verdict-unknown', icon: '?', text: "We couldn't confirm everything.", short: "Couldn't confirm", pill: 'amber', kind: 'warn' },
 };
 const CHECK_STATUS = {
   passed: ['ok', 'Passed'],
@@ -1121,7 +1121,8 @@ async function render_results() {
         ${task.connector === 'manual' ? '<p class="muted">Manual task — no agent was listening, so there’s nothing reported.</p>'
           : agentEvents.length ? `<p>${said ? status('info', "Agent said it's done (unverified)") : status('muted', 'The agent didn’t say it was finished')}</p>
             <ul class="event-list">${agentEvents.slice(-8).reverse().map(e => `<li><b>${esc(EVENT_LABELS[e.event_type] || e.event_type)}</b> ${evSummary(e)}</li>`).join('')}</ul>`
-          : '<p class="muted">I didn’t hear anything from the agent during this task.</p>'}
+          : `<p class="muted">I didn’t hear anything from the agent during this task.</p>
+             ${task.connector === 'claude_code' ? `<p class="small muted">Claude only reports in when you use <b>Claude Code</b>: the <b>Code</b> tab in the Claude desktop app, or <code>claude</code> in a terminal. The regular Claude chat (even when it saves files to your PC) doesn’t send updates. The file checks below still show whether the job really got done.</p>` : ''}`}
       </div>
     </div>
 
