@@ -132,7 +132,11 @@ pub fn run_for_action(db: &Db, action_id: &str) -> Result<()> {
     if let Some(r) = result {
         let expected = a["proposal"]["expected_effect"].as_str().unwrap_or("").to_string();
         if r["status"] == "failed" {
-            finding(db, &sid, did.as_deref(), Some(action_id), "claimed_success_but_failed", "deterministic",
+            // Only call it a success *claim* when the model wrote that the work was already done.
+            // A plain expectation ("A copy will be created") is not a claim.
+            let rationale = a["proposal"]["stated_rationale"].as_str().unwrap_or("");
+            let check = if claims_completion(&expected) || claims_completion(rationale) { "claimed_success_but_failed" } else { "expected_success_but_failed" };
+            finding(db, &sid, did.as_deref(), Some(action_id), check, "deterministic",
                 format!("The proposal expected: \"{expected}\". The tool reported failure: {}", r["error"].as_str().unwrap_or("")), json!([{"expected_effect": expected, "tool_error": r["error"]}]))?;
         } else if tools::tool(a["tool"].as_str().unwrap_or("")).map(|t| !t.writes.is_empty()).unwrap_or(false) && changes == 0 {
             finding(db, &sid, did.as_deref(), Some(action_id), "reported_success_not_observed", "deterministic",
