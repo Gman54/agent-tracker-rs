@@ -161,7 +161,7 @@ async function renderProvider(body) {
       <div class="form-grid">
         <div class="field"><label class="field-label" for="p-kind">Provider</label><select id="p-kind">
           ${[['ollama', 'Ollama'], ['lm_studio', 'LM Studio'], ['open_ai_compatible', 'Other OpenAI-compatible']].map(([v, t]) => `<option value="${v}" ${p.kind === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
-        <div class="field"><label class="field-label" for="p-endpoint">Endpoint</label><input id="p-endpoint" type="text" value="${esc(p.endpoint)}"><span class="field-hint">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</span></div>
+        <div class="field"><label class="field-label" for="p-endpoint">Endpoint</label><input id="p-endpoint" type="text" value="${esc(p.endpoint)}"><span class="field-hint">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1 (if you leave off /v1, it's added for you)</span></div>
         <div class="field"><label class="field-label" for="p-model">Model</label><input id="p-model" type="text" value="${esc(p.model)}" list="p-models"><datalist id="p-models"></datalist></div>
         <div class="field"><label class="field-label" for="p-key">API key (optional)</label><input id="p-key" type="password" placeholder="${c.has_api_key ? 'Saved (leave blank to keep)' : 'Not required for local servers'}"></div>
         <div class="field"><label class="field-label" for="p-mode">Structured output</label><select id="p-mode">

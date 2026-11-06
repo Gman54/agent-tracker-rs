@@ -66,6 +66,15 @@ pub struct OpenAiCompatProvider {
     skip_json_object: std::sync::atomic::AtomicBool,
 }
 
+/// The API root to call. A bare server address such as `http://127.0.0.1:1234` gets `/v1`
+/// added, because LM Studio and Ollama only answer OpenAI-style calls under `/v1`
+/// (LM Studio replies "Unexpected endpoint or method" otherwise). Any explicit path is kept.
+pub fn api_base(endpoint: &str) -> String {
+    let b = endpoint.trim().trim_end_matches('/');
+    let after_scheme = b.split_once("://").map(|(_, rest)| rest).unwrap_or(b);
+    if after_scheme.contains('/') { b.to_string() } else { format!("{b}/v1") }
+}
+
 impl OpenAiCompatProvider {
     pub fn new(cfg: ProviderConfig) -> Result<Self> {
         cfg.validate()?;
@@ -84,7 +93,7 @@ impl OpenAiCompatProvider {
     }
 
     fn base(&self) -> String {
-        self.cfg.endpoint.trim_end_matches('/').to_string()
+        api_base(&self.cfg.endpoint)
     }
 
     fn native_root(&self) -> String {
@@ -316,6 +325,15 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
 
     #[test]
+    fn bare_server_address_gets_v1() {
+        assert_eq!(api_base("http://127.0.0.1:1234"), "http://127.0.0.1:1234/v1");
+        assert_eq!(api_base("http://127.0.0.1:1234/"), "http://127.0.0.1:1234/v1");
+        assert_eq!(api_base(" http://localhost:11434 "), "http://localhost:11434/v1");
+        assert_eq!(api_base("http://127.0.0.1:1234/v1/"), "http://127.0.0.1:1234/v1");
+        assert_eq!(api_base("https://example.com/openai/v1"), "https://example.com/openai/v1");
+    }
+
+    #[test]
     fn empty_reply_problem_spots_errors_and_empty_content() {
         assert!(empty_reply_problem(&json!({"error": "context overflow"})).unwrap().contains("context overflow"));
         assert!(empty_reply_problem(&json!({"error": {"message": "too long"}})).unwrap().contains("too long"));
@@ -343,6 +361,8 @@ mod tests {
                 let (mut s, _) = l.accept().unwrap();
                 let mut r = BufReader::new(s.try_clone().unwrap());
                 let mut len = 0usize;
+                let mut request_line = String::new();
+                r.read_line(&mut request_line).unwrap();
                 loop {
                     let mut line = String::new();
                     r.read_line(&mut line).unwrap();
@@ -353,7 +373,12 @@ mod tests {
                 r.read_exact(&mut body).unwrap();
                 let v: Value = serde_json::from_slice(&body).unwrap();
                 let mode = v["response_format"]["type"].as_str().unwrap_or("none").to_string();
-                let (code, out) = answer(&mode);
+                // Like LM Studio: only /v1/chat/completions is a real route.
+                let (code, out) = if request_line.starts_with("POST /v1/chat/completions ") {
+                    answer(&mode)
+                } else {
+                    (200, json!({"error": format!("Unexpected endpoint or method. ({})", request_line.trim())}))
+                };
                 seen.push(mode);
                 let b = out.to_string();
                 write!(s, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).unwrap();
@@ -386,6 +411,15 @@ mod tests {
     fn plain_text_then_json(mode: &str) -> (u16, Value) {
         let content = if mode == "json_schema" { "Sure, here you go" } else { "{\"ok\":true}" };
         (200, json!({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}))
+    }
+
+    #[test]
+    fn endpoint_typed_without_v1_still_reaches_the_model() {
+        let (ep, h) = fake_server_with(1, |_| (200, json!({"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]})));
+        let bare = ep.strip_suffix("/v1").unwrap().to_string();
+        let p = OpenAiCompatProvider::new(cfg(bare, StructuredMode::PromptOnly)).unwrap();
+        assert_eq!(p.complete(&req()).unwrap().content, "{\"ok\":true}");
+        h.join().unwrap();
     }
 
     #[test]
