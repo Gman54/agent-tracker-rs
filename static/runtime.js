@@ -248,6 +248,7 @@ async function renderSession(id) {
           ['Steps / tool calls', `${esc(s.steps_used)} / ${esc(s.tool_calls_used)}`], ['Provider', esc(`${s.provider_config.provider} · ${s.provider_config.model}`)],
           ['Model digest', `<span class="mono">${esc(s.provider_config.model_digest || 'Unavailable')}</span>`]])}
         ${s.status === 'paused' ? '<div class="row row-end mt"><button class="btn btn-secondary btn-small" data-act="rtResume" data-id="' + esc(s.id) + '">Resume</button></div>' : ''}
+        ${RETRYABLE.includes(s.status) ? retryBox(s) : ''}
       </div>
       <div class="card"><h3>Proposal attempts</h3>
         <table class="table"><thead><tr><th>Step</th><th>Attempt</th><th>Result</th></tr></thead><tbody>
@@ -268,7 +269,43 @@ async function renderSession(id) {
     <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th>Model</th><th>Structured output</th><th>Prompt size</th><th>Status</th><th>Duration</th></tr></thead><tbody>
       ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r, d.model_context_tokens)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
     </tbody></table></div>`;
+  if (RETRYABLE.includes(s.status)) fillRetryModels(s.provider_config && !s.provider_config.is_fixture ? s.provider_config.model : '');
 }
+
+// ---- Retry with this model ----
+const RETRYABLE = ['paused', 'completed', 'failed'];
+function retryBox(s) {
+  return `<div class="mt" style="border-top:1px solid #eceae4;padding-top:12px">
+    <label class="field-label" for="rt-retry-model"><b>Try a different model</b></label>
+    <p class="small muted mt-xs">Runs the same request again with a different model. Your old run stays as it is.</p>
+    <div class="mt-xs" id="rt-retry-pick"><span class="small muted"><span class="spinner"></span> Getting your models...</span></div>
+    <div class="row row-end mt-xs"><button class="btn btn-primary btn-small" data-act="rtRetry" data-id="${esc(s.id)}">Retry with this model</button></div>
+  </div>`;
+}
+async function fillRetryModels(current) {
+  if (!$('#rt-retry-pick')) return;
+  let models = [];
+  try { models = (await api('GET', '/api/ui/runtime/provider/models')).models || []; } catch (_) { models = []; }
+  const at = $('#rt-retry-pick');
+  if (!at) return; // the user moved on while the list was loading
+  if (models.length) {
+    // Start on a model other than the one this run used, since that's the point of retrying.
+    const pick = models.find(m => m !== current) || models[0];
+    at.innerHTML = `<select id="rt-retry-model" style="width:100%">${models.map(m => `<option value="${esc(m)}" ${m === pick ? 'selected' : ''}>${esc(m)}${m === current ? ' (used for this run)' : ''}</option>`).join('')}</select>`;
+  } else {
+    at.innerHTML = `<input id="rt-retry-model" type="text" style="width:100%" placeholder="Type a model name, e.g. qwen2.5-coder-7b-instruct" value="${esc(current || '')}">
+      <div class="small muted mt-xs">Couldn't get the model list from your model app, so type the name instead.</div>`;
+  }
+}
+actions.rtRetry = async d => {
+  const el = $('#rt-retry-model');
+  const model = el ? el.value.trim() : '';
+  if (!model) { showToast('Pick a model to try first.', 'warn'); return; }
+  showToast(`Starting a new run with ${model}. This can take a minute.`, 'info');
+  const r = await api('POST', `/api/ui/runtime/sessions/${encodeURIComponent(d.id)}/retry`, { model });
+  if (r.run_error) showToast(`The new run started but hit a problem: ${r.run_error}`, 'warn');
+  navigate('runtime', r.start.session_id);
+};
 // Rough guide: about 4 characters per token. The context length comes from the provider settings
 // (falls back to 8,192, LM Studio's usual default Context Length).
 const DEFAULT_CONTEXT_TOKENS = 8192;

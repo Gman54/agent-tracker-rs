@@ -638,6 +638,58 @@ fn add_item(conn: &Connection, session_id: &str, it: ContextItem) -> Result<()> 
         "produced_by_action_id": it.produced_by_action_id, "created_at": now_ms()}))
 }
 
+/// Statuses a session may be retried from: paused, or finished (completed / failed).
+pub const RETRYABLE_STATUSES: &[&str] = &["paused", "completed", "failed"];
+
+/// Builds the task spec for "Retry with this model": the same request, protected paths and
+/// documents as `session_id`, linked to it through `parent_session_id`. Nothing is written.
+/// A built-in demo (title matches and its folder is under `demo_base`) gets a fresh demo folder,
+/// so the retry starts from the same files the first run did. Other tasks reuse their folder as it is now.
+pub fn retry_spec(db: &Db, session_id: &str, demo_base: Option<&Path>) -> Result<TaskSpec> {
+    let conn = db.conn();
+    let s = store::row(&conn, "SELECT s.status, t.title, t.instruction, t.working_dir, t.protected_paths FROM rt_sessions s JOIN rt_tasks t ON t.id=s.task_id WHERE s.id=?1", &[&session_id])?
+        .ok_or_else(|| RtError::NotFound("this run".into()))?;
+    let status = s["status"].as_str().unwrap_or("");
+    if !RETRYABLE_STATUSES.contains(&status) {
+        let why = match status {
+            "running" => "This run is still going. Wait for it to stop, then try again.",
+            "awaiting_approval" => "This run is waiting for your approval. Approve it or let it finish first.",
+            _ => "This run can only be retried once it has paused or finished.",
+        };
+        return Err(RtError::Invalid(why.into()));
+    }
+    let title = s["title"].as_str().unwrap_or("").to_string();
+    let working_dir = PathBuf::from(s["working_dir"].as_str().unwrap_or(""));
+    let (items, _) = load_items(&conn, session_id)?;
+    drop(conn);
+    let parent = Some(session_id.to_string());
+    if let Some(base) = demo_base {
+        let in_base = match (working_dir.canonicalize(), base.canonicalize()) {
+            (Ok(w), Ok(b)) => w.starts_with(b),
+            _ => working_dir.starts_with(base),
+        };
+        for which in [crate::demo::Demo::A, crate::demo::Demo::B] {
+            if in_base && title == crate::demo::title(which) {
+                let (_, mut spec) = crate::demo::prepare(base, which)?;
+                spec.parent_session_id = parent;
+                return Ok(spec);
+            }
+        }
+    }
+    // The exact request (if still in memory), otherwise the stored, redacted copy.
+    let instruction = items.iter().find(|i| i.label == "instruction_2").map(|i| i.content.clone()).unwrap_or_else(|| s["instruction"].as_str().unwrap_or("").to_string());
+    let protected_paths = s["protected_paths"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+    let documents = items
+        .iter()
+        .filter(|i| i.kind == "evidence" && i.role == "retrieved" && i.produced_by_action_id.is_none() && i.source.starts_with("Document "))
+        .filter_map(|i| {
+            let path = i.source_ref.clone()?;
+            Some(DocSpec { path, trust: i.trust.clone(), max_chars: i.content.chars().count().max(d_doc_chars()) })
+        })
+        .collect();
+    Ok(TaskSpec { title, instruction, working_dir, protected_paths, documents, idempotency_key: None, parent_session_id: parent })
+}
+
 /// Loads a session's items in creation order. Returns (items, [(label,id)] whose exact content is unavailable).
 pub(crate) fn load_items(conn: &Connection, session_id: &str) -> Result<(Vec<ContextItem>, Vec<(String, String)>)> {
     let rows = store::rows(conn, "SELECT * FROM rt_context_items WHERE session_id=?1 ORDER BY created_at, rowid", &[&session_id])?;

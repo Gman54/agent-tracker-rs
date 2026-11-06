@@ -27,9 +27,11 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/ui/runtime/config", get(config_get).post(config_set))
         .route("/api/ui/runtime/provider/test", post(provider_test))
+        .route("/api/ui/runtime/provider/models", get(provider_models))
         .route("/api/ui/runtime/sessions", get(sessions_list))
         .route("/api/ui/runtime/sessions/:id", get(session_get))
         .route("/api/ui/runtime/sessions/:id/resume", post(session_resume))
+        .route("/api/ui/runtime/sessions/:id/retry", post(session_retry))
         .route("/api/ui/runtime/tasks", post(task_start))
         .route("/api/ui/runtime/decisions/:id/approve", post(decision_approve))
         .route("/api/ui/runtime/decisions/:id/why", get(decision_why))
@@ -83,7 +85,16 @@ fn vault(st: &AppState, cfg: &RuntimeConfig) -> Option<Arc<ReplayVault>> {
 }
 
 fn live_runtime(st: &AppState) -> crate::Result<Runtime> {
-    let cfg = load_config(&st.engine.db);
+    live_runtime_with_model(st, None)
+}
+
+/// Like `live_runtime`, but `model` (when given) replaces the saved model for this runtime only.
+/// The saved provider settings are not changed.
+fn live_runtime_with_model(st: &AppState, model: Option<&str>) -> crate::Result<Runtime> {
+    let mut cfg = load_config(&st.engine.db);
+    if let Some(m) = model {
+        cfg.provider.model = m.to_string();
+    }
     let provider: Arc<dyn Provider> = Arc::new(OpenAiCompatProvider::new(cfg.provider.clone())?);
     let v = vault(st, &cfg);
     Ok(Runtime::new(st.engine.db.clone(), provider, cfg, v))
@@ -199,9 +210,66 @@ async fn task_start(State(st): St, Json(t): Json<TaskIn>) -> Response {
     .await
 }
 
+/// The live model a session was started with, so Resume and Approve keep using it (a retried run
+/// keeps its chosen model). Fixture/simulated sessions and older records fall back to the saved model.
+fn session_model(db: &Db, session_id: &str) -> Option<String> {
+    let conn = db.conn();
+    let pc: String = conn.query_row("SELECT provider_config FROM rt_sessions WHERE id=?1", [session_id], |r| r.get(0)).ok()?;
+    drop(conn);
+    let v: Value = serde_json::from_str(&pc).ok()?;
+    if v["is_fixture"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    v["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(String::from)
+}
+
+fn runtime_for_session(st: &AppState, session_id: &str) -> crate::Result<Runtime> {
+    let model = session_model(&st.engine.db, session_id);
+    live_runtime_with_model(st, model.as_deref())
+}
+
+async fn provider_models(State(st): St) -> Response {
+    blocking(move || {
+        let mut probe = load_config(&st.engine.db).provider;
+        if probe.model.trim().is_empty() {
+            probe.model = "(none)".into();
+        }
+        let models: Vec<String> = OpenAiCompatProvider::new(probe)?.list_models()?.into_iter().filter(|m| !m.contains("embed")).collect();
+        Ok(json!({"models": models}))
+    })
+    .await
+}
+
+#[derive(Deserialize, Default)]
+struct RetryIn {
+    #[serde(default)]
+    model: String,
+}
+
+/// "Retry with this model": starts a NEW session with the same request (fresh folder for the
+/// built-in demos) and runs it with `model` for that run only. The old session is not modified.
+async fn session_retry(State(st): St, UrlPath(id): UrlPath<String>, body: Option<Json<RetryIn>>) -> Response {
+    let model = body.map(|b| b.0.model).unwrap_or_default().trim().to_string();
+    blocking(move || {
+        if model.is_empty() {
+            return Err(RtError::Invalid("Pick a model to try first.".into()));
+        }
+        let spec = crate::runtime::retry_spec(&st.engine.db, &id, Some(&st.agenttracker_home.join("runtime-demos")))?;
+        let rt = live_runtime_with_model(&st, Some(&model))?;
+        let out = rt.start_task(&spec)?;
+        // The new run exists from here on; report a run problem alongside its id instead of losing it.
+        let (status, run_error) = match rt.run(&out.session_id) {
+            Ok(s) => (serde_json::to_value(s)?, Value::Null),
+            Err(e) => (Value::Null, json!(e.to_string())),
+        };
+        Ok(json!({"start": out, "status": status, "run_error": run_error, "model": model, "retried_from": id}))
+    })
+    .await
+}
+
 async fn session_resume(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
     blocking(move || {
-        let rt = live_runtime(&st)?;
+        let rt = runtime_for_session(&st, &id)?;
         st.engine.db.conn().execute("UPDATE rt_sessions SET status='running' WHERE id=?1 AND status='paused'", [&id])?;
         Ok(json!({"status": rt.run(&id)?}))
     })
@@ -210,9 +278,9 @@ async fn session_resume(State(st): St, UrlPath(id): UrlPath<String>) -> Response
 
 async fn decision_approve(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
     blocking(move || {
-        let rt = live_runtime(&st)?;
-        let approval = rt.approve(&id, "local user (AgentTracker UI)")?;
         let sid: String = st.engine.db.conn().query_row("SELECT session_id FROM rt_decisions WHERE id=?1", [&id], |r| r.get(0))?;
+        let rt = runtime_for_session(&st, &sid)?;
+        let approval = rt.approve(&id, "local user (AgentTracker UI)")?;
         Ok(json!({"approval_id": approval, "status": rt.run(&sid)?}))
     })
     .await

@@ -734,3 +734,170 @@ fn session_page_answers_and_does_not_freeze_later_requests() {
     let cfg = get("/api/ui/runtime/config");
     assert_eq!(cfg["config"]["provider"]["model_context_tokens"], 8192);
 }
+
+/// A tiny stand-in for LM Studio: answers /v1/models and /v1/chat/completions on a local port and
+/// records which model each chat request asked for. Every chat reply is a valid final response.
+fn fake_lm_studio() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut first = String::new();
+            r.read_line(&mut first).unwrap();
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap() == 0 || line.trim().is_empty() { break; }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); }
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            let out = if !first.contains("/chat/completions") {
+                // /v1/models and LM Studio's /api/v0/models both get the model list.
+                json!({"object": "list", "data": [{"id": "old-model"}, {"id": "new-model"}]})
+            } else {
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                seen2.lock().unwrap().push(v["model"].as_str().unwrap_or("").to_string());
+                json!({"choices": [{"message": {"role": "assistant", "content": proposal(&["instruction_2"], &[], Value::Null)}, "finish_reason": "stop"}]})
+            };
+            let b = out.to_string();
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len());
+        }
+    });
+    (format!("http://127.0.0.1:{port}/v1"), seen)
+}
+
+/// "Retry with this model": a new session with the same request and the chosen model recorded;
+/// the old session and the saved model setting stay exactly as they were.
+#[test]
+fn retry_with_another_model_starts_a_new_session_and_leaves_the_old_one_alone() {
+    use agenttracker_core::collector::Collector;
+    use agenttracker_core::engine::Engine;
+    use agenttracker_core::server::AppState;
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().join("home");
+    let demos = home.join("runtime-demos");
+    std::fs::create_dir_all(&demos).unwrap();
+    let db = Db::open(&data.path().join("agenttracker.db")).unwrap();
+    let (lm, seen) = fake_lm_studio();
+    // Saved settings point at the fake LM Studio with "old-model".
+    let mut cfg = RuntimeConfig::default();
+    cfg.provider.kind = agenttracker_runtime::config::ProviderKind::LmStudio;
+    cfg.provider.endpoint = lm.clone();
+    cfg.provider.model = "old-model".into();
+    db.set_setting("rt_config", &serde_json::to_string(&cfg).unwrap()).unwrap();
+
+    // The first run: Demo A with the recorded fixture, in the app's demo folder.
+    let (old_dir, s) = demo::prepare(&demos, Demo::A).unwrap();
+    let rt = rt_with(&db, demo::fixture_provider(Demo::A));
+    let old = rt.start_task(&s).unwrap().session_id;
+    assert_eq!(rt.run(&old).unwrap().status, "completed");
+    // A run that is still going can't be retried.
+    let (_d2, s2) = demo::prepare(&demos, Demo::A).unwrap();
+    let running = rt.start_task(&s2).unwrap().session_id;
+
+    let snapshot = |sid: &str| -> Vec<Value> {
+        let mut v = q(&db, &format!("SELECT * FROM rt_sessions WHERE id='{sid}'"));
+        for t in ["rt_context_items", "rt_decisions", "rt_model_requests", "rt_proposal_attempts", "rt_actions", "rt_findings"] {
+            v.extend(q(&db, &format!("SELECT * FROM {t} WHERE session_id='{sid}' ORDER BY rowid")));
+        }
+        v
+    };
+    let old_before = snapshot(&old);
+    let old_task_before = q(&db, &format!("SELECT t.* FROM rt_tasks t JOIN rt_sessions s ON s.task_id=t.id WHERE s.id='{old}'"));
+    let old_copy = std::fs::read(old_dir.join("organized/2026/photo.jpg")).unwrap();
+
+    let collector = Collector::new(&db);
+    let engine = Engine::new(db.clone(), vec![data.path().join("agenttracker.db"), home.clone()]);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = AppState::new(engine, collector, port, None, "test-secret".into(), None, data.path().to_path_buf(), home);
+    let app = agenttracker_runtime::http::routes().with_state(state);
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async move {
+            axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), app).await.unwrap();
+        });
+    });
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+    let url = |p: &str| format!("http://127.0.0.1:{port}{p}");
+    let post = |p: &str, body: Value| agent.post(&url(p)).send_json(body);
+    let err_text = |r: Result<ureq::Response, ureq::Error>| -> (u16, String) {
+        match r {
+            Err(ureq::Error::Status(code, resp)) => (code, resp.into_json::<Value>().unwrap()["error"].as_str().unwrap_or("").to_string()),
+            other => panic!("expected an error reply, got {:?}", other.map(|r| r.status())),
+        }
+    };
+
+    // The model list for the picker comes from the provider.
+    let models: Value = agent.get(&url("/api/ui/runtime/provider/models")).call().unwrap().into_json().unwrap();
+    assert_eq!(models["models"], json!(["old-model", "new-model"]));
+
+    // Friendly refusals: no model chosen, and a run that is still going.
+    let (code, msg) = err_text(post(&format!("/api/ui/runtime/sessions/{old}/retry"), json!({"model": "  "})));
+    assert_eq!((code, msg.as_str()), (400, "Pick a model to try first."));
+    let (code, msg) = err_text(post(&format!("/api/ui/runtime/sessions/{running}/retry"), json!({"model": "new-model"})));
+    assert_eq!(code, 400);
+    assert!(msg.contains("still going"), "{msg}");
+    assert_eq!(seen.lock().unwrap().len(), 0, "nothing was sent to the model for refused retries");
+
+    // The retry itself.
+    let r: Value = post(&format!("/api/ui/runtime/sessions/{old}/retry"), json!({"model": "new-model"})).unwrap().into_json().unwrap();
+    let new = r["start"]["session_id"].as_str().unwrap().to_string();
+    assert_ne!(new, old);
+    assert_eq!(r["status"]["status"], "completed", "{r}");
+    assert_eq!(r["retried_from"], old.as_str());
+
+    // New session: same request, new model recorded, linked to the old run, fresh demo folder.
+    let n = &q(&db, &format!("SELECT s.provider_config, s.parent_session_id, s.working_dir, t.title, t.instruction FROM rt_sessions s JOIN rt_tasks t ON t.id=s.task_id WHERE s.id='{new}'"))[0];
+    assert_eq!(n["provider_config"]["model"], "new-model");
+    assert_eq!(n["provider_config"]["is_fixture"], false);
+    assert_eq!(n["parent_session_id"], old.as_str());
+    assert_eq!(n["title"], old_task_before[0]["title"]);
+    assert_eq!(n["instruction"], old_task_before[0]["instruction"]);
+    assert_ne!(n["working_dir"], old_task_before[0]["working_dir"], "a demo retry gets its own fresh folder");
+    let new_dir = Path::new(n["working_dir"].as_str().unwrap());
+    assert!(new_dir.join("originals/photo.jpg").exists());
+    let req_models = q(&db, &format!("SELECT DISTINCT model FROM rt_model_requests WHERE session_id='{new}'"));
+    assert_eq!(req_models, vec![json!({"model": "new-model"})]);
+    assert!(!seen.lock().unwrap().is_empty() && seen.lock().unwrap().iter().all(|m| m == "new-model"), "{:?}", seen.lock().unwrap());
+
+    // Old session: records, task and files unchanged.
+    assert_eq!(snapshot(&old), old_before);
+    assert_eq!(q(&db, &format!("SELECT t.* FROM rt_tasks t JOIN rt_sessions s ON s.task_id=t.id WHERE s.id='{old}'")), old_task_before);
+    assert_eq!(std::fs::read(old_dir.join("organized/2026/photo.jpg")).unwrap(), old_copy);
+    assert!(old_dir.join("originals/photo.jpg").exists());
+
+    // The saved model setting was not changed.
+    let saved: RuntimeConfig = serde_json::from_str(&db.get_setting("rt_config").unwrap().unwrap()).unwrap();
+    assert_eq!(saved.provider.model, "old-model");
+
+    // The recorded model is what Resume and Approve read for this run.
+    assert_eq!(q(&db, &format!("SELECT json_extract(provider_config, '$.model') AS m FROM rt_sessions WHERE id='{new}'"))[0]["m"], "new-model");
+}
+
+/// Retrying a task in the user's own folder reuses that folder, the request, protected paths and documents.
+#[test]
+fn retry_spec_for_an_ordinary_task_keeps_folder_rules_and_documents() {
+    let db = Db::open_in_memory().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let (dir, s) = demo::prepare(base.path(), Demo::B).unwrap();
+    // Make it an ordinary task (not recognised as a built-in demo).
+    let s = TaskSpec { title: "Tidy my photos".into(), ..s };
+    let rt = rt_with(&db, demo::fixture_provider(Demo::B));
+    let old = rt.start_task(&s).unwrap().session_id;
+    rt.run(&old).unwrap();
+    let spec = agenttracker_runtime::runtime::retry_spec(&db, &old, Some(base.path())).unwrap();
+    assert_eq!(spec.title, "Tidy my photos");
+    assert_eq!(spec.instruction, s.instruction);
+    assert_eq!(spec.working_dir.canonicalize().unwrap(), dir.canonicalize().unwrap());
+    assert_eq!(spec.protected_paths, vec!["originals".to_string()]);
+    assert_eq!(spec.documents.len(), 1);
+    assert_eq!(spec.documents[0].path, "notes/cleanup_tips.md");
+    assert_eq!(spec.parent_session_id.as_deref(), Some(old.as_str()));
+}
