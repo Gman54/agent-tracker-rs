@@ -117,3 +117,13 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
   Use a fine-grained, read-only token limited to the projects you pick.
 - GitHub links were tested against a local mock server only, not the real GitHub API. Nothing in
   this feature has been tested with a live agent or on Windows yet.
+
+## 13. Check wording, written explanations and reasoning
+
+- A check with nothing to look at shows **Not applicable** (for example, the agent reported no file edits). It never says "All 0 ... passed" and it never counts towards a pass.
+- "The agent only changed files in the project folder" is based on the file edits the agent reports. When the agent ran shell commands (Bash, PowerShell and so on), it shows **Insufficient coverage**, because files a shell command creates or changes are invisible to it.
+- When only checks that protect the originals passed, the result reads "Original files kept — the result itself wasn't checked" and is grey, not green. No built-in check judges whether an output (a PDF, a report) is complete or numerically correct. "Required files exist" only confirms that the file is there and not empty.
+- Results saved by older versions are re-read with these rules when you open them. Only the wording and status change; files aren't checked again.
+- The Conversation section shows Claude's **written explanations**: the text it wrote in the conversation. That is its stated justification, not verified reasoning, and it isn't hidden thinking. Thinking entries appear only when Claude Code saved them.
+- "Claude's written note before this action" is linked by order: it's the text Claude wrote since your last message or the last tool result. Actions Claude starts together share the same note. Each action is linked to its tool-call id, which matches the start/finish records the hooks sent.
+- A structured rationale captured *before* each action (linked to the instruction and the tool-call id) is only enforced in the Agent Runtime. For Claude Code, AgentTracker can only read what Claude chose to write.

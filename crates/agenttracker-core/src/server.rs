@@ -538,10 +538,14 @@ async fn task_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>)
                     "unstable": m.entries.iter().filter(|x| x.stability == crate::fs_observer::Stability::Unstable).count()})
             })
             .collect();
+        let mut runs = e.results.runs_for_task(&id)?;
+        for r in runs.iter_mut() {
+            crate::verifiers::reread_legacy(&task, r, &events);
+        }
         Ok(json!({
             "task": task,
             "events": events,
-            "runs": e.results.runs_for_task(&id)?,
+            "runs": runs,
             "baselines": baselines,
             "live_file_events": e.live_hint_count(&id),
         }))
@@ -723,7 +727,7 @@ async fn pick_folder(State(st): State<Arc<AppState>>) -> Response {
 
 /// Loads a run plus the frozen task definition it was checked against and the agent events.
 fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crate::task::TaskDefinition, crate::store::VerificationRun, Vec<crate::event::AgentEvent>)> {
-    let run = engine.results.get_run(run_id)?.ok_or_else(|| CoreError::NotFound(format!("run {run_id}")))?;
+    let mut run = engine.results.get_run(run_id)?.ok_or_else(|| CoreError::NotFound(format!("run {run_id}")))?;
     let current = engine.tasks.get(&run.task_id)?;
     let task = match engine.tasks.snapshot(&run.task_id, run.definition_version)? {
         // The name is only a label, so a renamed task shows its new name on older results too.
@@ -744,6 +748,7 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
     crate::event::sort_source_order(&mut events);
     let window = crate::event::task_window(task.created_at, run.started_at, run.finished_at, &events);
     let events = crate::event::only_this_task(events, window);
+    crate::verifiers::reread_legacy(&task, &mut run, &events);
     Ok((task, run, events))
 }
 

@@ -172,8 +172,26 @@ const VERDICT = {
   unable_to_verify: { cls: 'verdict-unknown', icon: '?', text: 'Unable to verify', short: 'Unable to verify', pill: 'amber', kind: 'warn' },
   not_run: { cls: 'verdict-neutral', icon: '–', text: 'Verification wasn’t run', short: 'Not checked', pill: '', kind: 'muted' },
 };
-// A run with zero checks is "not run", never "couldn't confirm".
-const runVerdict = run => (!run || !(run.results || []).length ? VERDICT.not_run : VERDICT[run.overall_verdict] || VERDICT.unable_to_verify);
+VERDICT.safety_only = { cls: 'verdict-neutral', icon: '–', text: 'Original files kept — the result itself wasn’t checked', short: 'Result not checked', pill: '', kind: 'muted' };
+VERDICT.safety_only_other = { ...VERDICT.safety_only, text: 'Safety checks passed — the result itself wasn’t checked' };
+VERDICT.partial = { cls: 'verdict-neutral', icon: '–', text: 'Output checks passed, but coverage was incomplete', short: 'Coverage incomplete', pill: '', kind: 'muted' };
+// What each check can vouch for (kept in step with check_kind in verifiers/mod.rs).
+const CHECK_KIND = { required_outputs_exist: 'exists', inputs_preserved_in_output: 'content', folder_structure_matches: 'content' };
+// Kept in step with verification_state in report.rs. A run with zero checks is "not run", never
+// "couldn't confirm"; a pass that only protected the originals never shows green.
+function runVerdict(run) {
+  const rs = (run && run.results) || [];
+  if (!rs.length) return VERDICT.not_run;
+  if (run.overall_verdict === 'failed') return VERDICT.failed;
+  const passed = rs.filter(r => r.status === 'passed');
+  const unsure = rs.some(r => r.status === 'unable_to_verify');
+  const insufficient = rs.some(r => r.status === 'insufficient_coverage');
+  const passing = run.overall_verdict === 'passed' || (!unsure && insufficient && passed.length > 0);
+  if (!passing || !passed.length) return VERDICT.unable_to_verify;
+  const output = passed.some(r => CHECK_KIND[r.check_type]);
+  if (!output) return passed.some(r => ['originals_unchanged', 'no_unexpected_deletions'].includes(r.check_type)) ? VERDICT.safety_only : VERDICT.safety_only_other;
+  return insufficient ? VERDICT.partial : VERDICT.passed;
+}
 
 // ---- Short task titles (kept in step with short_title in task.rs) ----
 const TITLE_FILLER = ['please', 'pls', 'hey', 'hi', 'hello', 'ok', 'okay', 'so', 'now', 'claude', 'can you', 'could you', 'would you', 'will you',
@@ -222,6 +240,8 @@ const CHECK_STATUS = {
   passed: ['ok', 'Passed'],
   failed: ['bad', 'Failed'],
   unable_to_verify: ['warn', "Couldn't confirm"],
+  not_applicable: ['muted', 'Not applicable'],
+  insufficient_coverage: ['muted', 'Insufficient coverage'],
 };
 
 const CONNECTOR_NAMES = { claude_code: 'Claude Code', cursor: 'Cursor', copilot_vscode: 'GitHub Copilot', manual: 'Just a folder (manual)' };
@@ -1138,7 +1158,7 @@ function checkCard(r, runId, task) {
     <p class="mt-xs">${esc(r.summary)}</p>
     <div class="row">
       <button class="btn btn-link" data-act="toggle-evidence" data-id="${esc(r.check_id)}" data-keep-enabled="1" aria-expanded="false">Show evidence ▼</button>
-      ${r.status !== 'passed' ? `<button class="btn btn-link" data-act="propose" data-run="${esc(runId)}" data-check="${esc(r.check_id)}">Create a check from this +</button>` : ''}
+      ${['failed', 'unable_to_verify'].includes(r.status) ? `<button class="btn btn-link" data-act="propose" data-run="${esc(runId)}" data-check="${esc(r.check_id)}">Create a check from this +</button>` : ''}
     </div>
     <div class="evidence hidden" id="ev-${esc(r.check_id)}">
       ${ev ? `<b>Evidence examined</b><ul>${ev}</ul>` : '<p class="muted">No extra evidence was recorded for this check.</p>'}
@@ -1201,7 +1221,7 @@ async function render_results() {
 
     <div class="verdict ${v.cls}" role="status">
       <span class="verdict-icon" aria-hidden="true">${v.icon}</span>
-      <span>${esc(v.text)}<span class="verdict-sub">${run.results.length ? `${run.results.length} check(s) · ${run.results.filter(r => r.status === 'passed').length} passed` : 'Add checks to evaluate this task.'}</span></span>
+      <span>${esc(v.text)}<span class="verdict-sub">${run.results.length ? verdictSub(run.results) : 'Add checks to evaluate this task.'}</span></span>
       <span class="spacer"></span>
       <button class="btn btn-secondary btn-small" data-act="export" data-fmt="html" data-id="${esc(run.id)}">Save report (HTML)</button>
       <button class="btn btn-secondary btn-small" data-act="export" data-fmt="json" data-id="${esc(run.id)}">Save data (JSON)</button>
@@ -1250,11 +1270,26 @@ const ITEM_KIND = { ok: 'ok', bad: 'bad', warn: 'warn', neutral: 'muted' };
 const svhItem = (title, x) => (x && x.label ? `<div class="svh-item"><span class="svh-label">${esc(title)}</span>
   <span>${status(ITEM_KIND[x.tone] || 'muted', x.label)}${x.detail ? `<span class="small muted svh-detail">${esc(x.detail)}</span>` : ''}</span></div>` : '');
 
+function verdictSub(results) {
+  const n = st => results.filter(r => r.status === st).length;
+  const parts = [`${results.length} check(s)`, `${n('passed')} passed`];
+  if (n('insufficient_coverage')) parts.push(`${n('insufficient_coverage')} insufficient coverage`);
+  if (n('not_applicable')) parts.push(`${n('not_applicable')} not applicable`);
+  return parts.join(' · ');
+}
+
+// Three plain rows for presenting a run (from at_a_glance in report.rs).
+function glanceTable(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  return `<table class="glance"><caption>At a glance</caption>${rows.map(r => `<tr><th scope="row">${esc(r.category)}</th><td>${esc(r.result)}</td></tr>`).join('')}</table>`;
+}
+
 function svhCard(s) {
   if (!s || !s.headline) return '';
   return `<div class="card svh ${SVH_TONE[s.tone] || 'svh-warn'}">
     <h3>What it said vs what really happened</h3>
     <p class="svh-head">${esc(s.headline)}</p>
+    ${glanceTable(s.at_a_glance)}
     <div class="svh-rows">
       <div class="svh-row"><span class="svh-label">Said</span><span>${esc(s.said)}${s.quote ? ` <q class="svh-quote">${esc(s.quote)}</q>` : ''}</span></div>
       <div class="svh-row"><span class="svh-label">Really happened</span><span>${esc(s.happened)}</span></div>
@@ -1286,7 +1321,10 @@ function convEntry(e, i) {
       return `<details class="conv conv-thinking"><summary class="conv-who">Claude’s thinking ${time}</summary>
         <p class="small muted">This is the thinking Claude chose to show. It may be a summary.</p>${convText(e, id)}</details>`;
     case 'action':
-      return `<div class="conv conv-action"><div class="conv-who">Action: ${esc(e.tool || 'a tool')} ${time}</div>${e.text ? `<code class="conv-input">${esc(e.text)}</code>` : ''}</div>`;
+      return `<div class="conv conv-action"><div class="conv-who">Action: ${esc(e.tool || 'a tool')} ${time}</div>${e.text ? `<code class="conv-input">${esc(e.text)}</code>` : ''}
+        ${e.note_before ? `<p class="conv-note"><span class="muted">Claude’s written note before this action:</span> ${esc(e.note_before)}</p>` : '<p class="small muted conv-note">No note written before this action.</p>'}
+        ${e.instruction ? `<p class="small muted">In reply to: ${esc(e.instruction)}</p>` : ''}
+        ${e.tool_use_id ? `<p class="small muted">Tool call ${esc(e.tool_use_id)}${e.matched_hook ? ' · matches the start/finish records' : ''}</p>` : ''}</div>`;
     case 'result':
       return `<details class="conv conv-result${e.is_error ? ' conv-bad' : ''}"><summary class="conv-who">Result${e.tool ? ` from ${esc(e.tool)}` : ''}${e.is_error ? ' — it reported a problem' : ''} ${time}</summary>
         ${e.text ? convText(e, id) : '<p class="small muted">Nothing came back.</p>'}</details>`;

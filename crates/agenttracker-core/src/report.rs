@@ -2,7 +2,7 @@
 use crate::event::{AgentEvent, EventType};
 use crate::store::VerificationRun;
 use crate::task::{FolderRole, TaskDefinition};
-use crate::verifiers::{CheckResult, CheckStatus};
+use crate::verifiers::{check_kind, CheckKind, CheckResult, CheckStatus};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -10,15 +10,58 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
-/// Headline for a verification run. Zero checks is its own state: nothing was evaluated,
-/// so it is never reported as "couldn't confirm".
-fn verdict_text(run: &VerificationRun) -> (&'static str, &'static str, &'static str) {
-    if run.results.is_empty() {
-        return ("neutral", "\u{2013}", "Verification wasn't run");
+/// What the checks can honestly vouch for, as one state:
+/// `not_run`, `failed`, `unable`, `passed` (a check looked at the output's content),
+/// `passed_exists` (the output exists; nobody checked it's right), `safety_only` (only checks that
+/// protect the originals / limit changes passed), `partial` (output checks passed, but a check had
+/// insufficient coverage). Zero checks is never "couldn't confirm".
+pub fn verification_state(run: &VerificationRun) -> &'static str {
+    let rs = &run.results;
+    if rs.is_empty() {
+        return "not_run";
     }
-    match run.overall_verdict {
-        Some(CheckStatus::Passed) => ("passed", "\u{2713}", "All required checks passed"),
-        Some(CheckStatus::Failed) => ("failed", "\u{2717}", "A check found a problem"),
+    if run.overall_verdict == Some(CheckStatus::Failed) {
+        return "failed";
+    }
+    let passed: Vec<&CheckResult> = rs.iter().filter(|r| r.status == CheckStatus::Passed).collect();
+    let unsure = rs.iter().any(|r| r.status == CheckStatus::UnableToVerify);
+    let insufficient = rs.iter().any(|r| r.status == CheckStatus::InsufficientCoverage);
+    // Only "insufficient coverage" (never a real "couldn't confirm") may hold back a pass here.
+    let passing = run.overall_verdict == Some(CheckStatus::Passed) || (!unsure && insufficient && !passed.is_empty());
+    if !passing || passed.is_empty() {
+        return "unable";
+    }
+    let content = passed.iter().any(|r| check_kind(&r.check_type) == CheckKind::OutputContent);
+    let exists = passed.iter().any(|r| check_kind(&r.check_type) == CheckKind::OutputExists);
+    match (content || exists, insufficient) {
+        (false, _) => "safety_only",
+        (true, true) => "partial",
+        (true, false) if content => "passed",
+        _ => "passed_exists",
+    }
+}
+
+/// True when a passing check protected the files that were already there.
+fn kept_originals(run: &VerificationRun) -> bool {
+    run.results.iter().any(|r| r.status == CheckStatus::Passed && matches!(r.check_type.as_str(), "originals_unchanged" | "no_unexpected_deletions"))
+}
+
+fn safety_label(run: &VerificationRun) -> &'static str {
+    if kept_originals(run) {
+        "Original files kept \u{2014} the result itself wasn't checked"
+    } else {
+        "Safety checks passed \u{2014} the result itself wasn't checked"
+    }
+}
+
+/// Headline for a verification run (HTML report).
+fn verdict_text(run: &VerificationRun) -> (&'static str, &'static str, &'static str) {
+    match verification_state(run) {
+        "not_run" => ("neutral", "\u{2013}", "Verification wasn't run"),
+        "passed" | "passed_exists" => ("passed", "\u{2713}", "All required checks passed"),
+        "safety_only" => ("neutral", "\u{2013}", safety_label(run)),
+        "partial" => ("neutral", "\u{2013}", "Output checks passed, but coverage was incomplete"),
+        "failed" => ("failed", "\u{2717}", "A check found a problem"),
         _ => ("unsure", "?", "Unable to verify"),
     }
 }
@@ -46,6 +89,8 @@ fn status_text(s: CheckStatus) -> (&'static str, &'static str) {
         CheckStatus::Passed => ("\u{2713}", "Passed"),
         CheckStatus::Failed => ("\u{2717}", "Failed"),
         CheckStatus::UnableToVerify => ("?", "Couldn't confirm"),
+        CheckStatus::NotApplicable => ("\u{2013}", "Not applicable"),
+        CheckStatus::InsufficientCoverage => ("\u{2013}", "Insufficient coverage"),
     }
 }
 
@@ -127,7 +172,10 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
     };
 
     let total = run.results.len();
-    let passed = run.results.iter().filter(|r| r.status == CheckStatus::Passed).count();
+    let count = |st: CheckStatus| run.results.iter().filter(|r| r.status == st).count();
+    let passed = count(CheckStatus::Passed);
+    let na = count(CheckStatus::NotApplicable);
+    let insufficient: Vec<&CheckResult> = run.results.iter().filter(|r| r.status == CheckStatus::InsufficientCoverage).collect();
     let failed: Vec<String> = run.results.iter().filter(|r| r.status == CheckStatus::Failed).map(|r| check_name(&r.check_type)).collect();
     let unsure: Vec<&CheckResult> = run.results.iter().filter(|r| r.status == CheckStatus::UnableToVerify).collect();
     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -135,30 +183,49 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
         "No checks were run.".to_string()
     } else if !failed.is_empty() {
         format!("{} of {total} check{} failed: {}.", failed.len(), plural(total), failed.join(", "))
-    } else if !unsure.is_empty() {
-        format!("{passed} of {total} check{} passed, and {} couldn't be confirmed.", plural(total), unsure.len())
+    } else if passed == total {
+        if total == 1 { "The one check passed.".to_string() } else { format!("All {total} checks passed.") }
     } else {
-        format!("All {total} check{} passed.", plural(total))
+        let mut parts = vec![];
+        if passed > 0 {
+            parts.push(format!("{passed} passed"));
+        }
+        if !insufficient.is_empty() {
+            parts.push(format!("{} had insufficient coverage", insufficient.len()));
+        }
+        if !unsure.is_empty() {
+            parts.push(format!("{} couldn't be confirmed", unsure.len()));
+        }
+        if na > 0 {
+            parts.push(format!("{na} had nothing to check"));
+        }
+        let list = match parts.len() {
+            1 => parts[0].clone(),
+            _ => format!("{} and {}", parts[..parts.len() - 1].join(", "), parts[parts.len() - 1]),
+        };
+        format!("Of {total} check{}: {list}.", plural(total))
     };
 
     // Verification result, kept apart from the session.
-    let verdict = run.overall_verdict;
-    let (v_state, v_tone, v_label, v_detail) = if total == 0 {
-        ("not_run", "neutral", "Verification wasn't run", "Add checks to evaluate this task.".to_string())
-    } else {
-        match verdict {
-            Some(CheckStatus::Passed) => ("passed", "ok", "All required checks passed", happened.clone()),
-            Some(CheckStatus::Failed) => ("failed", "bad", "A check found a problem", happened.clone()),
-            _ => {
+    let v_state = verification_state(run);
+    let not_checked = "No check looked at whether the output is complete or correct. Add checks to evaluate it.";
+    let gap = insufficient.first().map(|r| format!(" {}: {}", check_name(&r.check_type), r.summary.trim())).unwrap_or_default();
+    let (v_tone, v_label, v_detail) = match v_state {
+        "not_run" => ("neutral", "Verification wasn't run", "Add checks to evaluate this task.".to_string()),
+        "passed" => ("ok", "All required checks passed", happened.clone()),
+        "passed_exists" => ("ok", "All required checks passed", format!("{happened} These checks confirm the output exists, not that it's correct.")),
+        "safety_only" => ("neutral", safety_label(run), format!("{happened} {not_checked}{gap}")),
+        "partial" => ("neutral", "Output checks passed, but coverage was incomplete", format!("{happened}{gap}")),
+        "failed" => ("bad", "A check found a problem", happened.clone()),
+        _ => {
                 let reason = match unsure.first() {
                     Some(r) if !r.summary.trim().is_empty() => format!("{}: {}", check_name(&r.check_type), r.summary.trim()),
                     Some(r) => format!("{} couldn't be confirmed.", check_name(&r.check_type)),
                     None => "None of the checks are marked as required, so there's nothing to confirm against.".to_string(),
                 };
                 let more = if unsure.len() > 1 { format!(" ({} more couldn't be confirmed.)", unsure.len() - 1) } else { String::new() };
-                ("unable", "warn", "Unable to verify", format!("{reason}{more}"))
+                ("warn", "Unable to verify", format!("{reason}{more}"))
             }
-        }
     };
 
     // Session status, kept apart from verification.
@@ -180,23 +247,26 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
     let (tone, headline) = if agent_error {
         ("bad", "Agent encountered an error".to_string())
     } else {
+        let safety_tail = if kept_originals(run) { "the original files were kept, but the result itself wasn't checked" } else { "the safety checks passed, but the result itself wasn't checked" };
         let tail = match v_state {
             "not_run" => "verification wasn't run",
-            "passed" => "all required checks passed",
+            "passed" | "passed_exists" => "all required checks passed",
+            "safety_only" => safety_tail,
+            "partial" => "the output checks passed, but coverage was incomplete",
             "failed" => "a check found a problem",
             _ => "it was unable to verify the work",
         };
-        let tone = match v_state {
-            "passed" => "ok",
-            "failed" => "bad",
-            "not_run" => "neutral",
-            _ => "warn",
+        let tone = v_tone;
+        // "It said it was done; the original files were kept, but ..." reads better than "but ... but".
+        let joiner = match v_state {
+            "passed" | "passed_exists" => ", and",
+            "safety_only" | "partial" => ";",
+            _ => ", but",
         };
-        let joiner = if v_state == "passed" { "and" } else { "but" };
         let h = if claimed {
-            format!("It said it was done, {joiner} {tail}.")
+            format!("It said it was done{joiner} {tail}.")
         } else if has_quote {
-            format!("Here's what it said last, {joiner} {tail}.")
+            format!("Here's what it said last{joiner} {tail}.")
         } else {
             let mut c = tail.chars();
             format!("{}{}.", c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default(), c.as_str())
@@ -213,7 +283,71 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
         "happened": happened,
         "session": {"state": s_state, "tone": s_tone, "label": s_label, "detail": s_detail},
         "verification": {"state": v_state, "tone": v_tone, "label": v_label, "detail": v_detail, "checks_run": total},
+        "at_a_glance": at_a_glance(task, run, events, conversation),
     })
+}
+
+/// Three plain rows for presenting a run: what was captured, what the agent explained in its own
+/// words, and what was independently checked. Counts only; never a judgement of the content.
+pub fn at_a_glance(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> Value {
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let (calls, matched) = crate::verifiers::tool_call_pairs(events);
+    let activity = if task.connector == "manual" && events.is_empty() {
+        "No agent was listening; this task was checked by hand.".to_string()
+    } else if events.is_empty() {
+        "Nothing was captured from the agent.".to_string()
+    } else if calls == 0 {
+        "Agent messages arrived, but no tool calls.".to_string()
+    } else if matched == calls {
+        format!("{} with matching start/end records", plural(calls, "tool call", "tool calls"))
+    } else {
+        format!("{}, {} without both a start and a finish record", plural(calls, "tool call", "tool calls"), calls - matched)
+    };
+
+    let explanation = if conversation.get("status").and_then(Value::as_str) != Some("ok") {
+        "No conversation record was available, so no written explanation was captured.".to_string()
+    } else {
+        let entries = conversation.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+        let kind = |e: &Value, k: &str| e.get("kind").and_then(Value::as_str) == Some(k);
+        let notes = entries.iter().filter(|e| kind(e, "claude") && !e.get("text").and_then(Value::as_str).is_some_and(looks_like_api_error)).count();
+        let thinking = entries.iter().filter(|e| kind(e, "thinking")).count();
+        let actions = entries.iter().filter(|e| kind(e, "action")).count();
+        let with_note = entries.iter().filter(|e| kind(e, "action") && e.get("note_before").is_some()).count();
+        if notes == 0 && thinking == 0 {
+            "Claude didn't write any explanation in this record.".to_string()
+        } else {
+            let mut s = format!("Claude wrote {} in its own words (not hidden thinking)", plural(notes, "explanation", "explanations"));
+            if thinking > 0 {
+                s.push_str(&format!(", plus {}", plural(thinking, "thinking entry", "thinking entries")));
+            }
+            if actions > 0 {
+                s.push_str(&format!("; {with_note} of {actions} actions had a note written just before them"));
+            }
+            s.push('.');
+            s
+        }
+    };
+
+    let state = verification_state(run);
+    let names = |st: CheckStatus| run.results.iter().filter(|r| r.status == st).map(|r| check_name(&r.check_type)).collect::<Vec<_>>().join(", ");
+    let verification = match state {
+        "not_run" => "Verification wasn't run.".to_string(),
+        "failed" => format!("A check found a problem: {}.", names(CheckStatus::Failed)),
+        "safety_only" if kept_originals(run) => "Original files remained; output correctness was not evaluated.".to_string(),
+        "safety_only" => "Safety checks passed; output correctness was not evaluated.".to_string(),
+        "passed_exists" => "The required output exists; its correctness was not evaluated.".to_string(),
+        "passed" => "All required checks passed, including checks on the output itself.".to_string(),
+        "partial" => format!("Output checks passed; insufficient coverage: {}.", names(CheckStatus::InsufficientCoverage)),
+        _ => {
+            let n = names(CheckStatus::UnableToVerify);
+            if n.is_empty() { "Nothing could be confirmed.".to_string() } else { format!("Couldn't confirm: {n}.") }
+        }
+    };
+    json!([
+        {"category": "Activity capture", "result": activity},
+        {"category": "Explanation captured", "result": explanation},
+        {"category": "Independent verification", "result": verification},
+    ])
 }
 
 fn said_vs_happened_html(s: &Value) -> String {
@@ -231,8 +365,18 @@ fn said_vs_happened_html(s: &Value) -> String {
         format!("<p><span class=\"m\">{}:</span> <b>{}</b>{}</p>", if k == "session" { "Session" } else { "Verification" }, esc(&f("label")), if d.is_empty() { String::new() } else { format!(" &mdash; {}", esc(&d)) })
     };
     let quote = if g("quote").is_empty() { String::new() } else { format!(" <q>{}</q>", esc(g("quote"))) };
+    let rows: String = s
+        .get("at_a_glance")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|r| format!("<tr><th>{}</th><td>{}</td></tr>", esc(r.get("category").and_then(Value::as_str).unwrap_or("")), esc(r.get("result").and_then(Value::as_str).unwrap_or(""))))
+                .collect()
+        })
+        .unwrap_or_default();
+    let glance = if rows.is_empty() { String::new() } else { format!("<table class=\"glance\"><caption>At a glance</caption>{rows}</table>") };
     format!(
-        "<div class=\"card svh {cls}\"><h2>What it said vs what really happened</h2><p><b>{}</b></p><p><span class=\"m\">Said:</span> {}{quote}</p><p><span class=\"m\">Really happened:</span> {}</p>{}{}</div>",
+        "<div class=\"card svh {cls}\"><h2>What it said vs what really happened</h2><p><b>{}</b></p>{glance}<p><span class=\"m\">Said:</span> {}{quote}</p><p><span class=\"m\">Really happened:</span> {}</p>{}{}</div>",
         esc(g("headline")),
         esc(g("said")),
         esc(g("happened")),
@@ -280,7 +424,15 @@ fn conversation_html(conv: &Value) -> String {
                 "you" => format!("<div class=\"c you\"><b>You</b><div class=\"t\">{text}{cut}</div></div>"),
                 "claude" => format!("<div class=\"c cl\"><b>Claude</b><div class=\"t\">{text}{cut}</div></div>"),
                 "thinking" => format!("<details class=\"c th\"><summary>Claude's thinking</summary><p class=\"m\">This is the thinking Claude chose to show. It may be a summary.</p><div class=\"t\">{text}{cut}</div></details>"),
-                "action" => format!("<div class=\"c act\"><b>Action</b> {tool} <span class=\"m\">{text}</span></div>"),
+                "action" => {
+                    let note = match e.get("note_before").and_then(Value::as_str) {
+                        Some(n) => format!("<p class=\"note\"><span class=\"m\">Claude's written note before this action:</span> {}</p>", esc(n)),
+                        None => "<p class=\"m\">No note written before this action.</p>".to_string(),
+                    };
+                    let asked = e.get("instruction").and_then(Value::as_str).map(|i| format!("<p class=\"m\">In reply to: {}</p>", esc(i))).unwrap_or_default();
+                    let id = e.get("tool_use_id").and_then(Value::as_str).map(|i| format!(" <span class=\"m\">({})</span>", esc(i))).unwrap_or_default();
+                    format!("<div class=\"c act\"><b>Action</b> {tool} <span class=\"m\">{text}</span>{id}{note}{asked}</div>")
+                }
                 "result" => format!(
                     "<details class=\"c res{}\"><summary><b>Result</b> {tool}{}</summary><div class=\"t\">{text}{cut}</div></details>",
                     if err { " bad" } else { "" },
@@ -324,7 +476,8 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>AgentTracker report — {title}</title>
 <style>body{{font:15px/1.6 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;background:#f7f5f0;color:#2c2825;max-width:860px;margin:32px auto;padding:0 20px}}
 .card{{background:#fff;border:1px solid #e8e2d9;border-radius:20px;padding:20px 24px;margin:16px 0}}
-.verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}.neutral{{background:#eef0f3;color:#3f4650}}
+.verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}.neutral,.not_applicable,.insufficient_coverage{{background:#eef0f3;color:#3f4650}}
+.glance{{border-collapse:collapse;width:100%;margin:10px 0}}.glance caption{{text-align:left;font-weight:600;padding-bottom:4px}}.glance th,.glance td{{text-align:left;vertical-align:top;padding:6px 10px;border-top:1px solid #eee7dc}}.glance th{{width:34%;font-weight:600}}.note{{margin:4px 0}}
 .check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.c{{border-radius:12px;padding:8px 14px;margin:8px 0;background:#faf8f4}}.c.you{{background:#eef3fb}}.c.bad{{background:#fbeaea}}.t{{white-space:pre-wrap;word-break:break-word}}.svh{{border-width:2px}}.svh.passed{{border-color:#bfe9d4}}.svh.failed{{border-color:#f5d0d0}}.svh.unsure{{border-color:#f0dcae}}.svh.neutral{{border-color:#d9dde3}}.svh p{{margin:6px 0}}summary{{cursor:pointer}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
 <h1>AgentTracker report</h1><div class="verdict {cls}">{icon} {head}</div>
 {svh}
@@ -364,6 +517,9 @@ fn not_mappable(why: &str) -> IncidentProposal {
 pub fn propose_from_incident(task: &TaskDefinition, result: &CheckResult) -> IncidentProposal {
     match result.status {
         CheckStatus::Passed => return not_mappable("This check passed, so there's no incident to turn into a rule."),
+        CheckStatus::NotApplicable | CheckStatus::InsufficientCoverage => {
+            return not_mappable("This check didn't find a problem (there was nothing for it to look at, or it couldn't see everything), so there's no incident to turn into a rule.")
+        }
         CheckStatus::UnableToVerify => {
             return not_mappable("This incident can't be turned into an automated check: the problem was missing or unreadable evidence, not a rule being broken.")
         }
@@ -466,5 +622,55 @@ mod tests {
         assert_eq!(s["headline"], "It was unable to verify the work.");
         let ok = run(vec![result(CheckStatus::Passed, "ok")], Some(CheckStatus::Passed));
         assert_eq!(said_vs_happened(&task("claude_code"), &ok, &[], &Value::Null)["verification"]["label"], "All required checks passed");
+    }
+
+    fn typed(t: &str, status: CheckStatus, summary: &str) -> CheckResult {
+        CheckResult { check_type: t.into(), ..result(status, summary) }
+    }
+
+    #[test]
+    fn safety_only_pass_says_the_result_wasnt_checked() {
+        // The demo run: originals kept, PDF made by a shell command, no output checks.
+        let rs = vec![
+            typed("no_unexpected_deletions", CheckStatus::Passed, "All 17895 file(s) that were there before are still there."),
+            typed("edits_inside_folder", CheckStatus::InsufficientCoverage, "Insufficient coverage: the agent ran 3 shell command(s)."),
+        ];
+        let r = run(rs, Some(CheckStatus::UnableToVerify));
+        assert_eq!(verification_state(&r), "safety_only");
+        let s = said_vs_happened(&task("claude_code"), &r, &[], &Value::Null);
+        assert_eq!(s["tone"], "neutral");
+        assert_eq!(s["verification"]["label"], "Original files kept \u{2014} the result itself wasn't checked");
+        assert_eq!(s["headline"], "The original files were kept, but the result itself wasn't checked.");
+        assert_eq!(s["happened"], "Of 2 checks: 1 passed and 1 had insufficient coverage.");
+        assert_eq!(s["at_a_glance"][2]["result"], "Original files remained; output correctness was not evaluated.");
+        assert_eq!(s["at_a_glance"][1]["result"], "No conversation record was available, so no written explanation was captured.");
+        let html = export_html(&task("claude_code"), &r, &[], &Value::Null);
+        assert!(html.contains("Insufficient coverage"));
+        assert!(html.contains("At a glance"));
+        assert!(!html.contains("All required checks passed"));
+        // Existence-only checks keep "passed" but say what they don't cover.
+        let ex = run(vec![result(CheckStatus::Passed, "ok")], Some(CheckStatus::Passed));
+        let s = said_vs_happened(&task("claude_code"), &ex, &[], &Value::Null);
+        assert!(s["verification"]["detail"].as_str().unwrap().contains("exists, not that it's correct"));
+    }
+
+    #[test]
+    fn glance_counts_calls_and_notes() {
+        let conv = json!({"status": "ok", "entries": [
+            {"kind": "you", "text": "make a pdf"},
+            {"kind": "claude", "text": "I'll use per-capita GDP."},
+            {"kind": "action", "text": "python make.py", "note_before": "I'll use per-capita GDP."},
+            {"kind": "result", "text": "ok"},
+            {"kind": "action", "text": "ls"},
+            {"kind": "claude", "text": "Done."}
+        ]});
+        let r = run(vec![], None);
+        let g = at_a_glance(&task("claude_code"), &r, &[], &conv);
+        assert_eq!(g[0]["result"], "Nothing was captured from the agent.");
+        assert_eq!(g[1]["result"], "Claude wrote 2 explanations in its own words (not hidden thinking); 1 of 2 actions had a note written just before them.");
+        assert_eq!(g[2]["result"], "Verification wasn't run.");
+        let html = conversation_html(&conv);
+        assert!(html.contains("Claude's written note before this action:"));
+        assert!(html.contains("No note written before this action."));
     }
 }

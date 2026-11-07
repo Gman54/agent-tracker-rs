@@ -5,7 +5,7 @@
 //! - "edits_inside_folder": every file the agent reported creating or editing lies inside the
 //!   task folder. Based on the agent's own reports; shell commands can't be judged.
 //!   params: { "folder": ".." (default: the task's first working folder) }
-use super::{abs_of, str_list, CheckResult, Evidence, Findings, Verifier};
+use super::{abs_of, shell_call_count, str_list, CheckResult, CheckStatus, Evidence, Findings, Verifier};
 use crate::event::{AgentEvent, EventType};
 use crate::fs_observer::{normalize_path, relative_to, EntryType};
 use crate::task::FolderRole;
@@ -73,7 +73,7 @@ impl Verifier for NoUnexpectedDeletions {
         "no_unexpected_deletions"
     }
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "1.1.0"
     }
     fn required_evidence(&self) -> &[&'static str] {
         &["baseline_manifest", "verification_manifest"]
@@ -108,6 +108,9 @@ impl Verifier for NoUnexpectedDeletions {
                 }
             }
         }
+        if files == 0 && f.failures.is_empty() && f.uncertain.is_empty() {
+            f.neutral = Some((CheckStatus::NotApplicable, "There were no files in the \"before\" snapshot, so there was nothing to lose.".into()));
+        }
         f.finish(self, format!("All {files} file(s) that were there before are still there."))
     }
 }
@@ -119,7 +122,7 @@ impl Verifier for EditsInsideFolder {
         "edits_inside_folder"
     }
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "1.1.0"
     }
     fn required_evidence(&self) -> &[&'static str] {
         &["agent_events"]
@@ -148,6 +151,43 @@ impl Verifier for EditsInsideFolder {
             }
         }
         f.limitations.push("Based on the file edits the agent reported. Changes made through shell commands outside the folder can't be seen.".into());
+        if f.failures.is_empty() {
+            f.neutral = edits_coverage(paths.len(), shell_call_count(&ev.events));
+        }
         f.finish(self, format!("All {} file edit(s) the agent reported are inside the project folder.", paths.len()))
+    }
+}
+
+/// How "edits inside the folder" should read when nothing was outside: not applicable when the
+/// agent reported no edits and ran no shell commands, insufficient coverage when shell commands
+/// ran (their changes are invisible here), otherwise None (a real pass).
+pub fn edits_coverage(n: usize, shells: usize) -> Option<(CheckStatus, String)> {
+    if shells > 0 {
+        let mut s = format!("Insufficient coverage: the agent ran {shells} shell command(s). Changes made by shell commands aren't visible to this check.");
+        if n > 0 {
+            s.push_str(&format!(" The {n} file edit(s) it reported are inside the project folder."));
+        }
+        Some((CheckStatus::InsufficientCoverage, s))
+    } else if n == 0 {
+        Some((CheckStatus::NotApplicable, "No applicable reported edits: the agent didn't report any file edits.".into()))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_check_never_says_all_zero() {
+        let (st, why) = edits_coverage(0, 0).unwrap();
+        assert_eq!(st, CheckStatus::NotApplicable);
+        assert!(why.starts_with("No applicable reported edits"));
+        let (st, why) = edits_coverage(0, 4).unwrap();
+        assert_eq!(st, CheckStatus::InsufficientCoverage);
+        assert!(why.contains("4 shell command(s)") && !why.contains("All 0"));
+        assert!(edits_coverage(2, 1).unwrap().1.contains("The 2 file edit(s) it reported are inside"));
+        assert_eq!(edits_coverage(3, 0), None, "a real pass");
     }
 }

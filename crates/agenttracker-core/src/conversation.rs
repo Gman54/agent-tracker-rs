@@ -107,6 +107,55 @@ pub struct Entry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     pub is_error: bool,
+    /// Claude Code's id for the tool call (on actions and their results). Hooks send the same id,
+    /// so an action here can be matched to the start/finish records AgentTracker captured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// Actions only: your latest request before this action (shortened).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    /// Actions only: what Claude wrote just before this action, since your last message or the
+    /// last tool result. Its own written explanation, not verified reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_before: Option<String>,
+}
+
+const MAX_INSTRUCTION_CHARS: usize = 200;
+const MAX_NOTE_CHARS: usize = 600;
+
+fn shorten(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max) {
+        Some((i, _)) => format!("{}\u{2026}", flat[..i].trim_end()),
+        None => flat,
+    }
+}
+
+/// Links each action to your latest request and to what Claude wrote right before it. Order-based:
+/// the note is the Claude text since your last message or the last tool result, so actions Claude
+/// starts together share the same note. Thinking is not included (it's shown separately).
+fn link_notes(entries: &mut [Entry]) {
+    let mut instruction: Option<String> = None;
+    let mut note: Vec<String> = vec![];
+    for e in entries.iter_mut() {
+        match e.kind {
+            EntryKind::You => {
+                instruction = Some(shorten(&e.text, MAX_INSTRUCTION_CHARS));
+                note.clear();
+            }
+            EntryKind::Result => note.clear(),
+            EntryKind::Claude => {
+                if !crate::report::looks_like_api_error(&e.text) {
+                    note.push(e.text.clone());
+                }
+            }
+            EntryKind::Action => {
+                e.instruction = instruction.clone();
+                e.note_before = if note.is_empty() { None } else { Some(shorten(&note.join(" "), MAX_NOTE_CHARS)) };
+            }
+            EntryKind::Thinking => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -218,12 +267,13 @@ fn result_text(content: Option<&Value>) -> String {
     }
 }
 
-fn push(out: &mut Vec<Entry>, kind: EntryKind, ts: Option<i64>, text: &str, tool: Option<String>, is_error: bool) {
+fn push<'a>(out: &'a mut Vec<Entry>, kind: EntryKind, ts: Option<i64>, text: &str, tool: Option<String>, is_error: bool) -> Option<&'a mut Entry> {
     let (text, cut) = cut_text(text, MAX_TEXT_CHARS);
     if text.is_empty() && !matches!(kind, EntryKind::Action | EntryKind::Result) {
-        return;
+        return None;
     }
-    out.push(Entry { kind, ts, text, cut, tool, is_error });
+    out.push(Entry { kind, ts, text, cut, tool, is_error, tool_use_id: None, instruction: None, note_before: None });
+    out.last_mut()
 }
 
 /// Turns one JSONL line into entries. Returns None when the line isn't something we show.
@@ -242,24 +292,34 @@ fn parse_line(v: &Value, tool_names: &mut std::collections::HashMap<String, Stri
     let mut out = vec![];
     let speaker = if kind == "user" { EntryKind::You } else { EntryKind::Claude };
     match content {
-        Value::String(s) => push(&mut out, speaker, ts, s, None, false),
+        Value::String(s) => {
+            push(&mut out, speaker, ts, s, None, false);
+        }
         Value::Array(blocks) => {
             for b in blocks {
                 match b.get("type").and_then(Value::as_str) {
-                    Some("text") => push(&mut out, speaker.clone(), ts, b.get("text").and_then(Value::as_str).unwrap_or(""), None, false),
-                    Some("thinking") => push(&mut out, EntryKind::Thinking, ts, b.get("thinking").and_then(Value::as_str).unwrap_or(""), None, false),
+                    Some("text") => {
+                        push(&mut out, speaker.clone(), ts, b.get("text").and_then(Value::as_str).unwrap_or(""), None, false);
+                    }
+                    Some("thinking") => {
+                        push(&mut out, EntryKind::Thinking, ts, b.get("thinking").and_then(Value::as_str).unwrap_or(""), None, false);
+                    }
                     Some("tool_use") => {
                         let name = b.get("name").and_then(Value::as_str).unwrap_or("a tool").to_string();
                         if let Some(id) = b.get("id").and_then(Value::as_str) {
                             tool_names.insert(id.to_string(), name.clone());
                         }
                         let summary = input_summary(&name, b.get("input").unwrap_or(&Value::Null));
-                        push(&mut out, EntryKind::Action, ts, &summary, Some(name), false);
+                        if let Some(e) = push(&mut out, EntryKind::Action, ts, &summary, Some(name), false) {
+                            e.tool_use_id = b.get("id").and_then(Value::as_str).map(str::to_string);
+                        }
                     }
                     Some("tool_result") => {
                         let tool = b.get("tool_use_id").and_then(Value::as_str).and_then(|id| tool_names.get(id).cloned());
                         let is_error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                        push(&mut out, EntryKind::Result, ts, &result_text(b.get("content")), tool, is_error);
+                        if let Some(e) = push(&mut out, EntryKind::Result, ts, &result_text(b.get("content")), tool, is_error) {
+                            e.tool_use_id = b.get("tool_use_id").and_then(Value::as_str).map(str::to_string);
+                        }
                     }
                     // redacted_thinking, image, and anything new: not shown.
                     _ => {}
@@ -303,6 +363,7 @@ pub fn parse_jsonl(data: &str, window: Option<(i64, i64)>) -> Parsed {
             all.drain(..last_you);
         }
     }
+    link_notes(&mut all);
     if all.len() > MAX_ENTRIES {
         all.drain(..all.len() - MAX_ENTRIES);
         p.capped = true;
@@ -397,7 +458,27 @@ pub fn for_task(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEve
     let status = if parsed.entries.is_empty() { "empty" } else { "ok" };
     let message = if parsed.entries.is_empty() { "Claude Code's record is there, but it has nothing I can show for this task." } else { "" };
     let mut v = base(status, message, Some(&shown));
-    v["entries"] = serde_json::to_value(&parsed.entries).unwrap_or(Value::Null);
+    // Match each action to the start/finish records the hooks sent, by tool-call id.
+    let hook_ids: std::collections::HashSet<&str> = events.iter().filter_map(|e| e.tool_call_id.as_deref()).collect();
+    let mut entries = serde_json::to_value(&parsed.entries).unwrap_or(Value::Null);
+    let (mut actions, mut with_note, mut matched) = (0usize, 0usize, 0usize);
+    if let Some(arr) = entries.as_array_mut() {
+        for e in arr.iter_mut().filter(|e| e.get("kind").and_then(Value::as_str) == Some("action")) {
+            actions += 1;
+            if e.get("note_before").is_some() {
+                with_note += 1;
+            }
+            let hit = e.get("tool_use_id").and_then(Value::as_str).is_some_and(|id| hook_ids.contains(id));
+            if hit {
+                matched += 1;
+            }
+            e["matched_hook"] = json!(hit);
+        }
+    }
+    v["entries"] = entries;
+    v["actions"] = json!(actions);
+    v["actions_with_note"] = json!(with_note);
+    v["hook_matched"] = json!(matched);
     v["skipped_lines"] = json!(parsed.skipped_lines);
     v["total_lines"] = json!(parsed.total_lines);
     v["windowed"] = json!(parsed.windowed);
@@ -435,6 +516,31 @@ mod tests {
         assert_eq!(p.total_lines, 14);
         assert!(!p.windowed);
         assert_eq!(p.entries[0].ts, parse_ts("2026-11-05T14:00:01.000Z"));
+    }
+
+    #[test]
+    fn actions_are_linked_to_the_request_and_the_note_before_them() {
+        let data = [
+            json!({"type": "user", "message": {"content": "make a PDF of GDP by country"}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "I'll use GDP per capita because totals favour big countries."}, {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "python make.py"}}, {"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "a.csv"}}]}}),
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}}),
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "ls"}}]}}),
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let p = parse_jsonl(&data, None);
+        let acts: Vec<&Entry> = p.entries.iter().filter(|e| e.kind == EntryKind::Action).collect();
+        assert_eq!(acts.len(), 3);
+        assert_eq!(acts[0].tool_use_id.as_deref(), Some("toolu_1"));
+        assert_eq!(acts[0].instruction.as_deref(), Some("make a PDF of GDP by country"));
+        assert!(acts[0].note_before.as_deref().unwrap().starts_with("I'll use GDP per capita"));
+        assert_eq!(acts[1].note_before, acts[0].note_before, "actions started together share the note");
+        assert_eq!(acts[2].note_before, None, "nothing written after the last result");
+        assert_eq!(acts[2].instruction.as_deref(), Some("make a PDF of GDP by country"));
+        let res = p.entries.iter().find(|e| e.kind == EntryKind::Result).unwrap();
+        assert_eq!(res.tool_use_id.as_deref(), Some("toolu_1"));
     }
 
     #[test]

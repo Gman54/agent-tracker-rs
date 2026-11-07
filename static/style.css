@@ -687,3 +687,10 @@ details.conv[open] > summary.conv-who { margin-bottom: 6px; }
   .why-list dd { margin-bottom: 8px; }
 }
 #svh-box .card { margin-bottom: 18px; }
+
+/* "At a glance" summary and the note before each action */
+.glance { border-collapse: collapse; width: 100%; margin: 4px 0 12px; font-size: .95rem; }
+.glance caption { text-align: left; font-weight: 600; padding-bottom: 4px; }
+.glance th, .glance td { text-align: left; vertical-align: top; padding: 6px 10px; border-top: 1px solid var(--border, #e8e2d9); }
+.glance th { width: 34%; font-weight: 600; }
+.conv-note { margin: 6px 0 2px; }
