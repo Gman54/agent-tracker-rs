@@ -1,6 +1,7 @@
 //! Verifier plugins. Each check inspects evidence (manifests, events, change hints) and returns
 //! Passed / Failed / UnableToVerify. A check must say "unable to verify" whenever the evidence
 //! doesn't cover what it asserts — never guess "passed".
+pub mod auto_checks;
 pub mod changes_within_scope;
 pub mod folder_structure_matches;
 pub mod inputs_preserved_in_output;
@@ -181,6 +182,8 @@ impl Default for VerifierRegistry {
         r.register(Box::new(inputs_preserved_in_output::InputsPreservedInOutput));
         r.register(Box::new(folder_structure_matches::FolderStructureMatches));
         r.register(Box::new(changes_within_scope::ChangesWithinScope));
+        r.register(Box::new(auto_checks::NoUnexpectedDeletions));
+        r.register(Box::new(auto_checks::EditsInsideFolder));
         r
     }
 }

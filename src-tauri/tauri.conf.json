@@ -29,14 +29,17 @@
       "icons/icon.png"
     ],
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
       "nsis": {
         "installMode": "currentUser",
         "startMenuFolder": "AgentTracker",
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
-        "language": "en-US"
+        "language": {
+          "en-US": { "localePath": "./windows/en-US.wxl" }
+        }
       }
     }
   }

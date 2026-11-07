@@ -53,6 +53,9 @@ pub struct Collector {
     /// Extra user-supplied words/phrases to scrub (on top of the built-in secret redaction,
     /// which is always on).
     custom_redactions: Mutex<Vec<String>>,
+    /// Set by the app so agent prompts can start and finish automatic tasks.
+    engine: Mutex<Option<Arc<crate::engine::Engine>>>,
+    db: crate::db::Db,
 }
 
 /// Replaces each literal phrase (case-sensitive, at least 3 characters) in every string value.
@@ -90,7 +93,65 @@ impl Collector {
             custom_redactions: Mutex::new(
                 db.get_setting("redaction_patterns").ok().flatten().map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default(),
             ),
+            engine: Mutex::new(None),
+            db: db.clone(),
         })
+    }
+
+    /// Lets the collector create and check automatic tasks.
+    pub fn set_engine(&self, e: Arc<crate::engine::Engine>) {
+        *self.engine.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+    }
+
+    fn engine(&self) -> Option<Arc<crate::engine::Engine>> {
+        self.engine.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn auto_tasks_on(&self) -> bool {
+        self.db.get_setting("auto_tasks").ok().flatten().map(|v| v != "0" && v != "false").unwrap_or(true)
+    }
+
+    /// Starts an automatic task for an agent job that no running task covers.
+    fn maybe_auto_start(&self, ev: &AgentEvent) {
+        let starts_job = match ev.event_type {
+            EventType::TaskSubmitted => true,
+            // Cursor never reports the prompt, so its first event in a folder starts the job.
+            EventType::SessionStarted | EventType::ToolStarted | EventType::ToolFinished => ev.connector_name == "cursor",
+            _ => false,
+        };
+        if !starts_job || ev.task_id.is_some() {
+            return;
+        }
+        let Some(wd) = ev.working_dir.clone() else { return };
+        let Some(engine) = self.engine() else { return };
+        if !self.auto_tasks_on() {
+            return;
+        }
+        if let Ok(Some(_)) = self.tasks.running_task_for_dir(&wd) {
+            return;
+        }
+        if !safe_auto_folder(&wd) {
+            return;
+        }
+        if let Err(e) = auto_start(&engine, ev, &wd) {
+            eprintln!("automatic task couldn't start: {e}");
+        }
+    }
+
+    /// Checks an automatic task when its agent says the job is done.
+    fn maybe_auto_finish(&self, ev: &AgentEvent) {
+        if !matches!(ev.event_type, EventType::AgentReportedCompletion | EventType::SessionEnded) {
+            return;
+        }
+        let Some(tid) = ev.task_id.clone() else { return };
+        let Some(engine) = self.engine() else { return };
+        let Ok(t) = engine.tasks.get(&tid) else { return };
+        if !t.is_auto() || t.lifecycle != crate::task::Lifecycle::Running {
+            return;
+        }
+        if let Err(e) = auto_finish(&engine, &t) {
+            eprintln!("automatic check failed: {e}");
+        }
     }
 
     pub fn set_paused(&self, p: bool) {
@@ -110,6 +171,10 @@ impl Collector {
     pub fn accept(&self, body: &[u8]) -> Result<String> {
         let v: Value = serde_json::from_slice(body).unwrap_or_else(|e| json!({"connector": "unknown", "malformed": e.to_string()}));
         let connector = v.get("connector").and_then(Value::as_str).unwrap_or("unknown").to_string();
+        // A file's "before" state only exists right now, before the agent's edit runs.
+        if !self.is_paused() {
+            crate::gitwork::capture::pre_snapshot(&self.db, &v);
+        }
         self.queue.enqueue(&connector, &v)
     }
 
@@ -139,8 +204,14 @@ impl Collector {
                     redact_custom(&mut ev.payload_redacted, &phrases);
                 }
                 self.attribute(&mut ev)?;
+                if ev.task_id.is_none() {
+                    self.maybe_auto_start(&ev);
+                    self.attribute(&mut ev)?;
+                }
                 if self.events.insert(&ev)? {
                     st.stored += 1;
+                    crate::gitwork::capture::observe(&self.db, &ev);
+                    self.maybe_auto_finish(&ev);
                 } else {
                     st.duplicates += 1;
                 }
@@ -192,4 +263,78 @@ impl Collector {
             }
         })
     }
+}
+
+/// Never auto-snapshot a drive root, the home folder itself, or a very short path.
+pub fn safe_auto_folder(wd: &str) -> bool {
+    let norm = crate::fs_observer::normalize_path(Path::new(wd));
+    let segs: Vec<&str> = norm.split(['/', '\\']).filter(|s| !s.is_empty() && !s.ends_with(':')).collect();
+    if segs.len() < 2 {
+        return false;
+    }
+    for var in ["USERPROFILE", "HOME"] {
+        if let Ok(h) = std::env::var(var) {
+            if !h.is_empty() && crate::fs_observer::normalize_path(Path::new(&h)).trim_end_matches(['/', '\\']) == norm.trim_end_matches(['/', '\\']) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn auto_title(ev: &AgentEvent, wd: &str) -> String {
+    let prompt = ev.payload_redacted.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
+    let first_line = prompt.lines().next().unwrap_or("").trim();
+    if !first_line.is_empty() && !first_line.starts_with("[REDACTED") {
+        let mut t: String = first_line.chars().take(80).collect();
+        if first_line.chars().count() > 80 {
+            t.push_str("...");
+        }
+        return t;
+    }
+    let name = Path::new(wd).file_name().and_then(|n| n.to_str()).unwrap_or(wd);
+    format!("Agent job in {name}")
+}
+
+fn auto_start(engine: &crate::engine::Engine, ev: &AgentEvent, wd: &str) -> Result<()> {
+    use crate::task::{FolderRole, NewTask, TaskFolder};
+    let instruction = ev.payload_redacted.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
+    let t = engine.tasks.create(NewTask {
+        title: auto_title(ev, wd),
+        instruction,
+        connector: ev.connector_name.clone(),
+        folders: vec![TaskFolder { folder_path: wd.to_string(), role: FolderRole::Working }],
+        checks: vec![],
+    })?;
+    engine.tasks.set_origin(&t.id, "auto")?;
+    engine.capture_baseline(&t.id)?;
+    engine.start(&t.id)?;
+    Ok(())
+}
+
+fn auto_finish(engine: &crate::engine::Engine, t: &crate::task::TaskDefinition) -> Result<()> {
+    use crate::task::{FolderRole, NewCheck};
+    let mut events = engine.events.by_task(&t.id)?;
+    if let Some(sid) = &t.session_id {
+        for e in engine.events.by_session(sid)? {
+            if !events.iter().any(|x| x.event_id == e.event_id) {
+                events.push(e);
+            }
+        }
+    }
+    let folder = t.folders_with(FolderRole::Working).into_iter().next().unwrap_or_default();
+    let folder_norm = crate::fs_observer::normalize_path(Path::new(&folder));
+    let inside: Vec<String> = crate::verifiers::auto_checks::reported_edit_paths(&events)
+        .into_iter()
+        .filter(|p| crate::fs_observer::relative_to(&folder_norm, p).is_some())
+        .collect();
+    let mut checks = vec![];
+    if !inside.is_empty() {
+        checks.push(NewCheck { check_type: "required_outputs_exist".into(), params: json!({"paths": inside, "min_size_bytes": 1}), is_required: true });
+    }
+    checks.push(NewCheck { check_type: "edits_inside_folder".into(), params: json!({}), is_required: true });
+    checks.push(NewCheck { check_type: "no_unexpected_deletions".into(), params: json!({}), is_required: true });
+    engine.tasks.update_checks(&t.id, checks)?;
+    engine.verify_with_key(&t.id, None)?;
+    Ok(())
 }

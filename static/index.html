@@ -15,7 +15,7 @@
         <img src="/static/icon.svg" alt="" class="brand-icon">
         <div>
           <div class="brand-name">AgentTracker</div>
-          <div class="brand-sub">Did your AI agent really do it?</div>
+          <div class="brand-sub">Agent activity verification</div>
         </div>
       </div>
       <nav class="nav" id="nav" aria-label="Main">
@@ -43,6 +43,15 @@
           <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h11v17L12 16.5l-5.5 4z"/></svg>
           <span>Saved Checks</span>
         </a>
+        <a href="#code" data-screen="code">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5.5" r="2.2"/><circle cx="6" cy="18.5" r="2.2"/><circle cx="18" cy="8.5" r="2.2"/><path d="M6 7.7v8.6"/><path d="M18 10.7c0 4-6 3.2-11.2 6.3"/></svg>
+          <span>Code changes</span>
+        </a>
+        <div class="nav-section">Decision runtime</div>
+        <a href="#runtime" data-screen="runtime">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1.5V4M15 1.5V4M9 20v2.5M15 20v2.5M1.5 9H4M1.5 15H4M20 9h2.5M20 15h2.5"/></svg>
+          <span>Agent Runtime</span>
+        </a>
         <a href="#settings" data-screen="settings">
           <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg>
           <span>Settings</span>
@@ -56,12 +65,14 @@
       </div>
     </aside>
     <main class="main">
-      <div id="pause-banner" class="pause-banner hidden" role="alert">⏸ Collection is paused — changes may be missed. Resume in the sidebar.</div>
+      <div id="pause-banner" class="pause-banner hidden" role="alert">Collection is paused. Changes may be missed. Resume in the sidebar.</div>
       <div id="toast" class="toast-stack" role="status" aria-live="polite"></div>
       <section id="screen" class="screen" aria-live="polite" tabindex="-1"></section>
     </main>
   </div>
   <div id="wizard-overlay" class="wizard-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="wizard-title"></div>
   <script src="/static/app.js"></script>
+  <script src="/static/runtime.js"></script>
+  <script src="/static/code.js"></script>
 </body>
 </html>

@@ -49,7 +49,9 @@ pub const SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("start_with_windows", "0"),
     ("keep_in_tray", "1"),
     ("auto_verify", "0"),
+    ("auto_tasks", "1"),
     ("export_dir", ""),
+    ("git_tracking", "1"),
 ];
 
 impl AppState {
@@ -174,6 +176,12 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with(state, Router::new())
+}
+
+/// Builds the router with additional UI routes (e.g. the decision runtime's `/api/ui/runtime/*`).
+/// Extra routes are merged before the guard layer, so they get the same session/CSRF/host checks.
+pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/static/*name", get(static_file))
@@ -190,6 +198,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/retention/purge", post(retention_purge))
         .route("/api/ui/pick-folder", post(pick_folder))
         .route("/api/ui/runs/:id", get(run_get))
+        .route("/api/ui/runs/:id/conversation", get(run_conversation))
         .route("/api/ui/export/:fmt/:id", post(run_export))
         .route("/api/ui/incident/propose", post(incident_propose))
         .route("/api/ui/tasks/:id/live", get(task_live))
@@ -205,6 +214,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/license", post(license_set))
         .route("/api/ui/chain/verify", post(chain_verify))
         .route("/api/ui/demo", post(demo_create))
+        .route("/api/ui/git/repos", get(git_repos_list).post(git_repo_add))
+        .route("/api/ui/git/repos/:id", delete(git_repo_remove))
+        .route("/api/ui/git/repos/:id/github", post(git_repo_github))
+        .route("/api/ui/git/repos/:id/fetch", post(git_repo_fetch))
+        .route("/api/ui/git/fetch-all", post(git_fetch_all))
+        .route("/api/ui/git/github-token", post(git_token_set))
+        .route("/api/ui/git/open-link", post(git_open_link))
+        .route("/api/ui/git/repos/:id/commits", get(git_commits))
+        .route("/api/ui/git/repos/:id/commits/:sha", get(git_commit_inspect))
+        .merge(extra)
         .fallback(|| async { err(404, "Not found") })
         .layer(middleware::from_fn_with_state(state.clone(), guards))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -215,6 +234,10 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> s
     axum::serve(listener, build_router(state)).await
 }
 
+pub async fn serve_with(listener: tokio::net::TcpListener, state: Arc<AppState>, extra: Router<Arc<AppState>>) -> std::io::Result<()> {
+    axum::serve(listener, build_router_with(state, extra)).await
+}
+
 // ---- static + launch -------------------------------------------------------------------------------
 const INDEX_HTML: &[u8] = include_bytes!("../../../static/index.html");
 
@@ -223,6 +246,8 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "index.html" => (INDEX_HTML, "text/html; charset=utf-8"),
         "app.js" => (include_bytes!("../../../static/app.js"), "text/javascript; charset=utf-8"),
         "style.css" => (include_bytes!("../../../static/style.css"), "text/css; charset=utf-8"),
+        "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
+        "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
         _ => return None,
     })
@@ -617,7 +642,7 @@ fn apply_autostart(enabled: bool) -> std::result::Result<(), String> {
     {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut cmd = std::process::Command::new("reg");
+        let mut cmd = crate::connectors::hidden_command("reg");
         if enabled {
             cmd.args(["add", key, "/v", "AgentTracker", "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
         } else {
@@ -707,7 +732,32 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
 }
 
 async fn run_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
-    ok(load_run(&st.engine, &id).map(|(task, run, events)| json!({"task": task, "run": run, "events": events})))
+    ok(load_run(&st.engine, &id).map(|(task, run, events)| {
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &Value::Null);
+        json!({"task": task, "run": run, "events": events, "said_vs_happened": svh})
+    }))
+}
+
+/// Claude Code's own record of the conversation behind this run (read-only, file read off the
+/// async threads so a big record never stalls the UI).
+async fn run_conversation(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let (task, run, events) = match load_run(&st.engine, &id) {
+        Ok(x) => x,
+        Err(e) => return core_err(e),
+    };
+    let roots = crate::conversation::claude_roots();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut v = crate::conversation::for_task(&task, &run, &events, &roots);
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &v);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("said_vs_happened".into(), svh);
+        }
+        v
+    });
+    match read.await {
+        Ok(v) => j(200, v),
+        Err(_) => err(500, "Couldn't read the conversation"),
+    }
 }
 
 async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath<(String, String)>) -> Response {
@@ -715,10 +765,14 @@ async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath
         Ok(x) => x,
         Err(e) => return core_err(e),
     };
-    let stamp = &run.id[..8.min(run.id.len())];
+    let stamp = run.id[..8.min(run.id.len())].to_string();
+    let conv = {
+        let (t, r, e, roots) = (task.clone(), run.clone(), events.clone(), crate::conversation::claude_roots());
+        tokio::task::spawn_blocking(move || crate::conversation::for_task(&t, &r, &e, &roots)).await.unwrap_or(Value::Null)
+    };
     let (body, mime, ext) = match fmt.as_str() {
-        "html" => (crate::report::export_html(&task, &run, &events), "text/html; charset=utf-8", "html"),
-        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events)).unwrap_or_default(), "application/json", "json"),
+        "html" => (crate::report::export_html(&task, &run, &events, &conv), "text/html; charset=utf-8", "html"),
+        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events, &conv)).unwrap_or_default(), "application/json", "json"),
         _ => return err(404, "Unknown export format"),
     };
     Response::builder()
@@ -787,5 +841,115 @@ async fn task_live(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>
     match r {
         Ok(v) => ok(v),
         Err(resp) => resp,
+    }
+}
+
+// ---- git tracking ------------------------------------------------------------------------------------
+async fn git_repos_list(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).list()).await {
+        Ok(Ok(repos)) => j(
+            200,
+            json!({
+                "repos": repos,
+                "has_token": crate::gitwork::has_token(&st.engine.db),
+                "tracking": st.setting("git_tracking") != "0",
+            }),
+        ),
+        Ok(Err(e)) => core_err(e),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_add(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let Some(path) = body.get("path").and_then(Value::as_str).map(str::to_string) else { return err(400, "Pick a folder first") };
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).add(&path)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_remove(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).remove(&id).map(|_| json!({"removed": true})))
+}
+
+async fn git_repo_github(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>) -> Response {
+    let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).set_github(&id, enabled))
+}
+
+/// "Check the remote now": git fetch in the project (only remote-tracking branches change).
+async fn git_repo_fetch(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch(&id)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// "Check all projects": fetches every project's remote; one failure never stops the rest.
+async fn git_fetch_all(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch_all()).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_token_set(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let token = body.get("token").and_then(Value::as_str).unwrap_or("");
+    if token.trim().chars().any(char::is_whitespace) {
+        return err(400, "That doesn't look like a GitHub token.");
+    }
+    match crate::gitwork::set_token(&st.engine.db, token) {
+        Ok(()) => j(200, json!({"has_token": crate::gitwork::has_token(&st.engine.db)})),
+        Err(e) => core_err(e),
+    }
+}
+
+async fn git_commits(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(50);
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::matching::list_commits(std::path::Path::new(&repo.root), limit)
+    })
+    .await
+    {
+        Ok(r) => ok(r.map(|c| json!({"commits": c}))),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_commit_inspect(State(st): State<Arc<AppState>>, UrlPath((id, sha)): UrlPath<(String, String)>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::inspect_with_github(&db, &repo, &sha)
+    })
+    .await
+    {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// Opens a GitHub page in the default browser. Only https://github.com/ links are allowed.
+async fn git_open_link(Json(body): Json<Value>) -> Response {
+    let url = body.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    let safe = url.starts_with("https://github.com/") && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains('"');
+    if !safe {
+        return err(400, "Only GitHub links can be opened from here.");
+    }
+    #[cfg(windows)]
+    let r = crate::connectors::hidden_command("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+    match r {
+        Ok(_) => j(200, json!({"opened": true})),
+        Err(e) => err(500, &format!("Couldn't open the browser: {e}")),
     }
 }

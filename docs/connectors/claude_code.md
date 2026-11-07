@@ -34,3 +34,29 @@
 - If AgentTracker isn't running, events go to `~/.agenttracker/fallback_queue.jsonl` (redacted)
   and are replayed on next start.
 - Event-to-task matching uses the agent's working folder.
+
+## How Claude Code is detected
+
+1. `claude --version` on the PATH the AgentTracker window sees.
+2. If that fails: the usual install folders — `%USERPROFILE%\.local\bin\claude.exe` (native installer),
+   `%USERPROFILE%\.claude\local\`, `%APPDATA%\npm\claude.cmd`, `%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe`.
+3. The copy of Claude Code that ships with the Claude desktop app (Code tab). The newest version folder is tried first
+   (version folders are compared by number, so `2.1.10` comes before `2.1.9`):
+   - Microsoft Store / MSIX install:
+     `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\<version>\claude.exe`
+     (the package id after `Claude_` is often `pzs8sxrjxfjjc`, but any `Claude_*` folder is checked)
+   - Regular install: `%APPDATA%\Claude\claude-code\<version>\claude.exe`
+
+   If that built-in `claude.exe` doesn't answer `--version`, it still counts as found and the card shows
+   "Claude desktop app (built-in Claude Code)".
+4. If no `claude.exe` is found at all, the existence of any of these still counts as "found (built-in Claude Code)":
+   a `%LOCALAPPDATA%\Packages\Claude_*` folder, `%APPDATA%\Claude` (when it contains a `claude-code` folder),
+   `%LOCALAPPDATA%\Claude`, `%LOCALAPPDATA%\AnthropicClaude`, `%LOCALAPPDATA%\Programs\Claude`, or the
+   Claude Code VS Code/Cursor extension.
+
+The card's notes say in plain words where Claude Code was found. If nothing is found but hooks are installed,
+the card explains that the hooks will start working once Claude Code runs, and suggests starting a Claude session.
+
+Hooks in `~/.claude/settings.json` are documented to apply to the desktop app too, but users have reported them
+not firing there (anthropics/claude-code#30953). Not verified by us either way. The `claude` command in a terminal is
+the most reliable way to get events.

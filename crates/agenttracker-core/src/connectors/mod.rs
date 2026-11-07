@@ -126,7 +126,7 @@ pub fn compute_state(det: &DetectResult, hook_program_ok: bool, recent_capture_e
         return (ConnectorState::Degraded, format!("{recent_capture_errors} recent message(s) from the agent couldn't be understood."));
     }
     if !det.agent_found {
-        return (ConnectorState::Degraded, "Hooks are installed, but the agent itself wasn't found.".into());
+        return (ConnectorState::Degraded, "Hooks are installed. We couldn't find the agent yet, but the hooks will work once it runs. Try starting a session.".into());
     }
     (ConnectorState::Connected, "Connected.".into())
 }
@@ -225,10 +225,24 @@ pub(crate) fn save_state(state_file: &Path, st: &InstallState) -> Result<()> {
     Ok(())
 }
 
+/// Builds a `Command` that never opens a console window on Windows (CREATE_NO_WINDOW).
+/// Without this, every background check from the desktop app flashes a cmd window.
+pub fn hidden_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Runs `<bin> --version` with a timeout; returns the first non-empty output line.
 pub fn probe_version(candidates: &[&str], timeout: Duration) -> Option<String> {
     for c in candidates {
-        let Ok(mut child) = Command::new(c).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
+        let Ok(mut child) = hidden_command(c).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
             continue;
         };
         let start = Instant::now();

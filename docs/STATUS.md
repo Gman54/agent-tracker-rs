@@ -1,12 +1,14 @@
 # AgentTracker: status
 
-Last updated: 2026-11-04 (Phase 3). Every line below says exactly how far that feature has been checked.
+Last updated: 2026-11-04 (Code changes / Git tracking). Every line below says exactly how far that feature has been checked.
 "Fake-agent tested" means an automated test sends hand-built hook payloads in the documented
 format and does real file work. **No real Claude Code, Cursor or Copilot process was involved.**
 
-**Automated tests:** `cargo test --workspace` → **39 passed, 0 failed** (29 acceptance tests,
-3 core unit tests and 7 tracker-common unit tests). `cargo check --workspace` is clean. Both were
-run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
+**Automated tests:** `cargo test --workspace --exclude agenttracker` → **95 passed, 0 failed**
+(including 19 Git tracking acceptance tests, 14 core unit tests, 23 runtime tests and 7
+tracker-common unit tests). `cargo check -p agenttracker` and
+`cargo check -p agenttracker-core --target x86_64-pc-windows-gnu` are clean. All of this was run on
+Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 
 | Feature | Status | How it was checked |
 |---|---|---|
@@ -26,7 +28,7 @@ run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 | GitHub Copilot (VS Code agent) connector | Implemented, **Experimental** | 4 fake-agent tests (install idempotent, uninstall preserves unrelated, payload normalization, unsupported version). **Not live-tested** |
 | Manual mode (just a folder) | Implemented | Fake-agent tested; browser demo run end to end |
 | Codex connector | Not started | Planned post-release |
-| UI: 7 screens (Home, Connections, New Task, Live Task, Results, Saved Checks, Settings) | Implemented | Browser-verified on loopback (headless app, Chrome). No console errors. Screenshots in `docs/screenshots/` |
+| UI: 8 screens (Home, Connections, New Task, Live Task, Results, Saved Checks, Code changes, Settings) | Implemented | Browser-verified on loopback (headless app, Chrome). No console errors. Screenshots in `docs/screenshots/` (Code changes was checked separately on the headless preview; no screenshot saved) |
 | Welcome wizard (3 steps) | Implemented | Browser-verified |
 | Report export (HTML / JSON) | Implemented | API checked on loopback (200, attachment download). Not opened in a desktop download flow |
 | Create check from incident | Implemented | `/api/ui/incident/propose` maps a failed check to a saved check. API checked; returns a plain-English "nothing to turn into a rule" message for passed checks |
@@ -43,3 +45,14 @@ run on Linux in the dev sandbox; the Windows CI run happens in GitHub Actions.
 | Live Cursor test | Not done | Needs a live agent |
 | Live Copilot test | Not done | Needs a live agent |
 | License server | Stub | Format check only (see KNOWN_LIMITATIONS.md) |
+| Decision runtime (`agenttracker-runtime`) | Implemented | **23 simulated tests pass** (`cargo test -p agenttracker-runtime`, scripted provider). See docs/runtime/CAPABILITY_REPORT.md |
+| Runtime live model test | Partial | Ollama `qwen2.5:1.5b` (CPU): 3 runs, **no valid tool action produced**. Not supported. Other models untested |
+| Runtime with LM Studio | Not tested | No LM Studio server available in the sandbox |
+| Runtime replay key DPAPI wrapping | Written | `cfg(windows)`, **not compiled in the sandbox** |
+| Git tracking (Code changes screen): agent edits matched to commits | **Supported** (fake-agent) | The three required cases pass with real git repos and a local bare remote: agent edits and pushes, agent edits and a human pushes, a human revises the agent's edit before committing (`tests/tests/git_tracking.rs`; the original 12 passed 3 runs in a row, and all 19 including the fetch tests pass now). Partial staging, mixed commits, missing evidence, failed pushes and `echo git push` are also tested. Commit screen with "What the agent proposed" vs "What actually shipped" browser-verified on the headless preview. **Not live-tested with a real agent or on Windows** |
+| Four separate facts (edit attribution, commit authorship, agent ran git push, remote branch updated) | Implemented | Asserted per case in the acceptance tests; unknown stays "Unknown" / "Not seen" |
+| "Check the remote now" (git fetch from the Code changes screen) | Implemented | `RepoStore::fetch` runs `git fetch --all --prune` with a 2-minute limit and plain-English errors (sign-in, unreachable, project not found, no remote, folder missing). Three acceptance tests use a second clone and a local bare remote: a push made elsewhere turns the remote fact from "Not seen" to "Confirmed", a second check reports "Already up to date", local files and branches are unchanged. Buttons on the commit list and the commit page browser-checked on the headless preview. **Not tested against github.com or on Windows** |
+| "Check all projects" (git fetch for every project) | Implemented | `RepoStore::fetch_all` checks every project, up to 4 at a time, skipping projects with no remote and continuing past failures; `POST /api/ui/git/fetch-all`. Three acceptance tests: a mix of a project with a push from elsewhere, an up-to-date project, a no-remote project and a broken remote (each gets the right result, "Last checked" saved only for the successful ones, local files unchanged), a deleted project folder, no projects, and more projects than workers. `origin/HEAD` appearing on the first fetch (Git 2.48+, e.g. Git for Windows) is not counted as new changes; found by the Windows CI run and covered by a test. Button, "Checking 3 projects..." state, summary and per-project lines browser-checked on the headless preview. **Not tested against github.com or on Windows** |
+| GitHub commit and pull request links (optional, read-only token) | Implemented | Tested against a **local mock server only** (checks the token is sent, no prompt text is sent, token not in the report). **Not tested against the real GitHub API** |
+| Open GitHub link in your browser | Implemented | **Not tested** (button not clicked in the preview; Windows `rundll32` path not run) |
+| Agent Runtime screen + "Why this action?" panel | Implemented | Browser-verified on the headless preview server; screenshots in docs/runtime/screenshots/ |

@@ -17,6 +17,9 @@ thiserror = { workspace = true }
 once_cell = { workspace = true }
 notify = "6"
 globset = "0.4"
+sha1 = "0.10"
+similar = "2"
+ureq = { version = "2", features = ["json"] }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 

@@ -76,3 +76,44 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
 - Changes made while AgentTracker was closed aren't seen live; the Live Task screen lists this as
   a gap, and the final snapshot comparison still catches them.
 - The UI is English only.
+
+## 11. Decision runtime
+- Records show the application-level request, the model's stated rationale and the observed
+  execution. They do not show internal model computation, provider-side templates or hidden
+  prompts, and they do not prove which input caused an action.
+- No model is marked supported. `qwen2.5:1.5b` was tried live and did not produce a valid tool action.
+- LM Studio is untested. Windows DPAPI key wrapping for replay captures has not been compiled.
+- The "completion claim" check is a keyword heuristic and will miss rephrased claims.
+- Influence tests replay only the decision stage, and seeds do not guarantee reproducibility.
+- The runtime enforces protected paths for its own tools only. Externally connected agents are
+  still observed, not controlled.
+
+## 12. Code changes (Git tracking)
+- Only edits made with the agent's file-edit tools are attributed (Claude Code Edit/Write-style
+  tools, Cursor `afterFileEdit`, Copilot edit tools). Changes an agent makes through shell commands
+  (`sed`, `echo > file`, scripts) are not attributed to it and show up as "work from someone else".
+- A clean "before" snapshot is only taken for Claude Code (at `PreToolUse`). For other agents the
+  before text comes from what the agent reported, or is missing, and the match basis is weaker.
+- Reworded lines are matched by text similarity (60% or more). That is a judgement, not proof, and
+  the screen says so.
+- Rebase, squash, amend and cherry-pick give commits new ids. Matching still works line by line,
+  but with lower confidence.
+- "Remote branch updated" is checked against this computer's remote-tracking branches, which only
+  move when you push or fetch here, or against GitHub if you turned that on for the project.
+  **Check the remote now** runs `git fetch --all --prune` to refresh them. It relies on Git's own
+  saved sign-in: it never asks for a password in a terminal, but on Windows Git Credential Manager
+  may open its own sign-in window for an HTTPS remote. It stops after 2 minutes. It was tested only
+  with local bare remotes, not against github.com or on Windows. "Last checked" only counts checks
+  made from AgentTracker, not fetches you run yourself.
+  **Check all projects** runs the same check for every project, up to 4 at a time, each with its
+  own 2-minute limit, so with many slow remotes it can take several minutes; the screen waits
+  for all of them before showing the summary. If several projects use HTTPS remotes that need
+  signing in, Windows may show more than one Git sign-in window. The result list is kept only
+  until you leave the Code changes screen.
+- "Agent ran git push" is based on the agent's own tool report. Whether it succeeded comes from the
+  exit status the agent reported.
+- Binary files and files over 512 KB are compared by Git blob id only, not line by line.
+- The GitHub token is stored in AgentTracker's local settings database without extra encryption.
+  Use a fine-grained, read-only token limited to the projects you pick.
+- GitHub links were tested against a local mock server only, not the real GitHub API. Nothing in
+  this feature has been tested with a live agent or on Windows yet.

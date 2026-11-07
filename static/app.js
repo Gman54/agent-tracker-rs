@@ -167,9 +167,9 @@ const lifecyclePill = lc => pill(...(LIFECYCLE[lc] || ['', lc]));
 const ACTIVE = ['draft', 'baselining', 'ready', 'running', 'verifying'];
 
 const VERDICT = {
-  passed: { cls: 'verdict-pass', icon: '✓', text: '✓ All required checks passed.', short: 'All good', pill: 'green', kind: 'ok' },
-  failed: { cls: 'verdict-fail', icon: '✗', text: '✗ Something needs your attention.', short: 'Needs attention', pill: 'red', kind: 'bad' },
-  unable_to_verify: { cls: 'verdict-unknown', icon: '?', text: "? We couldn't confirm everything.", short: "Couldn't confirm", pill: 'amber', kind: 'warn' },
+  passed: { cls: 'verdict-pass', icon: '✓', text: 'All required checks passed.', short: 'Passed', pill: 'green', kind: 'ok' },
+  failed: { cls: 'verdict-fail', icon: '✗', text: 'One or more checks need attention.', short: 'Needs attention', pill: 'red', kind: 'bad' },
+  unable_to_verify: { cls: 'verdict-unknown', icon: '?', text: "We couldn't confirm everything.", short: "Couldn't confirm", pill: 'amber', kind: 'warn' },
 };
 const CHECK_STATUS = {
   passed: ['ok', 'Passed'],
@@ -187,7 +187,7 @@ const CHECKS = {
     params: { paths: [], allow_additions: true },
   },
   required_outputs_exist: {
-    name: 'The files I asked for exist',
+    name: 'Required files exist',
     desc: 'Each file you list must be there afterwards (and not empty).',
     params: { paths: ['output/result.txt'], min_size_bytes: 1 },
   },
@@ -206,7 +206,18 @@ const CHECKS = {
     desc: 'Files in a folder must match the name patterns you give.',
     params: { root: 'output', patterns: ['*.txt'], required_patterns: [], allow_other: false },
   },
+  no_unexpected_deletions: {
+    name: 'Nothing got deleted by surprise',
+    desc: 'Every file from the “before” snapshot must still be there afterwards.',
+    params: { allowed_deletions: [] },
+  },
+  edits_inside_folder: {
+    name: 'The agent only changed files in the project folder',
+    desc: 'Every file the agent said it made or edited must be inside the project folder.',
+    params: {},
+  },
 };
+const autoLabel = t => (t && t.origin === 'auto' ? 'Started automatically' : '');
 const checkName = t => (CHECKS[t] && CHECKS[t].name) || t;
 
 const EVENT_LABELS = {
@@ -316,7 +327,7 @@ async function updateCollectStatus() {
 async function setCollection(paused) {
   await api('POST', `/api/ui/collection/${paused ? 'pause' : 'resume'}`);
   await updateCollectStatus();
-  showToast(paused ? 'Collection paused. I’ll keep anything already queued.' : 'Collection is back on.', paused ? 'warn' : 'success');
+  showToast(paused ? 'Collection paused. Messages already queued are kept.' : 'Collection is back on.', paused ? 'warn' : 'success');
 }
 $('#collect-toggle').addEventListener('click', async ev => {
   const btn = ev.currentTarget;
@@ -339,10 +350,10 @@ actions['collection-toggle'] = async () => {
 // Welcome wizard (full-panel overlay, 3 steps)
 // =====================================================================================================
 const WIZARD_CHOICES = [
-  { id: 'claude_code', title: 'Connect Claude Code', desc: 'I’ll listen for what Claude Code says it’s doing.' },
-  { id: 'cursor', title: 'Connect Cursor', desc: 'I’ll listen to Cursor’s agent (experimental).' },
+  { id: 'claude_code', title: 'Connect Claude Code', desc: 'Receive activity reported by Claude Code hooks.' },
+  { id: 'cursor', title: 'Connect Cursor', desc: 'Receive activity reported by Cursor’s agent (experimental).' },
   { id: 'copilot_vscode', title: 'Connect GitHub Copilot', desc: 'For Copilot’s agent hooks (experimental).' },
-  { id: 'manual', title: 'Just check a folder', desc: 'No agent needed — I’ll check the files afterwards.' },
+  { id: 'manual', title: 'Just check a folder', desc: 'No agent required. Files are checked afterwards.' },
 ];
 
 function openWizard() {
@@ -362,15 +373,15 @@ function renderWizard() {
   let body = '';
   if (w.step === 1) {
     body = `${ART.wave}
-      <h2 id="wizard-title" class="center">Hi! I'm AgentTracker 👋</h2>
-      <p>When you ask an AI agent to do a job on your computer, I keep an eye on two things:</p>
+      <h2 id="wizard-title" class="center">Welcome to AgentTracker</h2>
+      <p>AgentTracker records what an AI agent does on your computer and checks the outcome independently:</p>
       <ul>
-        <li><b>What the agent tells us</b> it did — its actions and when it says “done”.</li>
-        <li><b>What actually changed</b> in your folders, which I check myself.</li>
-        <li>Afterwards, I check the job against <b>your own list</b> — like “these files must exist” or “don’t touch my originals”.</li>
+        <li><b>Reported activity</b>: the agent's actions and its completion claims.</li>
+        <li><b>Observed changes</b>: what actually changed in your folders, measured separately.</li>
+        <li><b>Your checks</b>: rules such as "these files must exist" or "originals must not change".</li>
       </ul>
-      <div class="note note-plain">I can't read your agent's private thoughts, and I never block or undo anything. I just watch, take notes and tell you plainly what I found.</div>
-      <div class="wizard-actions"><button class="btn btn-primary btn-big" data-act="wiz-next">Sounds good →</button></div>`;
+      <div class="note note-plain">AgentTracker does not see a model's internal reasoning. For connected agents it observes and reports; it does not block or undo actions. The Agent Runtime additionally enforces tool policy for sessions it runs.</div>
+      <div class="wizard-actions"><button class="btn btn-primary btn-big" data-act="wiz-next">Continue</button></div>`;
   } else if (w.step === 2) {
     body = `<h2 id="wizard-title">How do you want to start?</h2>
       <p class="muted">Pick one — you can add the others later from Connections.</p>
@@ -382,16 +393,16 @@ function renderWizard() {
       </div>
       <div class="wizard-actions">
         <button class="btn btn-secondary" data-act="wiz-back">← Back</button>
-        <button class="btn btn-primary btn-big" data-act="wiz-next" ${w.choice ? '' : 'disabled'}>Let's go →</button>
+        <button class="btn btn-primary btn-big" data-act="wiz-next" ${w.choice ? '' : 'disabled'}>Continue</button>
       </div>`;
   } else {
     body = `${ART.clipboard}
       <h2 id="wizard-title" class="center">Want to try a quick demo?</h2>
-      <p class="center">I’ve got a little practice task ready: a small folder with a few files and a couple of checks. It’s a safe way to see how everything works.</p>
+      <p class="center">A sample task is available: a disposable folder with a few files and two checks. It shows the full workflow without touching your own files.</p>
       <p class="center small muted">You can always find the demo in Settings later.</p>
       <div class="wizard-actions">
         <button class="btn btn-secondary" data-act="wiz-finish" data-demo="0">Skip for now</button>
-        <button class="btn btn-primary btn-big" data-act="wiz-finish" data-demo="1">Open demo task →</button>
+        <button class="btn btn-primary btn-big" data-act="wiz-finish" data-demo="1">Open sample task</button>
       </div>`;
   }
   $('#wizard-overlay').innerHTML = `<div class="wizard"><div class="wizard-steps" aria-label="Step ${w.step} of 3">${dots}</div>${body}</div>`;
@@ -443,7 +454,7 @@ function taskRow(t) {
   return `<button class="task-row" data-act="open-task" data-id="${esc(t.id)}" data-lc="${esc(t.lifecycle)}">
     <span class="task-row-main">
       <span class="task-row-title">${esc(t.title || 'Untitled task')}</span>
-      <span class="task-row-meta">${esc(connectorName(t.connector))} · updated ${esc(when(t.updated_at))}</span>
+      <span class="task-row-meta">${esc(connectorName(t.connector))}${autoLabel(t) ? ` · ${autoLabel(t)}` : ''} · updated ${esc(when(t.updated_at))}</span>
     </span>
     ${lifecyclePill(t.lifecycle)}
   </button>`;
@@ -480,10 +491,10 @@ async function render_home() {
   screenEl.innerHTML = `
     <section class="hero">
       <div>
-        <h1>See what your AI agent does. Check that the job is done.</h1>
-        <p>Tell me what the job is, and I’ll take a snapshot of your folder, watch what happens, and check the result against your own list.</p>
+        <h1>Verify what your AI agents actually did.</h1>
+        <p>Define the task, snapshot the folder, observe the session and check the result against your own rules. Use the Agent Runtime to inspect why a local model chose each action.</p>
         <div class="row">
-          <button class="btn btn-primary btn-big" data-act="go" data-screen="create">Start a task →</button>
+          <button class="btn btn-primary btn-big" data-act="go" data-screen="create">Start a task</button>
           ${tasks.length ? '' : '<button class="btn btn-secondary btn-big" data-act="demo">Try the demo</button>'}
         </div>
       </div>
@@ -501,15 +512,15 @@ async function render_home() {
     </div>
 
     <div class="card mt">
-      <div class="card-head"><h2>Recent tasks</h2>${tasks.length ? '<button class="btn btn-link" data-act="go" data-screen="live">See live task →</button>' : ''}</div>
+      <div class="card-head"><h2>Recent tasks</h2>${tasks.length ? '<button class="btn btn-link" data-act="go" data-screen="live">View live task</button>' : ''}</div>
       ${sorted.length ? `<div class="task-list">${sorted.slice(0, 5).map(taskRow).join('')}</div>`
-        : emptyState('box', 'No tasks yet', 'Start your first task, or try the demo to see how it works. It only takes a minute.',
-          '<button class="btn btn-primary" data-act="go" data-screen="create">Start a task →</button><button class="btn btn-secondary" data-act="demo">Try the demo</button>')}
+        : emptyState('box', 'No tasks yet', 'Start a task, or open the sample task to see the full workflow.',
+          '<button class="btn btn-primary" data-act="go" data-screen="create">Start a task</button><button class="btn btn-secondary" data-act="demo">Try the demo</button>')}
     </div>
 
     <div class="card card-soft mt">
       <div class="health-strip">
-        <strong>How capture is doing</strong>
+        <strong>Capture status</strong>
         <span class="health-item">${s.paused ? status('warn', 'Collection paused') : status('ok', 'Collecting')}</span>
         <span class="health-item">${s.hook_binary_exists ? status('ok', 'Hook program found') : status('warn', 'Hook program not found')}</span>
         <span class="health-item">${s.queue_pending ? status('info', `${s.queue_pending} message(s) waiting`) : status('ok', 'Nothing waiting')}</span>
@@ -551,8 +562,8 @@ function connectorCard(c) {
     return `<div class="card conn-card" id="conn-${name}">
       ${head}
       <p>File verification only. Agent actions and attribution are unavailable.</p>
-      <p class="small muted">Great when your agent isn’t supported yet: I’ll still snapshot your folder and check the result.</p>
-      <div class="row"><button class="btn btn-primary" data-act="go" data-screen="create" data-param="manual">Start manual task →</button></div>
+      <p class="small muted">Use this when your agent is not supported: the folder is still snapshotted and the result checked.</p>
+      <div class="row"><button class="btn btn-primary" data-act="go" data-screen="create" data-param="manual">Start manual task</button></div>
     </div>`;
   }
   const det = c.detect || {};
@@ -573,7 +584,8 @@ function connectorCard(c) {
       <dt>Settings file</dt><dd>${det.config_path ? `<code>${esc(det.config_path)}</code>` : '—'}</dd>
     </dl>
     ${c.state_note ? `<div class="note ${c.state === 'connected' ? 'note-plain' : 'note-warn'}">${esc(c.state_note)}</div>` : ''}
-    <div><div class="small muted">What I can see from this agent</div><ul class="cap-list">${caps}</ul></div>
+    ${(det.notes || []).length ? `<ul class="small muted conn-notes">${det.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+    <div><div class="small muted">Events available from this agent</div><ul class="cap-list">${caps}</ul></div>
     <div class="row">${buttons}</div>
     <div class="conn-out" id="conn-out-${name}"></div>
   </div>`;
@@ -587,7 +599,7 @@ async function render_connections() {
   screenEl.innerHTML = `
     <div class="page-head">
       <h1>Connections</h1>
-      <p class="lead">Connecting an agent lets me hear what it says it’s doing. I only add a small, clearly-labelled entry to its settings file — and I’ll show you exactly what changes first.</p>
+      <p class="lead">Connecting an agent lets AgentTracker receive the activity it reports. A small, clearly labelled hook entry is added to its settings file, and the exact change is shown before it is applied.</p>
     </div>
     <div class="grid-2">${conns.map(connectorCard).join('')}</div>
     <p class="small muted mt">None of these connections have been tested against a live agent yet. If something looks off, “Test connection” will tell you plainly what worked and what didn’t.</p>`;
@@ -610,8 +622,8 @@ actions['conn-preview'] = async d => {
     return `<span class="${cls}">${esc(l) || ' '}</span>`;
   }).join('');
   out.innerHTML = `<div class="stack-sm mt">
-    <div class="small">${p.file_exists ? 'I’ll update' : 'I’ll create'} <code>${esc(p.config_path)}</code>
-      ${nothing ? ' — it already has everything I need.' : ` — ${n} hook entr${n === 1 ? 'y' : 'ies'} (${esc([...(p.added || []), ...(p.updated || [])].join(', '))}). ${p.file_exists ? 'A backup of your current file is kept.' : ''}`}</div>
+    <div class="small">${p.file_exists ? 'This will update' : 'This will create'} <code>${esc(p.config_path)}</code>
+      ${nothing ? ' — no changes are required.' : ` — ${n} hook entr${n === 1 ? 'y' : 'ies'} (${esc([...(p.added || []), ...(p.updated || [])].join(', '))}). ${p.file_exists ? 'A backup of your current file is kept.' : ''}`}</div>
     <pre class="diff">${diffHtml || '(no changes)'}</pre>
     ${d.install === '1' || !nothing ? `<div class="row"><button class="btn btn-primary" data-act="conn-install" data-name="${d.name}">${nothing ? 'Reinstall' : 'Yes, connect it'}</button>
       <button class="btn btn-secondary" data-act="conn-close" data-name="${d.name}">Not now</button></div>` : ''}
@@ -624,7 +636,7 @@ actions['conn-install'] = async d => {
   await render_connections();
 };
 actions['conn-uninstall'] = async d => {
-  if (!confirm(`Disconnect ${connectorName(d.name)}? I’ll remove only my own entries from its settings file.`)) return;
+  if (!confirm(`Disconnect ${connectorName(d.name)}? Only AgentTracker's own entries are removed from its settings file.`)) return;
   const r = await api('POST', `/api/ui/connectors/${d.name}/uninstall`);
   showToast(r.removed ? `${connectorName(d.name)} disconnected.` : 'There was nothing of mine to remove.', 'success');
   await render_connections();
@@ -634,7 +646,7 @@ actions['conn-test'] = async d => {
   out.innerHTML = '<p class="small muted"><span class="spinner"></span> Testing… this takes a few seconds.</p>';
   const r = await api('POST', `/api/ui/connectors/${d.name}/test`);
   out.innerHTML = `<div class="card card-soft mt">
-    <div class="mb-sm">${r.ok ? status('ok', 'Everything I could test worked') : status('warn', 'Some steps need a look')}</div>
+    <div class="mb-sm">${r.ok ? status('ok', 'All available tests passed') : status('warn', 'Some steps need review')}</div>
     <ul class="test-steps">${(r.steps || []).map(s => `<li>${status(s.ok ? 'ok' : 'bad', s.name)}<span class="small muted">${esc(s.detail || '')}</span></li>`).join('')}</ul>
     <p class="small muted mt-xs">This checks the hook program, the settings file and my own pipeline. It doesn’t start your agent.</p>
   </div>`;
@@ -680,11 +692,11 @@ function readDraft() {
 
 function validateStep(step) {
   const d = state.draft;
-  if (step === 1 && !d.instruction.trim() && !d.title.trim()) return 'Tell me a little about the job first — even one sentence is fine.';
+  if (step === 1 && !d.instruction.trim() && !d.title.trim()) return 'Describe the task first. One sentence is enough.';
   if (step === 2 && !d.folder.trim()) return 'Which folder will the agent work in? Type or paste its path.';
   if (step === 4) {
     const any = Object.values(d.checks).some(Boolean) || Object.values(d.templates).some(Boolean);
-    if (!any) return 'Pick at least one thing for me to check.';
+    if (!any) return 'Select at least one check.';
     if (d.checks.required_outputs_exist && !lines(d.outputsText).length) return 'List the files that should exist afterwards, or untick that check.';
     if (d.checks.changes_within_scope && !lines(d.allowedText).length) return 'List the folders the agent may change, or untick that check.';
   }
@@ -735,7 +747,7 @@ function createStepBody() {
       return `<h2>What’s the job?</h2>
         <label class="field"><span class="field-label">What are you asking the agent to do?</span>
           <textarea id="c-instruction" placeholder="For example: Sort the photos in my Holiday folder into one folder per month, and don’t touch the originals.">${esc(d.instruction)}</textarea>
-          <span class="field-hint">Write it the way you’d tell a friend. I keep this as a note — I don’t send it anywhere.</span></label>
+          <span class="field-hint">Plain language is fine. This is stored locally as a note and is not sent anywhere.</span></label>
         <label class="field"><span class="field-label">A short name <span class="muted">(optional)</span></span>
           <input id="c-title" type="text" value="${esc(d.title)}" placeholder="Sort holiday photos"></label>
         <label class="field"><span class="field-label">Which agent is doing it?</span>
@@ -744,27 +756,27 @@ function createStepBody() {
             const tag = n === 'manual' ? '' : c && c.state === 'connected' ? ' — connected' : ' — not connected yet';
             return `<option value="${n}" ${d.connector === n ? 'selected' : ''}>${esc(connectorName(n) + tag)}</option>`;
           }).join('')}</select>
-          <span class="field-hint">Not connected? That’s fine — I’ll still check the files. Agent actions just won’t show up.</span></label>`;
+          <span class="field-hint">If no agent is connected, files are still checked; agent actions will not appear.</span></label>`;
     case 2:
       return `<h2>Which folder will it work in?</h2>
         <label class="field"><span class="field-label">Folder</span>
           <span class="input-row"><input id="c-folder" type="text" value="${esc(d.folder)}" placeholder="C:\\Users\\you\\Documents\\Holiday">
           <button type="button" class="btn btn-secondary" data-act="browse">Browse...</button></span>
           <span class="field-hint">This folder will be baselined before work starts.</span></label>
-        <div class="note note-plain">“Baselined” just means I take a quick snapshot of every file, so afterwards I can tell exactly what changed.</div>`;
+        <div class="note note-plain">"Baselined" means every file is hashed before the task starts, so changes can be measured afterwards.</div>`;
     case 3:
       return `<h2>Anything that must not change?</h2>
         <label class="field"><span class="field-label">Protected files or folders <span class="muted">(one per line)</span></span>
           <textarea id="c-protected" placeholder="originals&#10;notes/important.docx">${esc(d.protectedText)}</textarea>
-          <span class="field-hint">These files must not be changed. I'll alert you if they are. Paths can be inside your folder (like <code>originals</code>) or full paths.</span></label>
-        <div class="note note-plain">Leave this empty and I’ll simply make sure none of the files already in the folder get changed — new files are fine.</div>`;
+          <span class="field-hint">These files must not be changed. You will be alerted if they are. Paths can be inside your folder (like <code>originals</code>) or full paths.</span></label>
+        <div class="note note-plain">If left empty, AgentTracker checks that no existing file in the folder changes. New files are allowed.</div>`;
     case 4: {
       const tpl = state.templates.length
         ? `<h3 class="mt-lg">Your saved checks</h3><div class="stack-sm">${state.templates.map(t => `<label class="check-option ${d.templates[t.id] ? 'checked' : ''}">
             <input type="checkbox" data-template="${esc(t.id)}" data-change="check-toggle" ${d.templates[t.id] ? 'checked' : ''}>
             <span class="spacer"><span class="opt-title">${esc(t.name)}</span><br><span class="opt-desc">${esc(checkName(t.check_type))}</span></span></label>`).join('')}</div>`
         : '';
-      return `<h2>What should I check afterwards?</h2>
+      return `<h2>What should be checked afterwards?</h2>
         <div class="stack-sm">
           ${checkOption('originals_unchanged')}
           ${checkOption('required_outputs_exist', `<textarea id="c-outputs" class="mt-xs" placeholder="sorted/2026-07&#10;summary.txt">${esc(d.outputsText)}</textarea><span class="field-hint">One file per line, inside your folder.</span>`)}
@@ -773,7 +785,7 @@ function createStepBody() {
           ${checkOption('folder_structure_matches', `<span class="input-row mt-xs"><input id="c-root" type="text" value="${esc(d.structRoot)}" aria-label="Folder to look at"><input id="c-patterns" type="text" value="${esc(d.structPatterns)}" aria-label="Name patterns"></span><span class="field-hint">Folder to look at, then file name patterns (comma separated, like <code>*.jpg, *.txt</code>).</span>`)}
         </div>
         ${tpl}
-        <div class="note mt">I'll only check what you tell me to — I can't judge whether the work is semantically correct.</div>`;
+        <div class="note mt">Only the checks you define are evaluated. AgentTracker cannot judge whether the work is semantically correct.</div>`;
     }
     default: {
       const t = buildTask();
@@ -784,9 +796,9 @@ function createStepBody() {
           <dt>Agent</dt><dd>${esc(connectorName(t.connector))}</dd>
           <dt>Folder</dt><dd><code>${esc(state.draft.folder)}</code></dd>
           <dt>Protected</dt><dd>${lines(state.draft.protectedText).map(esc).join('<br>') || 'Existing files in the folder (new files are fine)'}</dd>
-          <dt>I’ll check</dt><dd>${t.checks.map(c => '• ' + esc(checkName(c.check_type))).join('<br>')}</dd>
+          <dt>Checks</dt><dd>${t.checks.map(c => '• ' + esc(checkName(c.check_type))).join('<br>')}</dd>
         </dl>
-        <div class="note note-plain mt">When you press start, I’ll snapshot the folder, then start watching. Go ahead and give your agent the job once I say I’m watching.</div>`;
+        <div class="note note-plain mt">Pressing Start snapshots the folder and begins monitoring. Give your agent the task once monitoring is active.</div>`;
     }
   }
 }
@@ -804,8 +816,8 @@ function renderCreate() {
       ${createStepBody()}
       <div class="step-actions">
         ${d.step > 1 ? '<button class="btn btn-secondary" data-act="create-back">← Back</button>' : '<span></span>'}
-        ${d.step < 5 ? '<button class="btn btn-primary" data-act="create-next">Next →</button>'
-          : '<button class="btn btn-primary btn-big" data-act="create-submit">Take a Snapshot &amp; Start →</button>'}
+        ${d.step < 5 ? '<button class="btn btn-primary" data-act="create-next">Next</button>'
+          : '<button class="btn btn-primary btn-big" data-act="create-submit">Snapshot and start</button>'}
       </div>
     </div>`;
   const first = $('#create-card textarea, #create-card input[type="text"]');
@@ -858,7 +870,7 @@ actions['create-submit'] = async (_d, btn) => {
     btn.innerHTML = '<span class="spinner"></span> Starting to watch…';
     await api('POST', `/api/ui/tasks/${task.id}/start`);
   } catch (e) {
-    btn.textContent = 'Take a Snapshot & Start →';
+    btn.textContent = 'Snapshot and start';
     if (task) {
       showToast(`Your task was saved, but: ${e.message}`, 'error');
       state.draft = null;
@@ -869,7 +881,7 @@ actions['create-submit'] = async (_d, btn) => {
   }
   state.draft = null;
   state.taskId = task.id;
-  showToast('Snapshot taken — I’m watching. Go ahead and give your agent the job!', 'success');
+  showToast('Snapshot taken. Monitoring is active; give your agent the task.', 'success');
   navigate('live', task.id);
 };
 
@@ -892,16 +904,16 @@ function liveActions(t) {
   if (lc === 'ready' || lc === 'running') {
     b.push(`<button class="btn ${lc === 'running' ? 'btn-primary' : 'btn-secondary'}" id="verify-btn" data-act="verify" data-id="${esc(t.id)}">Verify now</button>`);
   }
-  if (lc === 'completed' || lc === 'error') b.push(`<button class="btn btn-primary" data-act="open-task" data-id="${esc(t.id)}" data-lc="${lc}">See results →</button>`);
+  if (lc === 'completed' || lc === 'error') b.push(`<button class="btn btn-primary" data-act="open-task" data-id="${esc(t.id)}" data-lc="${lc}">View results</button>`);
   if (ACTIVE.includes(lc) && lc !== 'verifying') b.push(`<button class="btn btn-danger" data-act="task" data-op="cancel" data-id="${esc(t.id)}">Cancel task</button>`);
   return b.join('');
 }
 
 const LIVE_HINT = {
-  draft: 'Step one: take a snapshot of the folder, so I know what it looked like before.',
+  draft: 'Step one: snapshot the folder to record its starting state.',
   baselining: 'Taking the snapshot now…',
   ready: 'Snapshot taken. Press “Start watching”, then give your agent the job.',
-  running: 'I’m watching. When the agent is finished, press “Verify now” and I’ll check everything.',
+  running: 'Monitoring is active. When the agent finishes, press "Verify now" to run the checks.',
   verifying: 'Checking the results…',
   completed: 'This task has been checked.',
   cancelled: 'This task was cancelled. Its notes are kept in the history.',
@@ -914,17 +926,17 @@ function liveBody(d) {
   const obs = d.observed || { recent_changes: [], change_count: 0, observing: false };
   const gaps = d.gaps || [];
   const agentCol = d.manual
-    ? emptyState('ear', 'No agent connected for this task', 'This is a manual task, so there’s nothing to listen to. I’ll still check the files.')
+    ? emptyState('ear', 'No agent connected for this task', 'This is a manual task, so there is no agent activity to receive. Files are still checked.')
     : ev.length
       ? `<ul class="event-list">${ev.slice(-80).reverse().map(x => `<li><span class="ev-time">${esc(clock(x.event.source_ts || x.event.collector_ts))}</span><b>${esc(x.label || EVENT_LABELS[x.event.event_type] || x.event.event_type)}</b><br>${evSummary(x.event)}</li>`).join('')}</ul>`
       : emptyState('ear', 'Waiting for the agent', `Nothing yet. Messages from ${connectorName(t.connector)} show up here as it works.`);
   const changes = obs.recent_changes || [];
   const obsCol = changes.length
     ? `<ul class="event-list">${changes.slice().reverse().map(c => `<li><span class="ev-time">${esc(clock(c.ts))} · ${esc(changeLabel(c.kind))}</span><code>${esc(c.path)}</code></li>`).join('')}</ul>`
-    : emptyState('box', obs.observing ? 'No changes yet' : 'Not watching right now', obs.observing ? 'I’ll list file changes here as soon as they happen.' : 'I watch the folder while the task is running.');
+    : emptyState('box', obs.observing ? 'No changes yet' : 'Not watching right now', obs.observing ? 'File changes are listed here as they happen.' : 'The folder is monitored while the task is running.');
   const gapCol = gaps.length
     ? `<ul class="event-list">${gaps.map(g => `<li>${g.ts ? `<span class="ev-time">${esc(clock(g.ts))}</span>` : ''}${esc(g.detail)}</li>`).join('')}</ul>`
-    : `<p class="small">${status('ok', 'No gaps so far')}</p><p class="small muted">If I miss anything — like the app being closed, or a message I can’t read — I’ll say so here.</p>`;
+    : `<p class="small">${status('ok', 'No gaps so far')}</p><p class="small muted">Coverage gaps, such as the app being closed or an unreadable message, are listed here.</p>`;
   return `
     <div class="live-cols">
       <div class="card col-card">
@@ -933,7 +945,7 @@ function liveBody(d) {
         ${agentCol}
       </div>
       <div class="card col-card">
-        <h3>${ICON.eye.replace('<svg', '<svg class="nav-ico"')}What I observed</h3>
+        <h3>${ICON.eye.replace('<svg', '<svg class="nav-ico"')}Observed activity</h3>
         <p class="small muted">${obs.change_count || 0} change(s) so far. These are real filesystem events, not attributed to any agent automatically.</p>
         ${obsCol}
       </div>
@@ -953,8 +965,8 @@ async function render_live() {
   }
   if (!state.taskId) {
     screenEl.innerHTML = `<div class="page-head"><h1>Live task</h1></div>
-      <div class="card">${emptyState('box', 'Nothing to watch yet', 'Start a task and I’ll show you what’s happening here, as it happens.',
-        '<button class="btn btn-primary" data-act="go" data-screen="create">Start a task →</button><button class="btn btn-secondary" data-act="demo">Try the demo</button>')}</div>`;
+      <div class="card">${emptyState('box', 'Nothing to watch yet', 'Start a task to see live activity here.',
+        '<button class="btn btn-primary" data-act="go" data-screen="create">Start a task</button><button class="btn btn-secondary" data-act="demo">Try the demo</button>')}</div>`;
     return;
   }
   const d = await api('GET', `/api/ui/tasks/${state.taskId}/live`);
@@ -967,7 +979,7 @@ async function render_live() {
     <div class="card card-soft">
       <div class="row">
         ${lifecyclePill(t.lifecycle)}
-        <span class="small muted">${esc(connectorName(t.connector))} · ${t.folders.map(f => esc(f.folder_path)).join(', ')}</span>
+        <span class="small muted">${esc(connectorName(t.connector))}${autoLabel(t) ? ` · ${autoLabel(t)}` : ''} · ${t.folders.map(f => esc(f.folder_path)).join(', ')}</span>
         <span class="spacer"></span>
         ${liveActions(t)}
       </div>
@@ -991,7 +1003,7 @@ changes['live-pick'] = el => navigate('live', el.value);
 
 actions.task = async d => {
   if (d.op === 'cancel' && !confirm('Cancel this task? Everything recorded so far stays in the history.')) return;
-  const msg = { baseline: 'Snapshot taken.', start: 'I’m watching now — give your agent the job!', cancel: 'Task cancelled.' }[d.op];
+  const msg = { baseline: 'Snapshot taken.', start: 'Monitoring is active. Give your agent the task.', cancel: 'Task cancelled.' }[d.op];
   await api('POST', `/api/ui/tasks/${d.id}/${d.op}`);
   showToast(msg, d.op === 'cancel' ? 'info' : 'success');
   await route();
@@ -1042,7 +1054,7 @@ function checkCard(r, runId, task) {
       ${r.status !== 'passed' ? `<button class="btn btn-link" data-act="propose" data-run="${esc(runId)}" data-check="${esc(r.check_id)}">Create a check from this +</button>` : ''}
     </div>
     <div class="evidence hidden" id="ev-${esc(r.check_id)}">
-      ${ev ? `<b>What I looked at</b><ul>${ev}</ul>` : '<p class="muted">No extra evidence was recorded for this check.</p>'}
+      ${ev ? `<b>Evidence examined</b><ul>${ev}</ul>` : '<p class="muted">No extra evidence was recorded for this check.</p>'}
       ${lim ? `<b>What this check can’t tell you</b><ul>${lim}</ul>` : ''}
       ${def ? `<p class="small muted">Settings used: <code>${esc(JSON.stringify(def.params))}</code></p>` : ''}
     </div>
@@ -1077,7 +1089,7 @@ async function render_results() {
   if (!runData) {
     screenEl.innerHTML = `<div class="page-head"><h1>Results</h1></div>
       <div class="card">${emptyState('clipboard', 'No results yet', 'Once you press “Verify now” on a task, my findings will appear here — in plain English.',
-        '<button class="btn btn-primary" data-act="go" data-screen="live">Go to Live task →</button>')}</div>`;
+        '<button class="btn btn-primary" data-act="go" data-screen="live">Go to live task</button>')}</div>`;
     return;
   }
   if (!taskDetail) taskDetail = await api('GET', `/api/ui/tasks/${state.taskId}`);
@@ -1093,7 +1105,7 @@ async function render_results() {
 
   screenEl.innerHTML = `
     <div class="page-head row row-between">
-      <div><h1>${esc(task.title)}</h1><p class="lead">Checked ${esc(when(run.finished_at))} · ${esc(connectorName(task.connector))}</p></div>
+      <div><h1>${esc(task.title)}</h1><p class="lead">Checked ${esc(when(run.finished_at))} · ${esc(connectorName(task.connector))}${autoLabel(task) ? ` · ${autoLabel(task)}` : ''}</p></div>
       <div class="row">
         ${tasksWithRuns.length > 1 ? taskPicker(tasksWithRuns, task.id, 'results-task') : ''}
         ${runs.length > 1 ? `<select data-change="results-run" aria-label="Choose a check run">${runs.map((r, i) => `<option value="${esc(r.id)}" ${r.id === run.id ? 'selected' : ''}>${i === 0 ? 'Latest' : 'Earlier'} check · ${esc(new Date(r.finished_at || r.started_at).toLocaleString())}</option>`).join('')}</select>` : ''}
@@ -1108,6 +1120,8 @@ async function render_results() {
       <button class="btn btn-secondary btn-small" data-act="export" data-fmt="json" data-id="${esc(run.id)}">Save data (JSON)</button>
     </div>
 
+    <div id="svh-box">${svhCard(runData.said_vs_happened)}</div>
+
     <div class="grid-2">
       <div class="card">
         <h3>What you asked for</h3>
@@ -1120,13 +1134,17 @@ async function render_results() {
         ${task.connector === 'manual' ? '<p class="muted">Manual task — no agent was listening, so there’s nothing reported.</p>'
           : agentEvents.length ? `<p>${said ? status('info', "Agent said it's done (unverified)") : status('muted', 'The agent didn’t say it was finished')}</p>
             <ul class="event-list">${agentEvents.slice(-8).reverse().map(e => `<li><b>${esc(EVENT_LABELS[e.event_type] || e.event_type)}</b> ${evSummary(e)}</li>`).join('')}</ul>`
-          : '<p class="muted">I didn’t hear anything from the agent during this task.</p>'}
+          : `<p class="muted">I didn’t hear anything from the agent during this task.</p>
+             ${task.connector === 'claude_code' ? `<p class="small muted">Claude only reports in when you use <b>Claude Code</b>: the <b>Code</b> tab in the Claude desktop app, or <code>claude</code> in a terminal. The regular Claude chat (even when it saves files to your PC) doesn’t send updates. The file checks below still show whether the job really got done.</p>` : ''}`}
       </div>
     </div>
 
     <h2 class="section-title">What we found</h2>
     ${required.map(r => checkCard(r, run.id, task)).join('') || '<p class="muted">No required checks were set.</p>'}
     ${optional.length ? `<h2 class="section-title">Optional checks</h2><p class="small muted">These don’t change the overall result.</p>${optional.map(r => checkCard(r, run.id, task)).join('')}` : ''}
+
+    <h2 class="section-title">Conversation</h2>
+    <div class="card" id="conversation-box"><p class="muted">Looking for Claude Code’s record of this conversation…</p></div>
 
     <details class="history card card-soft">
       <summary>History for this task (${runs.length} check${runs.length === 1 ? '' : 's'})</summary>
@@ -1136,7 +1154,93 @@ async function render_results() {
           ${r.id === run.id ? pill('blue', 'Showing') : `<button class="btn btn-link" data-act="go" data-screen="results" data-param="${esc(r.id)}">View</button>`}</li>`;
       }).join('')}</ul>
     </details>`;
+  loadConversation(run.id);
 }
+
+// ---- What it said vs what really happened (one line at the top of each report) -----------------
+const SVH_TONE = { ok: 'svh-ok', bad: 'svh-bad', warn: 'svh-warn' };
+
+function svhCard(s) {
+  if (!s || !s.headline) return '';
+  return `<div class="card svh ${SVH_TONE[s.tone] || 'svh-warn'}">
+    <h3>What it said vs what really happened</h3>
+    <p class="svh-head">${esc(s.headline)}</p>
+    <div class="svh-rows">
+      <div class="svh-row"><span class="svh-label">Said</span><span>${esc(s.said)}${s.quote ? ` <q class="svh-quote">${esc(s.quote)}</q>` : ''}</span></div>
+      <div class="svh-row"><span class="svh-label">Really happened</span><span>${esc(s.happened)}</span></div>
+    </div>
+  </div>`;
+}
+
+// ---- Conversation (Claude Code's own record, shown next to the checks) -------------------------
+const CONV_PREVIEW = 600;
+
+function convText(e, id) {
+  const t = e.text || '';
+  const cutNote = e.cut ? '<span class="small muted"> (very long, so it was cut short here)</span>' : '';
+  if (t.length <= CONV_PREVIEW) return `<div class="conv-text">${esc(t)}${cutNote}</div>`;
+  return `<div class="conv-text" id="${id}"><span class="conv-short">${esc(t.slice(0, CONV_PREVIEW))}…</span><span class="conv-full hidden">${esc(t)}${cutNote}</span></div>
+    <button class="btn btn-link" data-act="conv-more" data-id="${id}" aria-expanded="false">Show more</button>`;
+}
+
+function convEntry(e, i) {
+  const id = `conv-${i}`;
+  const time = e.ts ? `<span class="conv-time">${esc(new Date(e.ts).toLocaleTimeString())}</span>` : '';
+  switch (e.kind) {
+    case 'you':
+      return `<div class="conv conv-you"><div class="conv-who">You ${time}</div>${convText(e, id)}</div>`;
+    case 'claude':
+      return `<div class="conv conv-claude"><div class="conv-who">Claude ${time}</div>${convText(e, id)}</div>`;
+    case 'thinking':
+      return `<details class="conv conv-thinking"><summary class="conv-who">Claude’s thinking ${time}</summary>
+        <p class="small muted">This is the thinking Claude chose to show. It may be a summary.</p>${convText(e, id)}</details>`;
+    case 'action':
+      return `<div class="conv conv-action"><div class="conv-who">Action: ${esc(e.tool || 'a tool')} ${time}</div>${e.text ? `<code class="conv-input">${esc(e.text)}</code>` : ''}</div>`;
+    case 'result':
+      return `<details class="conv conv-result${e.is_error ? ' conv-bad' : ''}"><summary class="conv-who">Result${e.tool ? ` from ${esc(e.tool)}` : ''}${e.is_error ? ' — it reported a problem' : ''} ${time}</summary>
+        ${e.text ? convText(e, id) : '<p class="small muted">Nothing came back.</p>'}</details>`;
+    default:
+      return '';
+  }
+}
+
+async function loadConversation(runId) {
+  const box = $('#conversation-box');
+  if (!box) return;
+  let c;
+  try {
+    c = await api('GET', `/api/ui/runs/${runId}/conversation`);
+  } catch (e) {
+    box.innerHTML = `<p class="muted">I couldn’t load the conversation just now.</p>`;
+    return;
+  }
+  if (!document.body.contains(box) || state.runId !== runId) return;
+  const svh = $('#svh-box');
+  if (svh && c.said_vs_happened) svh.innerHTML = svhCard(c.said_vs_happened);
+  const entries = c.entries || [];
+  if (!entries.length) {
+    box.innerHTML = `<p class="muted">${esc(c.message || 'There’s no conversation to show for this task.')}</p>
+      ${c.path ? `<p class="small muted">Record file: <code>${esc(c.path)}</code></p>` : ''}`;
+    return;
+  }
+  const notes = [];
+  if (c.windowed) notes.push('Showing the part of the conversation from while this task ran.');
+  if (c.capped || c.partial_read) notes.push('This conversation is long, so only the newest part is shown.');
+  if (c.skipped_lines) notes.push(`${c.skipped_lines} line(s) of the record were housekeeping or a kind I don’t show, so I skipped them.`);
+  box.innerHTML = `
+    <p class="small muted">This is Claude Code’s own record of the conversation, shown as it was saved. Claude’s words are what it said, not proof. The checks above show what really happened to your files.</p>
+    <div class="conv-list">${entries.map(convEntry).join('')}</div>
+    <p class="small muted mt">${notes.map(esc).join(' ')} Record file: <code>${esc(c.path || '')}</code></p>`;
+}
+
+actions['conv-more'] = (d, btn) => {
+  const box = $(`#${CSS.escape(d.id)}`);
+  if (!box) return;
+  const open = box.querySelector('.conv-full').classList.toggle('hidden') === false;
+  box.querySelector('.conv-short').classList.toggle('hidden', open);
+  btn.textContent = open ? 'Show less' : 'Show more';
+  btn.setAttribute('aria-expanded', String(open));
+};
 
 changes['results-run'] = el => navigate('results', el.value);
 changes['results-task'] = el => { state.runId = null; state.taskId = el.value; navigate('results'); };
@@ -1192,6 +1296,8 @@ function describeParams(type, p) {
     case 'inputs_preserved_in_output': return `From “${p.input || '?'}” into “${p.output || '?'}”`;
     case 'changes_within_scope': return `Allowed to change: ${list(p.allowed)}`;
     case 'folder_structure_matches': return `In “${p.root || '.'}”: ${list(p.patterns)}`;
+    case 'no_unexpected_deletions': return `Allowed to delete: ${list(p.allowed_deletions)}`;
+    case 'edits_inside_folder': return p.folder ? `Folder: ${p.folder}` : 'Folder: the project folder';
     default: return JSON.stringify(p);
   }
 }
@@ -1289,7 +1395,7 @@ async function render_settings() {
       <div class="card">
         <h3>Keep data for</h3>
         <label class="field"><select id="s-retention" aria-label="Keep data for">${RETENTION.map(([d, l]) => `<option value="${d}" ${String(v.retention_days || '0') === d ? 'selected' : ''}>${l}</option>`).join('')}</select>
-          <span class="field-hint">I won't delete evidence for tasks that are still active.</span></label>
+          <span class="field-hint">Evidence for active tasks is never deleted.</span></label>
         <div class="row"><button class="btn btn-primary" data-act="save-retention">Save</button><button class="btn btn-secondary" data-act="purge">Clean up now</button></div>
       </div>
 
@@ -1307,13 +1413,27 @@ async function render_settings() {
         <label class="toggle-row"><input type="checkbox" id="s-autostart" ${v.start_with_windows === '1' ? 'checked' : ''}>
           <span><b>Start with Windows</b><br><span class="small muted">Opens quietly in the tray when you sign in.</span></span></label>
         <label class="toggle-row"><input type="checkbox" id="s-tray" ${v.keep_in_tray !== '0' ? 'checked' : ''}>
-          <span><b>Keep running in the tray when I close the window</b><br><span class="small muted">So I can keep listening while the window is closed. Turn off to quit on close.</span></span></label>
+          <span><b>Keep running in the tray when the window is closed</b><br><span class="small muted">Collection continues while the window is closed. Turn off to quit on close.</span></span></label>
         <div class="row mt-xs"><button class="btn btn-primary" data-act="save-startup">Save</button></div>
       </div>
 
       <div class="card">
+        <h3>Automatic tasks</h3>
+        <label class="toggle-row"><input type="checkbox" id="s-autotasks" ${v.auto_tasks !== '0' ? 'checked' : ''}>
+          <span><b>Start a task automatically when I give an agent a job</b><br><span class="small muted">Takes a “before” snapshot of the folder the agent works in, then checks the result when the agent says it’s done. You can still set up a task yourself for stricter rules.</span></span></label>
+        <div class="row mt-xs"><button class="btn btn-primary" data-act="save-autotasks">Save</button></div>
+      </div>
+
+      <div class="card">
+        <h3>Code changes (Git)</h3>
+        <label class="toggle-row"><input type="checkbox" id="s-gittrack" ${v.git_tracking !== '0' ? 'checked' : ''}>
+          <span><b>Remember agent edits in Git projects</b><br><span class="small muted">Keeps a copy of each file just before and after the agent edits it, so Code changes can compare it with what you commit. Stays on this computer.</span></span></label>
+        <div class="row mt-xs"><button class="btn btn-primary" data-act="save-gittrack">Save</button></div>
+      </div>
+
+      <div class="card">
         <h3>Collection</h3>
-        <p>${s.paused ? status('warn', 'Paused — agent messages are queued but not recorded') : status('ok', 'On — I’m listening for agent messages')}</p>
+        <p>${s.paused ? status('warn', 'Paused — agent messages are queued but not recorded') : status('ok', 'On: receiving agent messages')}</p>
         <button class="btn ${s.paused ? 'btn-primary' : 'btn-secondary'}" data-act="collection-toggle">${s.paused ? 'Resume collection' : 'Pause collection'}</button>
       </div>
 
@@ -1327,7 +1447,7 @@ async function render_settings() {
 
       <div class="card">
         <h3>Getting started</h3>
-        <p class="small muted">Want a refresher? You can replay the welcome or make a fresh practice task.</p>
+        <p class="small muted">Replay the welcome guide or create a new sample task.</p>
         <div class="row"><button class="btn btn-secondary" data-act="show-wizard">Show the welcome wizard again</button>
           <button class="btn btn-secondary" data-act="demo">Open demo task</button></div>
       </div>
@@ -1341,7 +1461,7 @@ async function render_settings() {
 
       <div class="card">
         <h3>Activity record</h3>
-        <p class="small muted">Each saved message is chained to the one before, so I can tell if the record was tampered with.</p>
+        <p class="small muted">Each saved message is hash-chained to the previous one, so local tampering can be detected.</p>
         <button class="btn btn-secondary" data-act="chain-verify">Check the record</button>
         <div id="chain-out" class="mt-xs"></div>
       </div>
@@ -1363,9 +1483,11 @@ async function saveSettings(obj, okMsg) {
   (r.notes || []).forEach(n => showToast(n, 'warn'));
   showToast(okMsg, 'success');
 }
-actions['save-retention'] = () => saveSettings({ retention_days: Number($('#s-retention').value) }, 'Saved. I’ll keep data for that long.');
+actions['save-retention'] = () => saveSettings({ retention_days: Number($('#s-retention').value) }, 'Saved. Data will be retained for that period.');
 actions['save-redaction'] = () => saveSettings({ redaction_patterns: $('#s-redact').value }, 'Saved. Those phrases will be hidden from now on.');
 actions['save-startup'] = () => saveSettings({ start_with_windows: $('#s-autostart').checked, keep_in_tray: $('#s-tray').checked }, 'Startup settings saved.');
+actions['save-autotasks'] = () => saveSettings({ auto_tasks: $('#s-autotasks').checked }, 'Saved.');
+actions['save-gittrack'] = () => saveSettings({ git_tracking: $('#s-gittrack').checked }, 'Saved.');
 actions['save-export'] = () => saveSettings({ export_dir: $('#s-export').value.trim() }, 'Export folder saved.');
 actions.purge = async () => {
   if (!confirm('Delete finished tasks older than your “Keep data for” setting? Active tasks are never deleted.')) return;

@@ -20,14 +20,23 @@ actually done.
 - Lets you save a report (HTML or JSON) and turn a failure into a saved check for next time.
 
 ## What it doesn't do
-- It never blocks, pauses or undoes anything an agent does. It only watches and checks.
+- It never blocks, pauses or undoes anything an externally connected agent does. It only watches and
+  checks. (Models running *inside* the AgentTracker decision runtime can only act through its four
+  confined tools, and those are enforced.)
 - It can't restore files. Snapshots are fingerprints, not copies.
 - It doesn't send anything off your computer.
 
 ## What it is
-- A Windows desktop app (Tauri 2, Rust) with a tray icon and a calm, friendly 7-screen UI:
-  **Home, Connections, New Task, Live Task, Results, Saved Checks, Settings**, plus a 3-step
-  welcome wizard the first time you open it.
+- A Windows desktop app (Tauri 2, Rust) with a tray icon and a clean, professional UI:
+  **Home, Connections, New Task, Live Task, Results, Saved Checks, Agent Runtime, Settings**, plus a
+  3-step welcome wizard the first time you open it.
+- An **instrumented decision runtime** (`crates/agenttracker-runtime`) for local models (Ollama,
+  LM Studio, other OpenAI-compatible servers). Before any tool runs, the model must submit a
+  structured decision proposal, which is validated and saved. The **Why this action?** panel then
+  shows the recorded context, the model's *stated rationale*, its cited evidence and the linked
+  execution result. See [docs/runtime/](docs/runtime/) and the
+  [capability report](docs/runtime/CAPABILITY_REPORT.md). It does not reveal internal model
+  reasoning or prove what caused an action.
 - A tiny hook program (`agenttracker-hook`) your agent calls on each event. It signs the event and
   hands it to the app over 127.0.0.1; if the app isn't running it saves a redacted copy to replay later.
 - A verifier: "before" and "after" SHA-256 manifests + checks such as *Originals unchanged*,
@@ -49,9 +58,10 @@ actually done.
 crates/tracker-common/      redaction, canonical JSON, HMAC/loopback security, machine id, license stub, hash chain
 crates/agenttracker-core/   DB + migrations, event & task model, FS observer, verifiers, connectors, queue, collector, HTTP server
 crates/agenttracker-hook/   the hook binary agents invoke
+crates/agenttracker-runtime/ instrumented model-and-agent decision runtime (separate module, docs/runtime/INTERFACE.md)
 src-tauri/                  Tauri 2 shell: tray (Open / Pause Collection / Quit), window, settings
 static/                     HTML/CSS/JS UI (no build step)
-migrations/                 embedded SQL migrations v001..v003
+migrations/                 embedded SQL migrations v001..v004 (v004 = runtime tables)
 tests/                      acceptance tests (fake-agent contract tests)
 demo/                       harmless demo task — see demo/README.md
 .github/workflows/build.yml Windows build + NSIS/MSI installers
@@ -97,6 +107,15 @@ checks the `Host` header, the window opens a **one-time launch token** that beco
 `SameSite=Strict` session cookie, state-changing UI calls need the `x-requested-with: agenttracker`
 header, pages get a strict CSP, and the hook endpoint requires an HMAC-SHA256 signature with a
 per-run secret stored in `~/.agenttracker/collector.json`.
+
+## Decision runtime (local models)
+Setup for Windows/PowerShell: [docs/runtime/SETUP.md](docs/runtime/SETUP.md). Interface, tables and
+routes: [docs/runtime/INTERFACE.md](docs/runtime/INTERFACE.md). Provider notes:
+[docs/runtime/PROVIDERS.md](docs/runtime/PROVIDERS.md). What has and has not been tested:
+[docs/runtime/CAPABILITY_REPORT.md](docs/runtime/CAPABILITY_REPORT.md). No model is marked
+supported yet. The only live model tried (`qwen2.5:1.5b`) did not produce a valid tool action.
+
+![Why this action?](docs/runtime/screenshots/03_why_panel_fixture_b.png)
 
 ## Connecting agents
 Walkthrough:
@@ -145,6 +164,36 @@ click *check it*. File checks work the same.
 
 ## Try it
 See [demo/README.md](demo/README.md) — **Home → Try the demo** creates everything for you.
+
+## Code changes (Git)
+See which of an agent's edits ended up in a commit, and whether they shipped as written.
+1. Open **Code changes** in the sidebar. Under **Add a project folder**, type or **Browse...** to
+   any folder inside a Git repository, then click **Add**. Edits are remembered from then on.
+2. Click the project to see its recent commits, then click a commit.
+3. The commit screen answers four questions separately: did the agent make these edits, who made
+   the commit, did the agent run `git push`, and has the remote branch got this commit. Each answer
+   says how we know, and stays "Unknown" or "Not seen" when there's no evidence.
+4. Each agent edit shows whether it shipped as is, was changed before shipping, or was left out,
+   with the decision record it came from. When someone changed it, you see "What the agent
+   proposed" next to "What actually shipped".
+5. If you pushed from another computer (or GitHub has changes you haven't pulled), click
+   **Check the remote now** on the commit list or next to "Does the remote branch have it?". It runs
+   `git fetch --all --prune`, which only updates Git's copy of the remote branches (like `origin/main`).
+   Your files, your branches and anything you haven't committed are left alone. The screen shows
+   when you last checked. It uses the same sign-in Git already uses on your computer; if Git can't
+   sign in, it tells you in plain words and nothing is changed. It gives up after 2 minutes.
+6. To check every project at once, click **Check all projects** at the top of **Your projects**.
+   It checks up to 4 projects at the same time, skips projects that only live on this computer,
+   and keeps going if one project has a problem. You get a short summary (for example
+   "2 checked: 1 had new changes, 1 up to date. 1 couldn't be checked.") and a line for each
+   project with its result in plain words. "Last checked" is only updated for projects that
+   were checked successfully.
+
+Optional GitHub links (read-only): create a fine-grained personal access token limited to the
+repositories you want, with **Contents: Read** and **Pull requests: Read**, paste it into the
+GitHub card on the Code changes screen, then tick **Show GitHub links for ...** on each project you want.
+Only the repository name, commit ids and branch names are sent to GitHub. Prompts, reasoning records and file contents
+always stay on your computer. Tracking can be turned off in **Settings → Code changes (Git)**.
 
 ## Known limitations
 See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md): no live connector testing in the dev environment,

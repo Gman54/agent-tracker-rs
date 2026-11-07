@@ -5,7 +5,7 @@
 use agenttracker_core::collector::{Collector, CollectorDiscovery, FALLBACK_FILE};
 use agenttracker_core::db::Db;
 use agenttracker_core::engine::Engine;
-use agenttracker_core::server::{serve, AppState};
+use agenttracker_core::server::{serve_with, AppState};
 use agenttracker_core::{agenttracker_home, APP_NAME, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +61,6 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
     let collector = Collector::new(&db);
     let paused = db.get_setting("paused").ok().flatten().as_deref() == Some("1");
     collector.set_paused(paused);
-    collector.spawn_worker(home.join(FALLBACK_FILE));
 
     // Never snapshot our own database or connector state. (Not the whole data dir: the demo
     // task's sample folder lives inside it and must be snapshotted.)
@@ -71,6 +70,10 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
         .chain(std::iter::once(home.clone()))
         .collect();
     let engine = Engine::new(db, excludes);
+    // Lets agent prompts start automatic tasks; the worker starts after this so queued
+    // offline events are handled the same way.
+    collector.set_engine(engine.clone());
+    collector.spawn_worker(home.join(FALLBACK_FILE));
 
     let secret = security::token_urlsafe(32);
     let discovery = CollectorDiscovery { port, secret: secret.clone(), pid: std::process::id(), started_at: tracker_common::now_ms() };
@@ -91,14 +94,21 @@ fn tooltip(paused: bool) -> String {
     format!("{APP_NAME} — collection {}", if paused { "paused" } else { "on" })
 }
 
-fn show_window(app: &AppHandle, state: &Arc<AppState>, port: u16) {
+/// Shared with tray, window and second-launch handlers once the runtime has started.
+struct Shared {
+    state: Arc<AppState>,
+    port: u16,
+}
+
+fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
         return;
     }
-    let url = format!("http://127.0.0.1:{port}/launch?token={}", state.new_launch_token());
+    let Some(shared) = app.try_state::<Shared>() else { return };
+    let url = format!("http://127.0.0.1:{}/launch?token={}", shared.port, shared.state.new_launch_token());
     if let Err(e) = open_window(app, &url) {
         eprintln!("could not open window: {e}");
     }
@@ -111,7 +121,9 @@ fn open_window(app: &AppHandle, url: &str) -> tauri::Result<()> {
         .inner_size(1180.0, 820.0)
         .min_inner_size(900.0, 600.0)
         .center()
-        .build()?;
+        .focused(true)
+        .build()?
+        .set_focus()?;
     Ok(())
 }
 
@@ -120,21 +132,19 @@ fn invalid_url(e: impl std::fmt::Display) -> tauri::Error {
 }
 
 fn main() {
-    let headless = std::env::args().any(|a| a == "--headless");
-    let listener = bind_loopback().expect("bind 127.0.0.1");
-    let port = listener.local_addr().expect("local addr").port();
-    let token = security::token_urlsafe(24);
-    let rt = build_runtime(port, token.clone());
-    let launch = format!("http://127.0.0.1:{port}/launch?token={token}");
-
-    if headless {
+    if std::env::args().any(|a| a == "--headless") {
+        let listener = bind_loopback().expect("bind 127.0.0.1");
+        let port = listener.local_addr().expect("local addr").port();
+        let token = security::token_urlsafe(24);
+        let rt = build_runtime(port, token.clone());
+        let launch = format!("http://127.0.0.1:{port}/launch?token={token}");
         println!("{APP_NAME} {VERSION} listening on http://127.0.0.1:{port}");
         println!("Open the UI (one-time link): {launch}");
         let tokio_rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
         let home = rt.home.clone();
         tokio_rt.block_on(async move {
             let l = tokio::net::TcpListener::from_std(listener).expect("listener");
-            if let Err(e) = serve(l, rt.state).await {
+            if let Err(e) = serve_with(l, rt.state, agenttracker_runtime::http::routes()).await {
                 eprintln!("server stopped: {e}");
             }
         });
@@ -142,18 +152,24 @@ fn main() {
         return;
     }
 
-    let Runtime { state, port, home } = rt;
-    let server_state = state.clone();
-    let close_state = state.clone();
-    let home_on_exit = home.clone();
-
     tauri::Builder::default()
+        // Must be first: if AgentTracker is already running (often just as a tray icon), a second
+        // launch - Start menu, desktop shortcut, Setup's "Start AgentTracker now" - brings the
+        // existing window to the front and exits before it touches the database or hook file.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
+            let listener = bind_loopback()?;
+            let port = listener.local_addr()?.port();
+            let token = security::token_urlsafe(24);
+            let Runtime { state, port, .. } = build_runtime(port, token.clone());
+            let launch = format!("http://127.0.0.1:{port}/launch?token={token}");
+            app.manage(Shared { state: state.clone(), port });
+            let server_state = state.clone();
             tauri::async_runtime::spawn(async move {
                 let l = tokio::net::TcpListener::from_std(listener).expect("listener");
-                if let Err(e) = serve(l, server_state).await {
+                if let Err(e) = serve_with(l, server_state, agenttracker_runtime::http::routes()).await {
                     eprintln!("server stopped: {e}");
                 }
             });
@@ -165,14 +181,14 @@ fn main() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open_i, &pause_i, &quit_i])?;
 
-            let (st_menu, st_click) = (state.clone(), state.clone());
+            let st_menu = state.clone();
             let pause_for_menu = pause_i.clone();
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip(tooltip(paused))
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, ev| match ev.id().as_ref() {
-                    "open" => show_window(app, &st_menu, port),
+                    "open" => show_window(app),
                     "pause" => {
                         let p = !st_menu.collector.is_paused();
                         st_menu.collector.set_paused(p);
@@ -185,9 +201,9 @@ fn main() {
                     "quit" => app.exit(0),
                     _ => {}
                 })
-                .on_tray_icon_event(move |tray, ev| {
+                .on_tray_icon_event(|tray, ev| {
                     if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = ev {
-                        show_window(tray.app_handle(), &st_click, port);
+                        show_window(tray.app_handle());
                     }
                 });
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -217,9 +233,11 @@ fn main() {
         })
         // Closing the window hides it; the tray keeps collecting until "Quit".
         // Unless "keep running in the tray" is switched off in Settings.
-        .on_window_event(move |window, event| {
+        .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if close_state.setting("keep_in_tray") == "0" {
+                let app = window.app_handle();
+                let keep = app.try_state::<Shared>().map_or(true, |s| s.state.setting("keep_in_tray") != "0");
+                if !keep {
                     window.app_handle().exit(0);
                     return;
                 }
@@ -229,9 +247,10 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building AgentTracker")
-        .run(move |_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                CollectorDiscovery::remove(&home_on_exit);
+        .run(|app, event| {
+            // Only the copy that started the runtime owns the hook discovery file.
+            if let (tauri::RunEvent::Exit, Some(shared)) = (event, app.try_state::<Shared>()) {
+                CollectorDiscovery::remove(&shared.state.agenttracker_home);
             }
         });
 }
