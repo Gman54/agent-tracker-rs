@@ -1120,6 +1120,8 @@ async function render_results() {
       <button class="btn btn-secondary btn-small" data-act="export" data-fmt="json" data-id="${esc(run.id)}">Save data (JSON)</button>
     </div>
 
+    <div id="svh-box">${svhCard(runData.said_vs_happened)}</div>
+
     <div class="grid-2">
       <div class="card">
         <h3>What you asked for</h3>
@@ -1153,6 +1155,21 @@ async function render_results() {
       }).join('')}</ul>
     </details>`;
   loadConversation(run.id);
+}
+
+// ---- What it said vs what really happened (one line at the top of each report) -----------------
+const SVH_TONE = { ok: 'svh-ok', bad: 'svh-bad', warn: 'svh-warn' };
+
+function svhCard(s) {
+  if (!s || !s.headline) return '';
+  return `<div class="card svh ${SVH_TONE[s.tone] || 'svh-warn'}">
+    <h3>What it said vs what really happened</h3>
+    <p class="svh-head">${esc(s.headline)}</p>
+    <div class="svh-rows">
+      <div class="svh-row"><span class="svh-label">Said</span><span>${esc(s.said)}${s.quote ? ` <q class="svh-quote">${esc(s.quote)}</q>` : ''}</span></div>
+      <div class="svh-row"><span class="svh-label">Really happened</span><span>${esc(s.happened)}</span></div>
+    </div>
+  </div>`;
 }
 
 // ---- Conversation (Claude Code's own record, shown next to the checks) -------------------------
@@ -1198,6 +1215,8 @@ async function loadConversation(runId) {
     return;
   }
   if (!document.body.contains(box) || state.runId !== runId) return;
+  const svh = $('#svh-box');
+  if (svh && c.said_vs_happened) svh.innerHTML = svhCard(c.said_vs_happened);
   const entries = c.entries || [];
   if (!entries.length) {
     box.innerHTML = `<p class="muted">${esc(c.message || 'There’s no conversation to show for this task.')}</p>

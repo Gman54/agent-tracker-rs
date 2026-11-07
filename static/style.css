@@ -593,3 +593,19 @@ details.conv[open] > summary.conv-who { margin-bottom: 6px; }
 .conv-time { font-weight: 400; color: var(--muted); font-size: .78rem; margin-left: 6px; }
 .conv-text { white-space: pre-wrap; word-break: break-word; }
 .conv-input { display: block; white-space: pre-wrap; word-break: break-all; font-size: .82rem; color: var(--muted); }
+
+/* What it said vs what really happened */
+.svh { border-width: 2px; }
+.svh h3 { margin-bottom: 4px; }
+.svh-head { font-weight: 600; font-size: 1.05rem; margin: 0 0 10px; }
+.svh-ok { border-color: #bfe9d4; }
+.svh-ok .svh-head { color: var(--green); }
+.svh-bad { border-color: #f5d0d0; }
+.svh-bad .svh-head { color: var(--red); }
+.svh-warn { border-color: #f0dcae; }
+.svh-warn .svh-head { color: #8a5d06; }
+.svh-rows { display: flex; flex-direction: column; gap: 6px; }
+.svh-row { display: grid; grid-template-columns: 9.5rem 1fr; gap: 12px; align-items: baseline; }
+.svh-label { color: var(--muted); font-size: .9rem; }
+.svh-quote { font-style: italic; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .svh-row { grid-template-columns: 1fr; gap: 2px; } }

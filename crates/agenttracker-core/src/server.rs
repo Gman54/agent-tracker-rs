@@ -732,7 +732,10 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
 }
 
 async fn run_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
-    ok(load_run(&st.engine, &id).map(|(task, run, events)| json!({"task": task, "run": run, "events": events})))
+    ok(load_run(&st.engine, &id).map(|(task, run, events)| {
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &Value::Null);
+        json!({"task": task, "run": run, "events": events, "said_vs_happened": svh})
+    }))
 }
 
 /// Claude Code's own record of the conversation behind this run (read-only, file read off the
@@ -743,7 +746,15 @@ async fn run_conversation(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<
         Err(e) => return core_err(e),
     };
     let roots = crate::conversation::claude_roots();
-    match tokio::task::spawn_blocking(move || crate::conversation::for_task(&task, &run, &events, &roots)).await {
+    let read = tokio::task::spawn_blocking(move || {
+        let mut v = crate::conversation::for_task(&task, &run, &events, &roots);
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &v);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("said_vs_happened".into(), svh);
+        }
+        v
+    });
+    match read.await {
         Ok(v) => j(200, v),
         Err(_) => err(500, "Couldn't read the conversation"),
     }

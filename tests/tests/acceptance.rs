@@ -1113,6 +1113,45 @@ fn test_claude_transcript_path_is_linked_to_the_task() {
     assert_eq!(conv["entries"].as_array().unwrap().len(), 8);
     assert_eq!(conv["entries"][0]["kind"], "you");
 
+    // "What it said vs what really happened": Stop = said it's done; Claude's last words are quoted.
+    use agenttracker_core::report::said_vs_happened;
+    use agenttracker_core::verifiers::CheckStatus;
+    let last_claude = conv["entries"].as_array().unwrap().iter().rev().find(|e| e["kind"] == "claude").unwrap()["text"].as_str().unwrap().to_string();
+    let s = said_vs_happened(&task, &run, &events, &conv);
+    assert_eq!(s["claimed"], true, "{s:#}");
+    assert!(s["said"].as_str().unwrap().starts_with("Claude said it was done"), "{s:#}");
+    let first_words: String = last_claude.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+    assert!(s["quote"].as_str().unwrap().starts_with(&first_words), "{s:#}");
+    let mut failing = run.clone();
+    failing.overall_verdict = Some(CheckStatus::Failed);
+    if let Some(r) = failing.results.first_mut() {
+        r.status = CheckStatus::Failed;
+    }
+    let s = said_vs_happened(&task, &failing, &events, &conv);
+    assert_eq!(s["tone"], "bad");
+    assert_eq!(s["headline"], "It said it was done, but the checks found a problem.");
+    if !failing.results.is_empty() {
+        assert!(s["happened"].as_str().unwrap().contains("failed:"), "{s:#}");
+    }
+    let mut passing = run.clone();
+    passing.overall_verdict = Some(CheckStatus::Passed);
+    for r in passing.results.iter_mut() {
+        r.status = CheckStatus::Passed;
+    }
+    assert_eq!(said_vs_happened(&task, &passing, &events, &conv)["headline"], "It said it was done, and the checks agree.");
+    // Nothing heard and no record: plain wording, no claim.
+    let s = said_vs_happened(&task, &passing, &[], &serde_json::Value::Null);
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["said"], "I didn't hear anything from Claude.");
+    assert_eq!(s["headline"], "The checks passed.");
+    // Last words but no "done" signal: quoted, not counted as a claim.
+    let s = said_vs_happened(&task, &failing, &[], &conv);
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["headline"], "Here's what it said last, but the checks found a problem.");
+    let html = agenttracker_core::report::export_html(&task, &failing, &events, &conv);
+    assert!(html.contains("What it said vs what really happened"));
+    assert!(agenttracker_core::report::export_json(&task, &failing, &events, &conv)["said_vs_happened"]["tone"] == "bad");
+
     // Older events without a saved path: found by the session id instead.
     let bare: Vec<AgentEvent> = events
         .iter()
