@@ -198,6 +198,7 @@ pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> 
         .route("/api/ui/retention/purge", post(retention_purge))
         .route("/api/ui/pick-folder", post(pick_folder))
         .route("/api/ui/runs/:id", get(run_get))
+        .route("/api/ui/runs/:id/conversation", get(run_conversation))
         .route("/api/ui/export/:fmt/:id", post(run_export))
         .route("/api/ui/incident/propose", post(incident_propose))
         .route("/api/ui/tasks/:id/live", get(task_live))
@@ -734,15 +735,33 @@ async fn run_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) 
     ok(load_run(&st.engine, &id).map(|(task, run, events)| json!({"task": task, "run": run, "events": events})))
 }
 
+/// Claude Code's own record of the conversation behind this run (read-only, file read off the
+/// async threads so a big record never stalls the UI).
+async fn run_conversation(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let (task, run, events) = match load_run(&st.engine, &id) {
+        Ok(x) => x,
+        Err(e) => return core_err(e),
+    };
+    let roots = crate::conversation::claude_roots();
+    match tokio::task::spawn_blocking(move || crate::conversation::for_task(&task, &run, &events, &roots)).await {
+        Ok(v) => j(200, v),
+        Err(_) => err(500, "Couldn't read the conversation"),
+    }
+}
+
 async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath<(String, String)>) -> Response {
     let (task, run, events) = match load_run(&st.engine, &id) {
         Ok(x) => x,
         Err(e) => return core_err(e),
     };
-    let stamp = &run.id[..8.min(run.id.len())];
+    let stamp = run.id[..8.min(run.id.len())].to_string();
+    let conv = {
+        let (t, r, e, roots) = (task.clone(), run.clone(), events.clone(), crate::conversation::claude_roots());
+        tokio::task::spawn_blocking(move || crate::conversation::for_task(&t, &r, &e, &roots)).await.unwrap_or(Value::Null)
+    };
     let (body, mime, ext) = match fmt.as_str() {
-        "html" => (crate::report::export_html(&task, &run, &events), "text/html; charset=utf-8", "html"),
-        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events)).unwrap_or_default(), "application/json", "json"),
+        "html" => (crate::report::export_html(&task, &run, &events, &conv), "text/html; charset=utf-8", "html"),
+        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events, &conv)).unwrap_or_default(), "application/json", "json"),
         _ => return err(404, "Unknown export format"),
     };
     Response::builder()

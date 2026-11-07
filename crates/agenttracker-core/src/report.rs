@@ -40,7 +40,7 @@ pub fn event_label(t: EventType) -> &'static str {
 }
 
 /// JSON export: the run, the frozen task definition it was checked against, and agent events.
-pub fn export_json(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent]) -> Value {
+pub fn export_json(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> Value {
     json!({
         "format": "agenttracker-report/1",
         "generated_at": crate::now_ms(),
@@ -49,11 +49,49 @@ pub fn export_json(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         "task": task,
         "run": run,
         "agent_events": events,
+        "conversation": conversation,
     })
 }
 
 /// Self-contained HTML (inline CSS, no scripts, everything escaped).
-pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent]) -> String {
+/// The "Conversation" card for the HTML report (thinking and long text folded with <details>).
+fn conversation_html(conv: &Value) -> String {
+    let status = conv.get("status").and_then(Value::as_str).unwrap_or("");
+    if status.is_empty() {
+        return String::new();
+    }
+    let entries = conv.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+    if entries.is_empty() {
+        let msg = conv.get("message").and_then(Value::as_str).unwrap_or("");
+        return format!("<div class=\"card\"><h2>Conversation</h2><p class=\"m\">{}</p></div>", esc(msg));
+    }
+    let rows: String = entries
+        .iter()
+        .map(|e| {
+            let s = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or("");
+            let text = esc(s("text"));
+            let cut = if e.get("cut").and_then(Value::as_bool) == Some(true) { " <span class=\"m\">(cut short here)</span>" } else { "" };
+            let tool = esc(s("tool"));
+            let err = e.get("is_error").and_then(Value::as_bool) == Some(true);
+            match s("kind") {
+                "you" => format!("<div class=\"c you\"><b>You</b><div class=\"t\">{text}{cut}</div></div>"),
+                "claude" => format!("<div class=\"c cl\"><b>Claude</b><div class=\"t\">{text}{cut}</div></div>"),
+                "thinking" => format!("<details class=\"c th\"><summary>Claude's thinking</summary><p class=\"m\">This is the thinking Claude chose to show. It may be a summary.</p><div class=\"t\">{text}{cut}</div></details>"),
+                "action" => format!("<div class=\"c act\"><b>Action</b> {tool} <span class=\"m\">{text}</span></div>"),
+                "result" => format!(
+                    "<details class=\"c res{}\"><summary><b>Result</b> {tool}{}</summary><div class=\"t\">{text}{cut}</div></details>",
+                    if err { " bad" } else { "" },
+                    if err { " &mdash; it reported a problem" } else { "" }
+                ),
+                _ => String::new(),
+            }
+        })
+        .collect();
+    let path = conv.get("path").and_then(Value::as_str).map(|p| format!("<p class=\"m\">From Claude Code's record: {}</p>", esc(p))).unwrap_or_default();
+    format!("<div class=\"card\"><h2>Conversation</h2>{path}{rows}</div>")
+}
+
+pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> String {
     let (cls, icon, head) = verdict_text(run.overall_verdict);
     let required: std::collections::HashMap<&str, bool> = task.checks.iter().map(|c| (c.id.as_str(), c.is_required)).collect();
     let card = |r: &CheckResult| {
@@ -75,11 +113,12 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
 <style>body{{font:15px/1.6 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;background:#f7f5f0;color:#2c2825;max-width:860px;margin:32px auto;padding:0 20px}}
 .card{{background:#fff;border:1px solid #e8e2d9;border-radius:20px;padding:20px 24px;margin:16px 0}}
 .verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}
-.check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
+.check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.c{{border-radius:12px;padding:8px 14px;margin:8px 0;background:#faf8f4}}.c.you{{background:#eef3fb}}.c.bad{{background:#fbeaea}}.t{{white-space:pre-wrap;word-break:break-word}}summary{{cursor:pointer}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
 <h1>AgentTracker report</h1><div class="verdict {cls}">{icon} {head}</div>
 <div class="card"><h2>What you asked</h2><p><b>{title}</b></p><p>{instr}</p><ul>{folders}</ul><p class="m">Task definition version {ver} &middot; checked {when}</p></div>
 <div class="card"><h2>What the agent said</h2><ul>{ev}</ul></div>
 <div class="card"><h2>What we saw</h2>{req}{opt}</div>
+{conv}
 <p class="m">AgentTracker observes and reports; it doesn't block agents or undo changes. A pass means the configured checks passed &mdash; not that the work is correct in every way.</p>
 </body></html>"#,
         title = esc(&task.title),
@@ -89,6 +128,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         ev = if ev_html.is_empty() { "<li class=\"m\">No agent activity was recorded (file checks only).</li>".to_string() } else { ev_html },
         req = req_html,
         opt = opt_html,
+        conv = conversation_html(conversation),
     )
 }
 

@@ -356,6 +356,11 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
         EventType::AgentReportedCompletion => json!({"stop_hook_active": p.get("stop_hook_active")}),
         EventType::CaptureError => json!({"error": format!("unrecognized Claude Code hook \"{name}\""), "payload": p}),
     };
+    // Where Claude Code keeps its own record of this conversation (read later for the report's
+    // "Conversation" section). Only plausible paths inside a Claude folder are kept.
+    if let (Some(tp), Some(obj)) = (p.get("transcript_path").and_then(Value::as_str).and_then(crate::conversation::plausible_transcript_path), ev.payload_redacted.as_object_mut()) {
+        obj.insert("transcript_path".into(), Value::String(tp));
+    }
     ev.redact();
     Some(ev)
 }

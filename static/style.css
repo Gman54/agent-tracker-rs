@@ -578,3 +578,18 @@ input[type="number"], input[type="password"], input[type="url"] { font: inherit;
 .m0 { margin: 0; }
 details > summary { cursor: pointer; }
 @media (max-width: 900px) { .compare { grid-template-columns: 1fr; } }
+
+/* Conversation on the task report */
+.conv-list { display: flex; flex-direction: column; gap: 8px; max-height: 720px; overflow: auto; padding-right: 4px; }
+.conv { padding: 10px 14px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); font-size: .92rem; }
+.conv-you { background: var(--blue-soft); border-color: #dbe5fb; }
+.conv-claude { background: var(--card); }
+.conv-thinking { background: var(--surface); border-style: dashed; }
+.conv-action { background: var(--surface); }
+.conv-bad { background: var(--red-soft); border-color: #f5d0d0; }
+.conv-who { font-weight: 600; font-size: .85rem; margin-bottom: 4px; }
+details.conv > summary.conv-who { cursor: pointer; margin-bottom: 0; }
+details.conv[open] > summary.conv-who { margin-bottom: 6px; }
+.conv-time { font-weight: 400; color: var(--muted); font-size: .78rem; margin-left: 6px; }
+.conv-text { white-space: pre-wrap; word-break: break-word; }
+.conv-input { display: block; white-space: pre-wrap; word-break: break-all; font-size: .82rem; color: var(--muted); }

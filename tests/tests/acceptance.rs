@@ -1075,3 +1075,69 @@ fn automatic_tasks_respect_the_setting() {
     fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-off", "cwd": work.to_string_lossy(), "prompt": "Hi"})));
     assert!(fx.engine.tasks.list().unwrap().is_empty());
 }
+
+// Conversation section: the hook's transcript_path is stored with the task's events and read back.
+#[test]
+fn test_claude_transcript_path_is_linked_to_the_task() {
+    use agenttracker_core::conversation;
+    let fx = Fixture::new();
+    let work = named_workspace(&fx, "letters", &[("a.txt", "a")]);
+    let t = task_in(&fx, &work, "Letters");
+    fx.engine.capture_baseline(&t.id).unwrap();
+    fx.engine.start(&t.id).unwrap();
+
+    let root = fx.dir.path().join("home").join(".claude");
+    let proj = root.join("projects").join("C--work-letters");
+    std::fs::create_dir_all(&proj).unwrap();
+    let record = proj.join("s-conv.jsonl");
+    std::fs::write(&record, include_str!("../../crates/agenttracker-core/tests/fixtures/claude_transcript.jsonl")).unwrap();
+    let cwd = work.to_string_lossy().to_string();
+    let tp = record.to_string_lossy().to_string();
+    let outside = fx.dir.path().join("not-claude.jsonl").to_string_lossy().to_string();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": tp, "prompt": "make letters"})));
+    // A path outside any Claude folder is never stored.
+    fx.deliver(claude_envelope("PreToolUse", 2_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": outside, "tool_name": "Write", "tool_input": {}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": tp})));
+
+    let events = fx.engine.events.by_task(&t.id).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events.iter().filter(|e| e.payload_redacted.get("transcript_path").is_some()).count(), 2);
+    assert_eq!(conversation::transcript_path_from_events(&events).as_deref(), Some(tp.as_str()));
+
+    let run = fx.engine.verify(&t.id).unwrap();
+    let task = fx.engine.tasks.get(&t.id).unwrap();
+    assert_eq!(task.session_id.as_deref(), Some("s-conv"));
+    let roots = vec![root.clone()];
+    let conv = conversation::for_task(&task, &run, &events, &roots);
+    assert_eq!(conv["status"], "ok", "{conv:#}");
+    assert_eq!(conv["entries"].as_array().unwrap().len(), 8);
+    assert_eq!(conv["entries"][0]["kind"], "you");
+
+    // Older events without a saved path: found by the session id instead.
+    let bare: Vec<AgentEvent> = events
+        .iter()
+        .cloned()
+        .map(|mut e| {
+            e.payload_redacted.as_object_mut().unwrap().remove("transcript_path");
+            e
+        })
+        .collect();
+    assert_eq!(conversation::for_task(&task, &run, &bare, &roots)["status"], "ok");
+
+    // The record was moved away.
+    std::fs::rename(&record, proj.join("moved.txt")).unwrap();
+    let conv = conversation::for_task(&task, &run, &events, &roots);
+    assert_eq!(conv["status"], "missing");
+    assert!(conv["message"].as_str().unwrap().contains("isn't where it used to be"));
+
+    // Reports include the conversation.
+    let json_report = agenttracker_core::report::export_json(&task, &run, &events, &conv);
+    assert_eq!(json_report["conversation"]["status"], "missing");
+    assert!(agenttracker_core::report::export_html(&task, &run, &events, &conv).contains("<h2>Conversation</h2>"));
+
+    // A manual task has no conversation.
+    let mut manual = task.clone();
+    manual.connector = "manual".into();
+    assert_eq!(conversation::for_task(&manual, &run, &[], &roots)["status"], "not_claude");
+    assert_eq!(conversation::for_task(&task, &run, &[], &[fx.dir.path().join("nowhere")])["status"], "no_record");
+}

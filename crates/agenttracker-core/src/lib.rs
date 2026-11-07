@@ -1,6 +1,7 @@
 //! AgentTracker core: observes AI coding agents and independently verifies their file work.
 //! Observational only — nothing here blocks or enforces agent behaviour.
 pub mod collector;
+pub mod conversation;
 pub mod connectors;
 pub mod db;
 pub mod demo;

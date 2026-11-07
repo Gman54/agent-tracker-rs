@@ -1141,6 +1141,9 @@ async function render_results() {
     ${required.map(r => checkCard(r, run.id, task)).join('') || '<p class="muted">No required checks were set.</p>'}
     ${optional.length ? `<h2 class="section-title">Optional checks</h2><p class="small muted">These don’t change the overall result.</p>${optional.map(r => checkCard(r, run.id, task)).join('')}` : ''}
 
+    <h2 class="section-title">Conversation</h2>
+    <div class="card" id="conversation-box"><p class="muted">Looking for Claude Code’s record of this conversation…</p></div>
+
     <details class="history card card-soft">
       <summary>History for this task (${runs.length} check${runs.length === 1 ? '' : 's'})</summary>
       <ul class="history-list">${runs.map(r => {
@@ -1149,7 +1152,76 @@ async function render_results() {
           ${r.id === run.id ? pill('blue', 'Showing') : `<button class="btn btn-link" data-act="go" data-screen="results" data-param="${esc(r.id)}">View</button>`}</li>`;
       }).join('')}</ul>
     </details>`;
+  loadConversation(run.id);
 }
+
+// ---- Conversation (Claude Code's own record, shown next to the checks) -------------------------
+const CONV_PREVIEW = 600;
+
+function convText(e, id) {
+  const t = e.text || '';
+  const cutNote = e.cut ? '<span class="small muted"> (very long, so it was cut short here)</span>' : '';
+  if (t.length <= CONV_PREVIEW) return `<div class="conv-text">${esc(t)}${cutNote}</div>`;
+  return `<div class="conv-text" id="${id}"><span class="conv-short">${esc(t.slice(0, CONV_PREVIEW))}…</span><span class="conv-full hidden">${esc(t)}${cutNote}</span></div>
+    <button class="btn btn-link" data-act="conv-more" data-id="${id}" aria-expanded="false">Show more</button>`;
+}
+
+function convEntry(e, i) {
+  const id = `conv-${i}`;
+  const time = e.ts ? `<span class="conv-time">${esc(new Date(e.ts).toLocaleTimeString())}</span>` : '';
+  switch (e.kind) {
+    case 'you':
+      return `<div class="conv conv-you"><div class="conv-who">You ${time}</div>${convText(e, id)}</div>`;
+    case 'claude':
+      return `<div class="conv conv-claude"><div class="conv-who">Claude ${time}</div>${convText(e, id)}</div>`;
+    case 'thinking':
+      return `<details class="conv conv-thinking"><summary class="conv-who">Claude’s thinking ${time}</summary>
+        <p class="small muted">This is the thinking Claude chose to show. It may be a summary.</p>${convText(e, id)}</details>`;
+    case 'action':
+      return `<div class="conv conv-action"><div class="conv-who">Action: ${esc(e.tool || 'a tool')} ${time}</div>${e.text ? `<code class="conv-input">${esc(e.text)}</code>` : ''}</div>`;
+    case 'result':
+      return `<details class="conv conv-result${e.is_error ? ' conv-bad' : ''}"><summary class="conv-who">Result${e.tool ? ` from ${esc(e.tool)}` : ''}${e.is_error ? ' — it reported a problem' : ''} ${time}</summary>
+        ${e.text ? convText(e, id) : '<p class="small muted">Nothing came back.</p>'}</details>`;
+    default:
+      return '';
+  }
+}
+
+async function loadConversation(runId) {
+  const box = $('#conversation-box');
+  if (!box) return;
+  let c;
+  try {
+    c = await api('GET', `/api/ui/runs/${runId}/conversation`);
+  } catch (e) {
+    box.innerHTML = `<p class="muted">I couldn’t load the conversation just now.</p>`;
+    return;
+  }
+  if (!document.body.contains(box) || state.runId !== runId) return;
+  const entries = c.entries || [];
+  if (!entries.length) {
+    box.innerHTML = `<p class="muted">${esc(c.message || 'There’s no conversation to show for this task.')}</p>
+      ${c.path ? `<p class="small muted">Record file: <code>${esc(c.path)}</code></p>` : ''}`;
+    return;
+  }
+  const notes = [];
+  if (c.windowed) notes.push('Showing the part of the conversation from while this task ran.');
+  if (c.capped || c.partial_read) notes.push('This conversation is long, so only the newest part is shown.');
+  if (c.skipped_lines) notes.push(`${c.skipped_lines} line(s) of the record were housekeeping or a kind I don’t show, so I skipped them.`);
+  box.innerHTML = `
+    <p class="small muted">This is Claude Code’s own record of the conversation, shown as it was saved. Claude’s words are what it said, not proof. The checks above show what really happened to your files.</p>
+    <div class="conv-list">${entries.map(convEntry).join('')}</div>
+    <p class="small muted mt">${notes.map(esc).join(' ')} Record file: <code>${esc(c.path || '')}</code></p>`;
+}
+
+actions['conv-more'] = (d, btn) => {
+  const box = $(`#${CSS.escape(d.id)}`);
+  if (!box) return;
+  const open = box.querySelector('.conv-full').classList.toggle('hidden') === false;
+  box.querySelector('.conv-short').classList.toggle('hidden', open);
+  btn.textContent = open ? 'Show less' : 'Show more';
+  btn.setAttribute('aria-expanded', String(open));
+};
 
 changes['results-run'] = el => navigate('results', el.value);
 changes['results-task'] = el => { state.runId = null; state.taskId = el.value; navigate('results'); };
