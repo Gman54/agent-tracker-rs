@@ -265,6 +265,8 @@ impl Engine {
                     }
                 }
             }
+            let window = crate::event::task_window(task.created_at, started_at, None, &events);
+            let events = crate::event::only_this_task(events, window);
             let evidence = Evidence {
                 baselines: self.manifests.latest_for_task(task_id, ManifestType::Baseline)?,
                 verifications: self.manifests.latest_for_task(task_id, ManifestType::Verification)?,

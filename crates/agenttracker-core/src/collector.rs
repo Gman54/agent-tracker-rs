@@ -322,6 +322,8 @@ fn auto_finish(engine: &crate::engine::Engine, t: &crate::task::TaskDefinition) 
             }
         }
     }
+    let window = crate::event::task_window(t.created_at, crate::now_ms(), None, &events);
+    let events = crate::event::only_this_task(events, window);
     let folder = t.folders_with(FolderRole::Working).into_iter().next().unwrap_or_default();
     let folder_norm = crate::fs_observer::normalize_path(Path::new(&folder));
     let inside: Vec<String> = crate::verifiers::auto_checks::reported_edit_paths(&events)

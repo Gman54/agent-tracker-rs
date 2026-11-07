@@ -22,7 +22,6 @@ pub const MAX_TEXT_CHARS: usize = 20_000;
 /// Short summaries for action inputs.
 const MAX_INPUT_CHARS: usize = 300;
 /// Leeway around the task's time window (clocks and write order are not exact).
-const WINDOW_GRACE_MS: i64 = 60_000;
 
 /// Folders Claude Code keeps its records in: `~/.claude`, plus `CLAUDE_CONFIG_DIR` when set.
 pub fn claude_roots() -> Vec<PathBuf> {
@@ -273,7 +272,7 @@ fn parse_line(v: &Value, tool_names: &mut std::collections::HashMap<String, Stri
 }
 
 /// Parses JSONL text. `window` (start, end in ms) limits entries to the task's time when any
-/// entry falls inside it; otherwise everything is kept and `windowed` stays false.
+/// entry falls inside it; otherwise only the latest request onward is kept and `windowed` stays false.
 pub fn parse_jsonl(data: &str, window: Option<(i64, i64)>) -> Parsed {
     let mut p = Parsed::default();
     let mut all = vec![];
@@ -298,6 +297,10 @@ pub fn parse_jsonl(data: &str, window: Option<(i64, i64)>) -> Parsed {
             let last = all.iter().rposition(inside).unwrap_or(all.len().saturating_sub(1));
             all = all.drain(first..=last).filter(|e| e.ts.is_none() || inside(e)).collect();
             p.windowed = true;
+        } else if let Some(last_you) = all.iter().rposition(|e| e.kind == EntryKind::You && e.ts.is_none_or(|t| t <= end)) {
+            // Nothing inside the window: show the latest request and what followed, never a
+            // mix of several requests.
+            all.drain(..last_you);
         }
     }
     if all.len() > MAX_ENTRIES {
@@ -389,9 +392,7 @@ pub fn for_task(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEve
         Ok(x) => x,
         Err(e) => return base("unreadable", &format!("I found Claude Code's record but couldn't open it ({e})."), Some(&shown)),
     };
-    let first_event = events.iter().filter_map(|e| e.source_ts.or(Some(e.collector_ts))).min();
-    let start = first_event.map_or(task.created_at, |t| t.min(task.created_at)) - WINDOW_GRACE_MS;
-    let end = run.finished_at.unwrap_or_else(crate::now_ms).max(run.started_at) + WINDOW_GRACE_MS;
+    let (start, end) = crate::event::task_window(task.created_at, run.started_at, run.finished_at, events);
     let parsed = parse_jsonl(&text, Some((start, end)));
     let status = if parsed.entries.is_empty() { "empty" } else { "ok" };
     let message = if parsed.entries.is_empty() { "Claude Code's record is there, but it has nothing I can show for this task." } else { "" };
@@ -458,6 +459,30 @@ mod tests {
         let p = parse_jsonl(SAMPLE, Some((far, far + 1)));
         assert!(!p.windowed, "nothing inside the window: show everything rather than nothing");
         assert_eq!(p.entries.len(), 8);
+    }
+
+    #[test]
+    fn falls_back_to_the_latest_request_not_a_mix() {
+        let line = |role: &str, ts: &str, text: &str| {
+            json!({"type": role, "timestamp": ts, "message": {"role": role, "content": [{"type": "text", "text": text}]}}).to_string()
+        };
+        let data = [
+            line("user", "2026-11-05T10:00:00Z", "create twofortea.txt"),
+            line("assistant", "2026-11-05T10:00:05Z", "Created it."),
+            line("user", "2026-11-05T11:00:00Z", "erase twofortea.txt"),
+            line("assistant", "2026-11-05T11:00:05Z", "Deleted it."),
+        ]
+        .join("\n");
+        let far = parse_ts("2026-11-05T12:00:00Z").unwrap();
+        let p = parse_jsonl(&data, Some((far, far + 1000)));
+        let texts: Vec<_> = p.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["erase twofortea.txt", "Deleted it."]);
+
+        let start = parse_ts("2026-11-05T10:59:58Z").unwrap();
+        let p = parse_jsonl(&data, Some((start, start + 60_000)));
+        assert!(p.windowed);
+        assert_eq!(p.entries.len(), 2);
+        assert_eq!(p.entries[0].text, "erase twofortea.txt");
     }
 
     #[test]

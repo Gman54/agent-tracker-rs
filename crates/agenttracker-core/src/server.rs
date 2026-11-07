@@ -525,6 +525,8 @@ async fn task_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>)
             }
         }
         crate::event::sort_source_order(&mut events);
+        let window = crate::event::window_for_task_page(&task, &events);
+        let events = crate::event::only_this_task(events, window);
         let baselines: Vec<Value> = e
             .manifests
             .latest_for_task(&id, crate::fs_observer::ManifestType::Baseline)?
@@ -728,6 +730,8 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
         }
     }
     crate::event::sort_source_order(&mut events);
+    let window = crate::event::task_window(task.created_at, run.started_at, run.finished_at, &events);
+    let events = crate::event::only_this_task(events, window);
     Ok((task, run, events))
 }
 
@@ -819,6 +823,8 @@ async fn task_live(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>
             }
         }
         crate::event::sort_source_order(&mut events);
+        let window = crate::event::window_for_task_page(&task, &events);
+        let events = crate::event::only_this_task(events, window);
         let view = e.live_view(&id);
         let mut gaps: Vec<Value> = view.gaps.iter().map(|g| json!({"kind": "observer", "detail": g})).collect();
         let (errs, agent): (Vec<_>, Vec<_>) = events.into_iter().partition(|x| x.event_type == crate::event::EventType::CaptureError);
