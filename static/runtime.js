@@ -28,6 +28,23 @@ const aPill = s => (s ? pill(...(ACTION_STATE[s] || ['', s])) : pill('', 'Not ex
 const originTag = fixture => (fixture
   ? '<span class="origin-tag fixture">Recorded fixture</span>'
   : '<span class="origin-tag">Runtime session</span>');
+// Model names can be long ("lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF/qwen2.5-coder-7b-instruct-q4_k_m.gguf").
+// Show a shorter name; the full one is on hover and copied on click.
+function shortModel(m) {
+  if (!m) return '—';
+  let n = String(m).split(/[\\/]/).filter(Boolean).pop() || String(m);
+  n = n.replace(/\.gguf$/i, '').replace(/[-_.@](q\d[\w]*|iq\d[\w]*|fp16|bf16|f16|gguf)$/i, '');
+  return n.length > 32 ? n.slice(0, 31) + '…' : n;
+}
+const modelCell = m => (m
+  ? `<button type="button" class="model-name" data-act="rtCopy" data-text="${esc(m)}" data-keep-enabled="1" title="${esc(m)} (click to copy)">${esc(shortModel(m))}</button>`
+  : '—');
+actions.rtCopy = async d => {
+  try { await navigator.clipboard.writeText(d.text); showToast(`Copied: ${d.text}`, 'success'); }
+  catch (_) { window.prompt('Copy the full model name:', d.text); }
+};
+const notRecorded = '<span class="muted">Not recorded</span>';
+
 const short = id => (id ? String(id).replace(/^([a-z]+_)(.{6}).*(.{6})$/, '$1$2…$3') : '—');
 const pretty = v => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 const list = arr => (arr && arr.length ? `<ul>${arr.map(x => `<li>${esc(pretty(x))}</li>`).join('')}</ul>` : '<span class="muted">None stated</span>');
@@ -69,15 +86,19 @@ async function renderSessions(body) {
       '<button class="btn btn-primary" data-act="rtTab" data-tab="demos">Open demonstrations</button>')}</div>`;
     return;
   }
+  const isFixture = s => !!(s.provider_config && s.provider_config.is_fixture);
+  // Only show the origin column when the rows differ; otherwise say it once above the table.
+  const mixed = sessions.some(isFixture) && sessions.some(x => !isFixture(x));
+  const allOrigin = mixed ? '' : (isFixture(sessions[0]) ? 'All sessions below used recorded fixtures (not live model output).' : 'All sessions below are runtime sessions.');
   body.innerHTML = `
-    <div class="note note-plain mb-sm">These sessions ran through the AgentTracker runtime. Externally connected agents (Claude Code, Cursor, Copilot) appear under Live Task and Results and are not mixed in here.</div>
-    <div class="card"><table class="table">
-      <thead><tr><th>Task</th><th>Origin</th><th>Model</th><th>Status</th><th>Actions</th><th>Findings</th><th>Started</th></tr></thead>
+    <div class="note note-plain mb-sm">These sessions ran through the AgentTracker runtime. Externally connected agents (Claude Code, Cursor, Copilot) appear under Live Task and Results and are not mixed in here.${allOrigin ? ` ${esc(allOrigin)}` : ''}</div>
+    <div class="card table-wrap"><table class="table rt-sessions">
+      <thead><tr><th>Task</th>${mixed ? '<th>Origin</th>' : ''}<th class="col-model">Model</th><th>Status</th><th>Actions</th><th>Findings</th><th>Started</th></tr></thead>
       <tbody>${sessions.map(s => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(s.id)}">
           <td><div class="task-row-title">${esc(s.title)}</div><div class="mono muted">${esc(short(s.id))}</div></td>
-          <td>${originTag(s.provider_config && s.provider_config.is_fixture)}</td>
-          <td class="small">${esc((s.provider_config && s.provider_config.model) || '—')}</td>
+          ${mixed ? `<td>${originTag(isFixture(s))}</td>` : ''}
+          <td class="col-model">${modelCell(s.provider_config && s.provider_config.model)}</td>
           <td>${sPill(s.status)}</td><td>${esc(s.actions)}</td><td>${esc(s.findings)}</td><td class="small muted">${esc(when(s.created_at))}</td>
         </tr>`).join('')}</tbody></table></div>`;
 }
@@ -245,7 +266,7 @@ async function renderSession(id) {
     <div class="grid-2 mt">
       <div class="card"><h3>Request</h3><p class="quote">${esc(s.instruction)}</p>
         ${kv([['Working folder', `<span class="mono">${esc(s.working_dir)}</span>`], ['Protected paths', esc((s.protected_paths || []).join(', ') || 'none')],
-          ['Steps / tool calls', `${esc(s.steps_used)} / ${esc(s.tool_calls_used)}`], ['Provider', esc(`${s.provider_config.provider} · ${s.provider_config.model}`)],
+          ['Steps / tool calls', `${esc(s.steps_used)} / ${esc(s.tool_calls_used)}`], ['Provider', `${esc(s.provider_config.provider)} · ${modelCell(s.provider_config.model)}`],
           ['Model digest', `<span class="mono">${esc(s.provider_config.model_digest || 'Unavailable')}</span>`]])}
         ${s.status === 'paused' ? '<div class="row row-end mt"><button class="btn btn-secondary btn-small" data-act="rtResume" data-id="' + esc(s.id) + '">Resume</button></div>' : ''}
         ${RETRYABLE.includes(s.status) ? retryBox(s) : ''}
@@ -262,12 +283,14 @@ async function renderSession(id) {
         <tr><td>${esc(x.step)}</td><td><span class="mono">${esc(short(x.id))}</span>${x.kind === 'retrospective' ? ` ${pill('amber', 'Retrospective')}` : ''}</td>
           <td>${x.kind === 'action' ? `<b>${esc(x.tool)}</b> <span class="mono muted">${esc(JSON.stringify(x.args))}</span>` : `<span class="muted">${x.kind === 'response' ? 'Final text response (no action)' : esc(x.kind)}</span>`}</td>
           <td>${x.kind === 'action' ? aPill(x.state) : ''}</td>
-          <td><button class="btn btn-secondary btn-small" data-act="go" data-screen="runtime" data-param="${esc(x.action_id || x.id)}">${x.kind === 'action' ? 'Why this action?' : 'Inspect decision'}</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">No decisions recorded</td></tr>'}
+          <td class="why-cell">${x.kind === 'action'
+            ? `<button class="btn btn-primary btn-small" data-act="go" data-screen="runtime" data-param="${esc(x.action_id || x.id)}">Why this action?</button>`
+            : `<button class="btn btn-secondary btn-small" data-act="go" data-screen="runtime" data-param="${esc(x.id)}">Inspect decision</button>`}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No decisions recorded</td></tr>'}
       </tbody></table></div>
     ${d.findings.length ? `<h2 class="section-title">Findings</h2>${d.findings.map(findingCard).join('')}` : ''}
     <h2 class="section-title">Model requests</h2>
-    <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th>Model</th><th>Structured output</th><th>Prompt size</th><th>Status</th><th>Duration</th></tr></thead><tbody>
-      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="small">${esc(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r, d.model_context_tokens)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
+    <div class="card"><table class="table"><thead><tr><th>Request</th><th>Purpose</th><th class="col-model">Model</th><th>Structured output</th><th>Prompt size</th><th>Status</th><th>Duration</th></tr></thead><tbody>
+      ${d.requests.map(r => `<tr><td class="mono">${esc(short(r.id))}</td><td>${esc(r.purpose)}</td><td class="col-model">${modelCell(r.model)}</td><td class="small">${esc(r.structured_output_mode)}</td><td class="small">${promptSize(r, d.model_context_tokens)}</td><td>${r.status === 'ok' ? pill('green', 'ok') : pill('red', r.status)}${r.error ? `<div class="small muted">${esc(r.error)}</div>` : ''}${replyDetails(r)}</td><td class="small">${r.finished_at ? ((r.finished_at - r.started_at) / 1000).toFixed(1) + ' s' : '—'}</td></tr>`).join('')}
     </tbody></table></div>`;
   if (RETRYABLE.includes(s.status)) fillRetryModels(s.provider_config && !s.provider_config.is_fixture ? s.provider_config.model : '');
 }
@@ -385,6 +408,19 @@ async function renderWhy(id) {
     <div class="notice">${esc(b.notice)}</div>
     ${b.is_fixture ? '<div class="note note-warn mt">This session used a recorded fixture: the "model" responses were written in advance for testing. They are not output from a live model.</div>' : ''}
     ${b.capture_gaps.length ? `<div class="gaps mt"><h3>Missing or limited context</h3><ul>${b.capture_gaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></div>` : ''}
+
+    <div class="why-summary card mt">
+      <h2>The short version</h2>
+      <p class="small muted">What was recorded for this step. Anything missing says “Not recorded”; nothing here is filled in by guesswork.</p>
+      <dl class="why-list">
+        <dt>Instruction</dt><dd>${(b.original_request || '').trim() ? `<span class="quote-inline">${esc(b.original_request)}</span>` : notRecorded}</dd>
+        <dt>Cited evidence</dt><dd>${cited.length ? cited.map(i => `<span class="pill">${esc(i.label)}</span>`).join(' ') : notRecorded}</dd>
+        <dt>Stated rationale</dt><dd>${(p.stated_rationale || '').trim() ? esc(p.stated_rationale) : notRecorded}</dd>
+        <dt>Resulting change</dt><dd>${b.observed_changes.length
+          ? b.observed_changes.slice(0, 6).map(c => `<code>${esc(c.rel_path)}</code> ${esc(c.change_kind)}`).join('<br>') + (b.observed_changes.length > 6 ? `<br><span class="small muted">and ${b.observed_changes.length - 6} more</span>` : '')
+          : a && b.verifications.length ? '<span class="muted">No file changes were observed.</span>' : notRecorded}</dd>
+      </dl>
+    </div>
 
     <div class="why-sec mt"><h3>Original request</h3><p class="quote">${esc(b.original_request)}</p></div>
 

@@ -206,6 +206,7 @@ pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> 
         .route("/api/ui/tasks", get(tasks_list).post(task_create))
         .route("/api/ui/tasks/:id", get(task_get))
         .route("/api/ui/tasks/:id/checks", put(task_checks))
+        .route("/api/ui/tasks/:id/title", put(task_title))
         .route("/api/ui/tasks/:id/:action", post(task_action))
         .route("/api/ui/events/recent", get(events_recent))
         .route("/api/ui/templates", get(templates_list).post(template_create))
@@ -552,6 +553,10 @@ async fn task_checks(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<Strin
     ok(st.engine.tasks.update_checks(&id, checks))
 }
 
+async fn task_title(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(b): Json<Value>) -> Response {
+    ok(st.engine.tasks.set_title(&id, b.get("title").and_then(Value::as_str).unwrap_or("")))
+}
+
 async fn task_action(State(st): State<Arc<AppState>>, UrlPath((id, action)): UrlPath<(String, String)>, body: Bytes) -> Response {
     let engine = st.engine.clone();
     let key = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v.get("idempotency_key").and_then(Value::as_str).map(str::to_string));
@@ -720,7 +725,14 @@ async fn pick_folder(State(st): State<Arc<AppState>>) -> Response {
 fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crate::task::TaskDefinition, crate::store::VerificationRun, Vec<crate::event::AgentEvent>)> {
     let run = engine.results.get_run(run_id)?.ok_or_else(|| CoreError::NotFound(format!("run {run_id}")))?;
     let current = engine.tasks.get(&run.task_id)?;
-    let task = engine.tasks.snapshot(&run.task_id, run.definition_version)?.unwrap_or(current);
+    let task = match engine.tasks.snapshot(&run.task_id, run.definition_version)? {
+        // The name is only a label, so a renamed task shows its new name on older results too.
+        Some(mut snap) => {
+            snap.title = current.title.clone();
+            snap
+        }
+        None => current,
+    };
     let mut events = engine.events.by_task(&run.task_id)?;
     if let Some(sid) = &task.session_id {
         for e in engine.events.by_session(sid)? {

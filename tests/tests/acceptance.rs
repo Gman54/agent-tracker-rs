@@ -1025,6 +1025,11 @@ fn automatic_task_starts_on_prompt_and_checks_on_stop() {
     assert!(t.is_auto());
     assert_eq!(t.lifecycle, Lifecycle::Running);
     assert_eq!(t.title, "Create notes.txt with a greeting");
+    // Titles can be renamed; the original request stays as it was.
+    let renamed = fx.engine.tasks.set_title(&t.id, "  Greeting note  ").unwrap();
+    assert_eq!(renamed.title, "Greeting note");
+    assert_eq!(fx.engine.tasks.get(&t.id).unwrap().instruction, "Create notes.txt with a greeting");
+    assert!(fx.engine.tasks.set_title(&t.id, "   ").is_err());
 
     let file = work.join("notes.txt");
     std::fs::write(&file, "hello").unwrap();
@@ -1129,7 +1134,8 @@ fn test_claude_transcript_path_is_linked_to_the_task() {
     }
     let s = said_vs_happened(&task, &failing, &events, &conv);
     assert_eq!(s["tone"], "bad");
-    assert_eq!(s["headline"], "It said it was done, but the checks found a problem.");
+    assert_eq!(s["headline"], "It said it was done, but a check found a problem.");
+    assert_eq!(s["verification"]["label"], "A check found a problem");
     if !failing.results.is_empty() {
         assert!(s["happened"].as_str().unwrap().contains("failed:"), "{s:#}");
     }
@@ -1138,19 +1144,47 @@ fn test_claude_transcript_path_is_linked_to_the_task() {
     for r in passing.results.iter_mut() {
         r.status = CheckStatus::Passed;
     }
-    assert_eq!(said_vs_happened(&task, &passing, &events, &conv)["headline"], "It said it was done, and the checks agree.");
+    assert_eq!(said_vs_happened(&task, &passing, &events, &conv)["headline"], "It said it was done, and all required checks passed.");
     // Nothing heard and no record: plain wording, no claim.
     let s = said_vs_happened(&task, &passing, &[], &serde_json::Value::Null);
     assert_eq!(s["claimed"], false);
     assert_eq!(s["said"], "I didn't hear anything from Claude.");
-    assert_eq!(s["headline"], "The checks passed.");
+    assert_eq!(s["headline"], "All required checks passed.");
+    assert_eq!(s["verification"]["label"], "All required checks passed");
     // Last words but no "done" signal: quoted, not counted as a claim.
     let s = said_vs_happened(&task, &failing, &[], &conv);
     assert_eq!(s["claimed"], false);
-    assert_eq!(s["headline"], "Here's what it said last, but the checks found a problem.");
+    assert_eq!(s["headline"], "Here's what it said last, but a check found a problem.");
     let html = agenttracker_core::report::export_html(&task, &failing, &events, &conv);
     assert!(html.contains("What it said vs what really happened"));
     assert!(agenttracker_core::report::export_json(&task, &failing, &events, &conv)["said_vs_happened"]["tone"] == "bad");
+
+    // No checks at all: "Verification wasn't run", never "couldn't confirm".
+    let mut empty = run.clone();
+    empty.results.clear();
+    empty.overall_verdict = Some(CheckStatus::UnableToVerify);
+    let s = said_vs_happened(&task, &empty, &events, &conv);
+    assert_eq!(s["verification"]["state"], "not_run", "{s:#}");
+    assert_eq!(s["verification"]["label"], "Verification wasn't run");
+    assert_eq!(s["verification"]["detail"], "Add checks to evaluate this task.");
+    assert_eq!(s["headline"], "It said it was done, but verification wasn't run.");
+    assert_eq!(s["tone"], "neutral");
+    let html = agenttracker_core::report::export_html(&task, &empty, &events, &conv);
+    assert!(html.contains("Verification wasn't run"));
+    assert!(!html.to_lowercase().contains("couldn't confirm everything"));
+
+    // Claude's last message is an API error: "Agent encountered an error", never "said it was done",
+    // even though Claude Code still sent its Stop signal.
+    let mut err_conv = conv.clone();
+    err_conv["entries"].as_array_mut().unwrap().push(json!({"kind": "claude", "text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}));
+    let s = said_vs_happened(&task, &passing, &events, &err_conv);
+    assert_eq!(s["agent_error"], true, "{s:#}");
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["headline"], "Agent encountered an error");
+    assert_eq!(s["session"]["label"], "Agent encountered an error");
+    assert!(!s["said"].as_str().unwrap().contains("said it was done"), "{s:#}");
+    // Session and verification stay separate items.
+    assert_eq!(s["verification"]["label"], if passing.results.is_empty() { "Verification wasn't run" } else { "All required checks passed" });
 
     // Older events without a saved path: found by the session id instead.
     let bare: Vec<AgentEvent> = events

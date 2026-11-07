@@ -284,13 +284,11 @@ pub fn safe_auto_folder(wd: &str) -> bool {
 
 fn auto_title(ev: &AgentEvent, wd: &str) -> String {
     let prompt = ev.payload_redacted.get("prompt").and_then(Value::as_str).unwrap_or("").trim();
-    let first_line = prompt.lines().next().unwrap_or("").trim();
-    if !first_line.is_empty() && !first_line.starts_with("[REDACTED") {
-        let mut t: String = first_line.chars().take(80).collect();
-        if first_line.chars().count() > 80 {
-            t.push_str("...");
+    if !prompt.starts_with("[REDACTED") {
+        let t = crate::task::short_title(prompt);
+        if !t.is_empty() {
+            return t;
         }
-        return t;
     }
     let name = Path::new(wd).file_name().and_then(|n| n.to_str()).unwrap_or(wd);
     format!("Agent job in {name}")

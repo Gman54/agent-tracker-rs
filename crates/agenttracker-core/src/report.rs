@@ -10,12 +10,35 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
-fn verdict_text(v: Option<CheckStatus>) -> (&'static str, &'static str, &'static str) {
-    match v {
-        Some(CheckStatus::Passed) => ("passed", "\u{2713}", "All required checks passed."),
-        Some(CheckStatus::Failed) => ("failed", "\u{2717}", "Something needs your attention."),
-        _ => ("unsure", "?", "We couldn't confirm everything."),
+/// Headline for a verification run. Zero checks is its own state: nothing was evaluated,
+/// so it is never reported as "couldn't confirm".
+fn verdict_text(run: &VerificationRun) -> (&'static str, &'static str, &'static str) {
+    if run.results.is_empty() {
+        return ("neutral", "\u{2013}", "Verification wasn't run");
     }
+    match run.overall_verdict {
+        Some(CheckStatus::Passed) => ("passed", "\u{2713}", "All required checks passed"),
+        Some(CheckStatus::Failed) => ("failed", "\u{2717}", "A check found a problem"),
+        _ => ("unsure", "?", "Unable to verify"),
+    }
+}
+
+/// True when the text looks like an error from the AI service rather than a real reply
+/// (Claude Code writes these into the record as if Claude said them, e.g. "API Error: 529 ...").
+pub fn looks_like_api_error(text: &str) -> bool {
+    let t = text.trim_start();
+    let head: String = t.chars().take(300).collect::<String>().to_lowercase();
+    head.starts_with("api error")
+        || head.starts_with("error: api")
+        || ["overloaded_error", "rate_limit_error", "authentication_error", "invalid_request_error", "\"type\":\"api_error\"", "\"type\": \"api_error\""]
+            .iter()
+            .any(|k| head.contains(k))
+}
+
+/// The raw text of Claude's last reply in the conversation record.
+fn last_claude_text(conversation: &Value) -> Option<&str> {
+    let entries = conversation.get("entries")?.as_array()?;
+    entries.iter().rev().find(|e| e.get("kind").and_then(Value::as_str) == Some("claude"))?.get("text")?.as_str()
 }
 
 fn status_text(s: CheckStatus) -> (&'static str, &'static str) {
@@ -58,8 +81,7 @@ const QUOTE_CHARS: usize = 240;
 
 /// Claude's last reply in the conversation record (if one was read), shortened for a one-line quote.
 fn last_claude_words(conversation: &Value) -> Option<String> {
-    let entries = conversation.get("entries")?.as_array()?;
-    let text = entries.iter().rev().find(|e| e.get("kind").and_then(Value::as_str) == Some("claude"))?.get("text")?.as_str()?;
+    let text = last_claude_text(conversation)?;
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.is_empty() {
         return None;
@@ -73,17 +95,25 @@ fn last_claude_words(conversation: &Value) -> Option<String> {
 /// The one-line "What it said vs what really happened" summary shown at the top of a report.
 /// Purely mechanical: what the agent claimed (completion event, or Claude's last words in the
 /// record) set beside the check results. It never judges whether the words were honest beyond that.
+///
+/// Besides the headline it returns two separate items the UI shows side by side:
+/// `session` (what happened to the agent session) and `verification` (what the checks found).
 pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> Value {
     let who = if task.connector == "claude_code" { "Claude" } else { "The agent" };
     let manual = task.connector == "manual";
     let quote = if manual { None } else { last_claude_words(conversation) };
+    let agent_error = !manual && last_claude_text(conversation).is_some_and(looks_like_api_error);
     let reported_done = events.iter().any(|e| e.event_type == EventType::AgentReportedCompletion);
+    let ended = events.iter().any(|e| e.event_type == EventType::SessionEnded);
     let heard = events.iter().any(|e| e.event_type != EventType::CaptureError);
     // Only a real "I'm done" signal counts as a claim; Claude's last words are quoted, not judged.
-    let claimed = !manual && reported_done;
+    // An API error is never a claim, even though Claude Code still sends its "stopped" signal after one.
+    let claimed = !manual && reported_done && !agent_error;
 
     let said = if manual {
         "No agent was listening for this task, so there's nothing it said.".to_string()
+    } else if agent_error {
+        format!("{who}'s last message was an error from the AI service, not a finished answer:")
     } else if reported_done && quote.is_none() {
         format!("{who} said it was done.")
     } else if reported_done {
@@ -99,30 +129,79 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
     let total = run.results.len();
     let passed = run.results.iter().filter(|r| r.status == CheckStatus::Passed).count();
     let failed: Vec<String> = run.results.iter().filter(|r| r.status == CheckStatus::Failed).map(|r| check_name(&r.check_type)).collect();
-    let unsure = run.results.iter().filter(|r| r.status == CheckStatus::UnableToVerify).count();
+    let unsure: Vec<&CheckResult> = run.results.iter().filter(|r| r.status == CheckStatus::UnableToVerify).collect();
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let happened = if total == 0 {
         "No checks were run.".to_string()
     } else if !failed.is_empty() {
         format!("{} of {total} check{} failed: {}.", failed.len(), plural(total), failed.join(", "))
-    } else if unsure > 0 {
-        format!("{passed} of {total} check{} passed, and {unsure} couldn't be confirmed.", plural(total))
+    } else if !unsure.is_empty() {
+        format!("{passed} of {total} check{} passed, and {} couldn't be confirmed.", plural(total), unsure.len())
     } else {
         format!("All {total} check{} passed.", plural(total))
     };
 
+    // Verification result, kept apart from the session.
     let verdict = run.overall_verdict;
+    let (v_state, v_tone, v_label, v_detail) = if total == 0 {
+        ("not_run", "neutral", "Verification wasn't run", "Add checks to evaluate this task.".to_string())
+    } else {
+        match verdict {
+            Some(CheckStatus::Passed) => ("passed", "ok", "All required checks passed", happened.clone()),
+            Some(CheckStatus::Failed) => ("failed", "bad", "A check found a problem", happened.clone()),
+            _ => {
+                let reason = match unsure.first() {
+                    Some(r) if !r.summary.trim().is_empty() => format!("{}: {}", check_name(&r.check_type), r.summary.trim()),
+                    Some(r) => format!("{} couldn't be confirmed.", check_name(&r.check_type)),
+                    None => "None of the checks are marked as required, so there's nothing to confirm against.".to_string(),
+                };
+                let more = if unsure.len() > 1 { format!(" ({} more couldn't be confirmed.)", unsure.len() - 1) } else { String::new() };
+                ("unable", "warn", "Unable to verify", format!("{reason}{more}"))
+            }
+        }
+    };
+
+    // Session status, kept apart from verification.
+    let (s_state, s_tone, s_label, s_detail) = if manual {
+        ("none", "neutral", "No agent session", "This task was checked by hand.".to_string())
+    } else if agent_error {
+        ("error", "bad", "Agent encountered an error", if ended { "The session ended after the error.".to_string() } else { "The work may not be finished.".to_string() })
+    } else if ended {
+        ("ended", "neutral", "Session ended", if reported_done { "The agent said it was done before the session ended.".to_string() } else { String::new() })
+    } else if reported_done {
+        ("finished", "neutral", "Finished", "The agent said it was done. That's its own word, not a check.".to_string())
+    } else if heard {
+        ("open", "neutral", "No finish signal", format!("{who} didn't say it was finished."))
+    } else {
+        ("silent", "neutral", "Nothing heard", format!("No activity was received from {}.", if who == "Claude" { "Claude" } else { "the agent" }))
+    };
+
     let has_quote = quote.is_some();
-    let (tone, headline) = match (claimed, verdict) {
-        (false, Some(CheckStatus::Passed)) if has_quote => ("ok", "Here's what it said last, and the checks passed."),
-        (false, Some(CheckStatus::Failed)) if has_quote => ("bad", "Here's what it said last, but the checks found a problem."),
-        (false, _) if has_quote => ("warn", "Here's what it said last, but I couldn't confirm everything."),
-        (true, Some(CheckStatus::Passed)) => ("ok", "It said it was done, and the checks agree."),
-        (true, Some(CheckStatus::Failed)) => ("bad", "It said it was done, but the checks found a problem."),
-        (true, _) => ("warn", "It said it was done, but I couldn't confirm all of it."),
-        (false, Some(CheckStatus::Passed)) => ("ok", "The checks passed."),
-        (false, Some(CheckStatus::Failed)) => ("bad", "The checks found a problem."),
-        (false, _) => ("warn", "I couldn't confirm everything."),
+    let (tone, headline) = if agent_error {
+        ("bad", "Agent encountered an error".to_string())
+    } else {
+        let tail = match v_state {
+            "not_run" => "verification wasn't run",
+            "passed" => "all required checks passed",
+            "failed" => "a check found a problem",
+            _ => "it was unable to verify the work",
+        };
+        let tone = match v_state {
+            "passed" => "ok",
+            "failed" => "bad",
+            "not_run" => "neutral",
+            _ => "warn",
+        };
+        let joiner = if v_state == "passed" { "and" } else { "but" };
+        let h = if claimed {
+            format!("It said it was done, {joiner} {tail}.")
+        } else if has_quote {
+            format!("Here's what it said last, {joiner} {tail}.")
+        } else {
+            let mut c = tail.chars();
+            format!("{}{}.", c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default(), c.as_str())
+        };
+        (tone, h)
     };
     json!({
         "tone": tone,
@@ -130,7 +209,10 @@ pub fn said_vs_happened(task: &TaskDefinition, run: &VerificationRun, events: &[
         "said": said,
         "quote": quote,
         "claimed": claimed,
+        "agent_error": agent_error,
         "happened": happened,
+        "session": {"state": s_state, "tone": s_tone, "label": s_label, "detail": s_detail},
+        "verification": {"state": v_state, "tone": v_tone, "label": v_label, "detail": v_detail, "checks_run": total},
     })
 }
 
@@ -139,14 +221,23 @@ fn said_vs_happened_html(s: &Value) -> String {
     let cls = match g("tone") {
         "ok" => "passed",
         "bad" => "failed",
+        "neutral" => "neutral",
         _ => "unsure",
+    };
+    let item = |k: &str| {
+        let o = s.get(k).cloned().unwrap_or(Value::Null);
+        let f = |n: &str| o.get(n).and_then(Value::as_str).unwrap_or("").to_string();
+        let d = f("detail");
+        format!("<p><span class=\"m\">{}:</span> <b>{}</b>{}</p>", if k == "session" { "Session" } else { "Verification" }, esc(&f("label")), if d.is_empty() { String::new() } else { format!(" &mdash; {}", esc(&d)) })
     };
     let quote = if g("quote").is_empty() { String::new() } else { format!(" <q>{}</q>", esc(g("quote"))) };
     format!(
-        "<div class=\"card svh {cls}\"><h2>What it said vs what really happened</h2><p><b>{}</b></p><p><span class=\"m\">Said:</span> {}{quote}</p><p><span class=\"m\">Really happened:</span> {}</p></div>",
+        "<div class=\"card svh {cls}\"><h2>What it said vs what really happened</h2><p><b>{}</b></p><p><span class=\"m\">Said:</span> {}{quote}</p><p><span class=\"m\">Really happened:</span> {}</p>{}{}</div>",
         esc(g("headline")),
         esc(g("said")),
-        esc(g("happened"))
+        esc(g("happened")),
+        item("session"),
+        item("verification")
     )
 }
 
@@ -203,8 +294,17 @@ fn conversation_html(conv: &Value) -> String {
     format!("<div class=\"card\"><h2>Conversation</h2>{path}{rows}</div>")
 }
 
+/// The name to show: the saved title, or a short one made from it when it's a long sentence.
+pub fn display_title(task: &TaskDefinition) -> String {
+    if task.title.chars().count() <= 60 {
+        return task.title.clone();
+    }
+    let t = crate::task::short_title(&task.title);
+    if t.is_empty() { task.title.clone() } else { t }
+}
+
 pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> String {
-    let (cls, icon, head) = verdict_text(run.overall_verdict);
+    let (cls, icon, head) = verdict_text(run);
     let required: std::collections::HashMap<&str, bool> = task.checks.iter().map(|c| (c.id.as_str(), c.is_required)).collect();
     let card = |r: &CheckResult| {
         let (i, t) = status_text(r.status);
@@ -224,8 +324,8 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>AgentTracker report — {title}</title>
 <style>body{{font:15px/1.6 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;background:#f7f5f0;color:#2c2825;max-width:860px;margin:32px auto;padding:0 20px}}
 .card{{background:#fff;border:1px solid #e8e2d9;border-radius:20px;padding:20px 24px;margin:16px 0}}
-.verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}
-.check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.c{{border-radius:12px;padding:8px 14px;margin:8px 0;background:#faf8f4}}.c.you{{background:#eef3fb}}.c.bad{{background:#fbeaea}}.t{{white-space:pre-wrap;word-break:break-word}}.svh{{border-width:2px}}.svh.passed{{border-color:#bfe9d4}}.svh.failed{{border-color:#f5d0d0}}.svh.unsure{{border-color:#f0dcae}}.svh p{{margin:6px 0}}summary{{cursor:pointer}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
+.verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}.neutral{{background:#eef0f3;color:#3f4650}}
+.check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.c{{border-radius:12px;padding:8px 14px;margin:8px 0;background:#faf8f4}}.c.you{{background:#eef3fb}}.c.bad{{background:#fbeaea}}.t{{white-space:pre-wrap;word-break:break-word}}.svh{{border-width:2px}}.svh.passed{{border-color:#bfe9d4}}.svh.failed{{border-color:#f5d0d0}}.svh.unsure{{border-color:#f0dcae}}.svh.neutral{{border-color:#d9dde3}}.svh p{{margin:6px 0}}summary{{cursor:pointer}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
 <h1>AgentTracker report</h1><div class="verdict {cls}">{icon} {head}</div>
 {svh}
 <div class="card"><h2>What you asked</h2><p><b>{title}</b></p><p>{instr}</p><ul>{folders}</ul><p class="m">Task definition version {ver} &middot; checked {when}</p></div>
@@ -234,7 +334,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
 {conv}
 <p class="m">AgentTracker observes and reports; it doesn't block agents or undo changes. A pass means the configured checks passed &mdash; not that the work is correct in every way.</p>
 </body></html>"#,
-        title = esc(&task.title),
+        title = esc(&display_title(task)),
         instr = esc(&task.instruction),
         ver = run.definition_version,
         when = run.finished_at.unwrap_or(run.started_at),
@@ -298,4 +398,73 @@ pub fn propose_from_incident(task: &TaskDefinition, result: &CheckResult) -> Inc
         _ => return not_mappable("This incident can't be turned into an automated check."),
     };
     IncidentProposal { mappable: true, explanation, name, check_type: result.check_type.clone(), params }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::Lifecycle;
+
+    fn task(connector: &str) -> TaskDefinition {
+        TaskDefinition {
+            id: "t".into(),
+            title: "Please create summary files for every report in the folder and keep the originals safe".into(),
+            instruction: "x".into(),
+            connector: connector.into(),
+            definition_version: 1,
+            lifecycle: Lifecycle::Completed,
+            folders: vec![],
+            checks: vec![],
+            session_id: None,
+            created_at: 0,
+            updated_at: 0,
+            origin: "auto".into(),
+        }
+    }
+    fn run(results: Vec<CheckResult>, v: Option<CheckStatus>) -> VerificationRun {
+        VerificationRun { id: "r".into(), task_id: "t".into(), definition_version: 1, started_at: 0, finished_at: Some(1), overall_verdict: v, results }
+    }
+    fn result(status: CheckStatus, summary: &str) -> CheckResult {
+        CheckResult { check_id: "c".into(), check_type: "required_outputs_exist".into(), check_version: "1".into(), status, summary: summary.into(), evidence_refs: vec![], limitations: vec![], started_at: 0, finished_at: 0 }
+    }
+
+    #[test]
+    fn zero_checks_is_not_run() {
+        let r = run(vec![], Some(CheckStatus::UnableToVerify));
+        let s = said_vs_happened(&task("claude_code"), &r, &[], &Value::Null);
+        assert_eq!(s["verification"]["label"], "Verification wasn't run");
+        assert_eq!(s["verification"]["detail"], "Add checks to evaluate this task.");
+        assert_eq!(s["headline"], "Verification wasn't run.");
+        assert_eq!(s["tone"], "neutral");
+        assert_eq!(verdict_text(&r).2, "Verification wasn't run");
+        let html = export_html(&task("claude_code"), &r, &[], &Value::Null);
+        assert!(!html.contains("couldn't confirm everything"));
+        assert!(html.contains("Create summary files for every report"), "short title in the heading");
+    }
+
+    #[test]
+    fn api_error_is_reported_as_error() {
+        let conv = json!({"entries": [{"kind": "you", "text": "do it"}, {"kind": "claude", "text": "API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}"}]});
+        let r = run(vec![], None);
+        let s = said_vs_happened(&task("claude_code"), &r, &[], &conv);
+        assert_eq!(s["agent_error"], true);
+        assert_eq!(s["claimed"], false);
+        assert_eq!(s["headline"], "Agent encountered an error");
+        assert_eq!(s["session"]["label"], "Agent encountered an error");
+        assert_eq!(s["verification"]["label"], "Verification wasn't run");
+        assert!(!s["said"].as_str().unwrap().contains("said it was done"));
+        assert!(looks_like_api_error("API Error: Request timed out."));
+        assert!(!looks_like_api_error("I fixed the API error in login.rs and the tests pass."));
+    }
+
+    #[test]
+    fn unable_to_verify_gives_the_reason() {
+        let r = run(vec![result(CheckStatus::UnableToVerify, "The output folder couldn't be read")], Some(CheckStatus::UnableToVerify));
+        let s = said_vs_happened(&task("claude_code"), &r, &[], &Value::Null);
+        assert_eq!(s["verification"]["label"], "Unable to verify");
+        assert_eq!(s["verification"]["detail"], "Required files exist: The output folder couldn't be read");
+        assert_eq!(s["headline"], "It was unable to verify the work.");
+        let ok = run(vec![result(CheckStatus::Passed, "ok")], Some(CheckStatus::Passed));
+        assert_eq!(said_vs_happened(&task("claude_code"), &ok, &[], &Value::Null)["verification"]["label"], "All required checks passed");
+    }
 }

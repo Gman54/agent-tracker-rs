@@ -6,7 +6,7 @@
   --surface: #f8fafc;
   --card: #ffffff;
   --ink: #1e293b;
-  --muted: #64748b;
+  --muted: #4b5563;
   --line: #e2e8f0;
   --blue: #2563eb;
   --blue-dark: #1d4ed8;
@@ -33,8 +33,8 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 15.5px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 h1, h2, h3, h4 { margin: 0 0 .4em; line-height: 1.3; font-weight: 600; color: var(--ink); letter-spacing: -.01em; }
@@ -51,7 +51,7 @@ code, .code, pre {
 code, .code { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; word-break: break-all; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
-.small { font-size: .87rem; }
+.small { font-size: .875rem; }
 .center { text-align: center; }
 
 :focus-visible { outline: 2.5px solid var(--blue); outline-offset: 2px; border-radius: 6px; }
@@ -154,7 +154,7 @@ code, .code { background: var(--surface); border: 1px solid var(--line); border-
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 24px 26px;
+  padding: 22px 24px;
   box-shadow: var(--shadow);
 }
 .card + .card { margin-top: 18px; }
@@ -383,7 +383,7 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; accent-
 .live-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
 .live-cols .card + .card { margin-top: 0; }
 .col-card h3 { display: flex; align-items: center; gap: 8px; }
-.event-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow: auto; }
+.event-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .event-list li { padding: 8px 11px; background: var(--surface); border-radius: 10px; font-size: .88rem; word-break: break-word; }
 .event-list .ev-time { color: var(--muted); font-size: .78rem; display: block; }
 .gap-card { background: var(--amber-soft); border-color: #f0dcae; }
@@ -547,7 +547,7 @@ details.history summary { cursor: pointer; font-weight: 650; padding: 6px 0; }
 .ctx-item.unavail { border-style: dashed; opacity: .8; }
 .ctx-item.lowtrust { border-left: 3px solid #f59e0b; }
 .ctx-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: .82rem; }
-.ctx-body { white-space: pre-wrap; word-break: break-word; font-size: .84rem; margin: 6px 0 0; max-height: 180px; overflow: auto; font-family: "Cascadia Code", Consolas, ui-monospace, monospace; }
+.ctx-body { white-space: pre-wrap; word-break: break-word; font-size: .84rem; margin: 6px 0 0; font-family: "Cascadia Code", Consolas, ui-monospace, monospace; }
 .quote { border-left: 3px solid #8b5cf6; padding: 6px 12px; background: #faf5ff; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; white-space: pre-wrap; }
 .timeline { list-style: none; margin: 0; padding: 0; }
 .timeline li { position: relative; padding: 0 0 10px 18px; font-size: .86rem; }
@@ -580,7 +580,7 @@ details > summary { cursor: pointer; }
 @media (max-width: 900px) { .compare { grid-template-columns: 1fr; } }
 
 /* Conversation on the task report */
-.conv-list { display: flex; flex-direction: column; gap: 8px; max-height: 720px; overflow: auto; padding-right: 4px; }
+.conv-list { display: flex; flex-direction: column; gap: 8px; }
 .conv { padding: 10px 14px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); font-size: .92rem; }
 .conv-you { background: var(--blue-soft); border-color: #dbe5fb; }
 .conv-claude { background: var(--card); }
@@ -609,3 +609,81 @@ details.conv[open] > summary.conv-who { margin-bottom: 6px; }
 .svh-label { color: var(--muted); font-size: .9rem; }
 .svh-quote { font-style: italic; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .svh-row { grid-template-columns: 1fr; gap: 2px; } }
+
+/* ---- First polish pass: calmer type, single page scroll, compact layouts ---- */
+.task-row-meta, .field-hint, .check-option .opt-desc, .params, .event-list .ev-time, .conv-time { font-size: .85rem; }
+.table { font-size: .9rem; }
+.table th { font-size: .8rem; }
+.grid-2, .grid-3, .grid-4 { gap: 18px; align-items: start; }
+.row-tight { gap: 6px; }
+
+/* Titles: short name, rename, and the full request folded underneath */
+.title-block { min-width: 0; flex: 1 1 420px; }
+.title-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.title-line h1 { margin: 0; overflow-wrap: anywhere; }
+.title-block .rename { margin: 8px 0; max-width: 520px; }
+.title-block .lead { margin-top: 4px; }
+.orig-req { margin-top: 8px; max-width: 760px; }
+.orig-req summary { cursor: pointer; color: var(--blue); font-weight: 600; font-size: .9rem; }
+.orig-req p { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 14px; margin: 8px 0 0; }
+
+/* Home */
+.hero-compact { grid-template-columns: 1fr auto; padding: 20px 24px; gap: 16px; }
+.hero-compact h1 { font-size: 1.35rem; margin-bottom: 4px; max-width: none; }
+.hero-compact p { margin: 0; }
+.stat-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.stat-chip { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 16px; box-shadow: var(--shadow); }
+.stat-chip .stat-num { font-size: 1.35rem; }
+.stat-chip .stat-label { margin: 0; font-size: .9rem; }
+.stat-wide { flex: 1 1 280px; flex-wrap: wrap; }
+.home-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.home-grid > .card + .card { margin-top: 0; }
+.card-accent { background: var(--blue-soft); border-color: #c7d7fe; }
+.card-accent p { margin: 0 0 14px; }
+.empty-compact { margin: 0; padding: 4px 0; }
+.empty-compact p { margin: 0 0 10px; }
+
+/* Live task: timeline gets about two thirds, status and coverage the rest. One page scroll. */
+.live-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.live-main h3, .live-side h3 { display: flex; align-items: center; gap: 8px; }
+.live-side > div > .card { margin-top: 18px; }
+.live-side .stack-sm .btn { width: 100%; }
+
+/* Connections */
+.conn-card { gap: 14px; }
+.conn-details summary { cursor: pointer; color: var(--blue); font-weight: 600; font-size: .9rem; }
+.conn-details[open] summary { margin-bottom: 10px; }
+.conn-details .kv { margin-bottom: 10px; }
+
+/* Results: session and verification shown as separate items */
+.verdict-neutral { background: var(--hover); color: #374151; border-color: var(--line); }
+.verdict-neutral .verdict-icon { background: #6b7280; }
+.svh-neutral { border-color: var(--line); }
+.svh-neutral .svh-head { color: #374151; }
+.svh-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 14px; }
+.svh-item { display: flex; flex-direction: column; gap: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 14px; }
+.svh-detail { display: block; margin-top: 2px; font-weight: 400; }
+
+/* Settings */
+.plain-list { margin: 0 0 8px; padding-left: 18px; }
+.plain-list li { margin-bottom: 6px; }
+
+/* Agent Runtime */
+.table-wrap { overflow-x: auto; }
+.col-model { min-width: 200px; }
+.model-name { background: none; border: none; padding: 0; font: inherit; font-size: .9rem; color: var(--ink); cursor: copy; text-align: left; white-space: nowrap; border-bottom: 1px dotted var(--muted); }
+.model-name:hover { color: var(--blue); }
+.why-cell { white-space: nowrap; }
+.why-summary h2 { margin-bottom: 2px; }
+.why-list { display: grid; grid-template-columns: 11rem 1fr; gap: 10px 16px; margin: 12px 0 0; }
+.why-list dt { color: var(--muted); font-weight: 600; }
+.why-list dd { margin: 0; overflow-wrap: anywhere; }
+.quote-inline { font-style: italic; white-space: pre-wrap; }
+
+@media (max-width: 900px) {
+  .live-layout, .home-grid { grid-template-columns: 1fr; }
+  .hero-compact { grid-template-columns: 1fr; }
+  .why-list { grid-template-columns: 1fr; gap: 2px; }
+  .why-list dd { margin-bottom: 8px; }
+}
+#svh-box .card { margin-bottom: 18px; }
