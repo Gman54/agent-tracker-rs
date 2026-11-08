@@ -257,7 +257,7 @@ pub fn reread_legacy(task: &TaskDefinition, run: &mut crate::store::Verification
     let mut changed = false;
     let shells = shell_call_count(events);
     for r in run.results.iter_mut().filter(|r| r.status == CheckStatus::Passed) {
-        let note = "Re-read with AgentTracker's newer, stricter wording; the files weren't checked again.".to_string();
+        let note = "Re-read with TrailFox's newer, stricter wording; the files weren't checked again.".to_string();
         if r.check_type == "edits_inside_folder" && r.check_version == "1.0.0" {
             let n: usize = r.summary.strip_prefix("All ").and_then(|s| s.split_whitespace().next()).and_then(|x| x.parse().ok()).unwrap_or(1);
             if let Some((st, why)) = auto_checks::edits_coverage(n, shells) {
@@ -324,7 +324,7 @@ impl VerifierRegistry {
                     check_type: check_type.to_string(),
                     check_version: "unknown".into(),
                     status: CheckStatus::UnableToVerify,
-                    summary: format!("This version of AgentTracker doesn't know the check \"{check_type}\"."),
+                    summary: format!("This version of TrailFox doesn't know the check \"{check_type}\"."),
                     evidence_refs: vec![],
                     limitations: vec![],
                     started_at: now,

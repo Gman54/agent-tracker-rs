@@ -1,4 +1,4 @@
-//! Agent connectors: detect an agent, install/uninstall AgentTracker's hooks into its config
+//! Agent connectors: detect an agent, install/uninstall TrailFox's hooks into its config
 //! (merging, backing up, never clobbering unrelated settings), test the connection, and normalize
 //! hook payloads into [`AgentEvent`]s.
 pub mod claude_code;
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Every hook command AgentTracker writes contains this marker; uninstall removes only entries
+/// Every hook command TrailFox writes contains this marker; uninstall removes only entries
 /// carrying it.
 pub const OWNER_MARKER: &str = "--at-owner agenttracker";
 
@@ -51,7 +51,7 @@ pub struct DetectResult {
     /// Agent binary answered `--version`.
     pub agent_found: bool,
     pub agent_version: Option<String>,
-    /// Config file AgentTracker would edit.
+    /// Config file TrailFox would edit.
     pub config_path: String,
     pub config_exists: bool,
     pub hooks_installed: bool,
@@ -87,7 +87,7 @@ pub struct UninstallReport {
 pub struct ConfigPreview {
     pub config_path: String,
     pub file_exists: bool,
-    /// False when AgentTracker's hooks are already installed exactly as they would be written.
+    /// False when TrailFox's hooks are already installed exactly as they would be written.
     pub changes: bool,
     pub added: Vec<String>,
     pub updated: Vec<String>,
@@ -117,10 +117,10 @@ pub fn compute_state(det: &DetectResult, hook_program_ok: bool, recent_capture_e
         return (ConnectorState::Disconnected, if det.agent_found { "Not connected yet.".into() } else { "The agent wasn't found on this computer.".into() });
     }
     if unsupported_seen {
-        return (ConnectorState::UnsupportedVersion, "The agent sent data in a format this version of AgentTracker doesn't understand. Agent activity may be incomplete; file checks still work.".into());
+        return (ConnectorState::UnsupportedVersion, "The agent sent data in a format this version of TrailFox doesn't understand. Agent activity may be incomplete; file checks still work.".into());
     }
     if !hook_program_ok {
-        return (ConnectorState::Degraded, "Hooks are installed, but the AgentTracker hook program can't be found. Try reconnecting.".into());
+        return (ConnectorState::Degraded, "Hooks are installed, but the TrailFox hook program can't be found. Try reconnecting.".into());
     }
     if recent_capture_errors > 0 {
         return (ConnectorState::Degraded, format!("{recent_capture_errors} recent message(s) from the agent couldn't be understood."));
@@ -144,7 +144,7 @@ pub struct ConnectionTest {
     pub steps: Vec<TestStep>,
 }
 
-/// Record of what an install wrote, kept in the AgentTracker state dir.
+/// Record of what an install wrote, kept in the TrailFox state dir.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstallState {
     pub config_path: String,
@@ -191,7 +191,7 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Option<Value>> {
         Ok(s) if s.trim().is_empty() => Ok(Some(Value::Object(Default::default()))),
         Ok(s) => serde_json::from_str(&s)
             .map(Some)
-            .map_err(|e| CoreError::Invalid(format!("{} is not valid JSON ({e}); AgentTracker won't modify it", path.display()))),
+            .map_err(|e| CoreError::Invalid(format!("{} is not valid JSON ({e}); TrailFox won't modify it", path.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -270,7 +270,7 @@ pub fn probe_version(candidates: &[&str], timeout: Duration) -> Option<String> {
 /// Common connection-test step: the hook binary exists and answers `--version`.
 pub(crate) fn hook_binary_step(path: Option<PathBuf>) -> TestStep {
     match path {
-        None => TestStep { name: "Hook program".into(), ok: false, detail: "No AgentTracker hook is configured".into() },
+        None => TestStep { name: "Hook program".into(), ok: false, detail: "No TrailFox hook is configured".into() },
         Some(p) if !p.exists() => TestStep { name: "Hook program".into(), ok: false, detail: format!("{} doesn't exist", p.display()) },
         Some(p) => match probe_version(&[p.to_string_lossy().as_ref()], Duration::from_secs(3)) {
             Some(v) => TestStep { name: "Hook program".into(), ok: true, detail: format!("{v} at {}", p.display()) },

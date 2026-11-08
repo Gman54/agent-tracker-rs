@@ -84,7 +84,7 @@ fn bundle(db: &Db, decision_id: &str, action: Option<Value>) -> Result<Value> {
         gaps.push("Model digest unavailable from the provider; the exact model build cannot be confirmed.".into());
     }
     if req.as_ref().and_then(|r| r["provider_reasoning_redacted"].as_str()).is_none() {
-        gaps.push("No provider-exposed reasoning was returned. Internal model computation is never visible to AgentTracker.".into());
+        gaps.push("No provider-exposed reasoning was returned. Internal model computation is never visible to TrailFox.".into());
     }
     if action.is_some() && states.last().map(|s| s["state"] == "unknown").unwrap_or(false) {
         gaps.push("The execution outcome is UNKNOWN (the process stopped before the result was recorded). It was not repeated.".into());

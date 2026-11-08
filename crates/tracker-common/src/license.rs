@@ -70,7 +70,7 @@ pub fn status_for(key: Option<&str>) -> LicenseStatus {
             key_hint: None,
             server_verified: false,
             build_configured,
-            message: "That doesn't look like an AgentTracker key (AT-XXXXX-XXXXX-XXXXX-XXXXX).".into(),
+            message: "That doesn't look like an TrailFox key (AT-XXXXX-XXXXX-XXXXX-XXXXX).".into(),
         },
     }
 }

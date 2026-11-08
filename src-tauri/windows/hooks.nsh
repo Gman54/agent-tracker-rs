@@ -1,14 +1,14 @@
-; AgentTracker setup hooks.
+; TrailFox setup hooks.
 ; Tauri's NSIS template includes this file near the top (bundle.windows.nsis.installerHooks),
 ; before any pages are defined, so the finish page wording below replaces the defaults.
 
 ; ---- Finish page ----------------------------------------------------------------------------
-!define MUI_FINISHPAGE_TITLE "AgentTracker is installed"
-!define MUI_FINISHPAGE_TEXT "AgentTracker has been installed on this PC and is ready to use.$\r$\n$\r$\nYou can open it any time from the Start menu. While it is running, it keeps a small icon near the clock.$\r$\n$\r$\nClick Finish to close Setup."
-!define MUI_FINISHPAGE_RUN_TEXT "Start AgentTracker now"
+!define MUI_FINISHPAGE_TITLE "TrailFox is installed"
+!define MUI_FINISHPAGE_TEXT "TrailFox has been installed on this PC and is ready to use.$\r$\n$\r$\nYou can open it any time from the Start menu. While it is running, it keeps a small icon near the clock.$\r$\n$\r$\nClick Finish to close Setup."
+!define MUI_FINISHPAGE_RUN_TEXT "Start TrailFox now"
 
-; ---- Close a running AgentTracker in friendly words ----------------------------------------
-; AgentTracker lives in the tray, so people often still have it open when they reinstall or
+; ---- Close a running TrailFox in friendly words ----------------------------------------
+; TrailFox lives in the tray, so people often still have it open when they reinstall or
 ; uninstall. Its files are locked while it runs. Ask first, then close it (and its little hook
 ; helper) so Setup never stops halfway with a "can't write file" error.
 !macro AGENTTRACKER_CLOSE_RUNNING what
@@ -18,11 +18,11 @@
   ${If} $0 == 0
     ${IfNot} ${Silent}
     ${AndIf} $PassiveMode != 1
-      MessageBox MB_OKCANCEL|MB_ICONINFORMATION "AgentTracker is open right now (look for its small icon near the clock).$\r$\n$\r$\nSetup needs to close it so it can ${what}. Your saved checks and settings are kept.$\r$\n$\r$\nClick OK to close AgentTracker and carry on, or Cancel to stop Setup." /SD IDOK IDOK agenttracker_close_now
-      Abort "Setup was stopped, so AgentTracker was left running. Nothing was changed."
+      MessageBox MB_OKCANCEL|MB_ICONINFORMATION "TrailFox is open right now (look for its small icon near the clock).$\r$\n$\r$\nSetup needs to close it so it can ${what}. Your saved checks and settings are kept.$\r$\n$\r$\nClick OK to close TrailFox and carry on, or Cancel to stop Setup." /SD IDOK IDOK agenttracker_close_now
+      Abort "Setup was stopped, so TrailFox was left running. Nothing was changed."
     ${EndIf}
     agenttracker_close_now:
-    DetailPrint "Closing AgentTracker..."
+    DetailPrint "Closing TrailFox..."
     nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM agenttracker.exe'
     Pop $0
     ; Give Windows a moment to let go of the files.
@@ -38,6 +38,28 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; ---- Tidy up an older install made under the previous name, AgentTracker ----
+  ; The app was renamed to TrailFox, so Windows sees it as a new program in a new folder. Quietly
+  ; run the old uninstaller so there's one copy, one Start menu entry and one Apps-list entry.
+  ; It only removes the old program files and shortcuts: in silent mode the "delete app data"
+  ; box is never ticked, so saved checks, recordings and settings (kept in
+  ; %LOCALAPPDATA%\com.agenttracker.app, which TrailFox still uses) are left alone.
+  ReadRegStr $R8 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentTracker" "InstallLocation"
+  StrCpy $R7 $R8 1
+  ${If} $R7 == '"'
+    StrCpy $R8 $R8 -1 1 ; Tauri stores this path wrapped in quotes
+  ${EndIf}
+  ${If} $R8 == ""
+    StrCpy $R8 "$LOCALAPPDATA\AgentTracker"
+  ${EndIf}
+  ${If} $R8 != "$INSTDIR"
+  ${AndIf} ${FileExists} "$R8\uninstall.exe"
+    DetailPrint "Removing the older AgentTracker install (your data is kept)..."
+    ExecWait '"$R8\uninstall.exe" /S _?=$R8' $R9
+    Delete "$R8\uninstall.exe"
+    RMDir "$R8"
+  ${EndIf}
+
   ; Go straight to the finish page instead of stopping on the progress list with a bare
   ; "Completed" line (Tauri's template keeps that page open by default).
   SetAutoClose true

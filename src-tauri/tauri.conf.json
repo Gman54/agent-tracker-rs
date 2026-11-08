@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AgentTracker",
+  "productName": "TrailFox",
   "version": "0.1.0",
   "identifier": "com.agenttracker.app",
   "build": {
@@ -17,26 +17,28 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
-    "publisher": "AgentTracker",
+    "publisher": "TrailFox",
     "shortDescription": "Checks whether AI agents really did what they said",
-    "longDescription": "AgentTracker records what local AI coding agents report and verifies the result against real file snapshots. Runs entirely on this PC.",
+    "longDescription": "TrailFox records what local AI coding agents report and verifies the result against real file snapshots. Runs entirely on this PC.",
     "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico",
+      "icons/icon.icns",
       "icons/icon.png"
     ],
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "AgentTracker",
+        "startMenuFolder": "TrailFox",
         "displayLanguageSelector": false,
         "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
+        "upgradeCode": "c7fe132c-e0d4-5d3d-9d4d-d75e687f0e71",
         "language": {
           "en-US": { "localePath": "./windows/en-US.wxl" }
         }

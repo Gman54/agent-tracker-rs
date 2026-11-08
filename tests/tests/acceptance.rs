@@ -1,4 +1,4 @@
-//! AgentTracker acceptance tests (spec §15, automatable items).
+//! TrailFox acceptance tests (spec §15, automatable items).
 //!
 //! Every test here is a **fake-agent contract test**: agent activity is simulated with
 //! hand-built hook envelopes (documented Claude Code hook JSON) and ordinary file operations.
@@ -876,7 +876,7 @@ fn test_copilot_install_idempotent() {
     assert!(r2.added.is_empty() && r3.added.is_empty() && r3.updated.is_empty());
     assert!(!c.preview(&bin).unwrap().changes);
     assert!(c.detect().hooks_installed);
-    assert!(c.connection_test().steps.iter().any(|s| s.name == "AgentTracker hooks" && s.ok));
+    assert!(c.connection_test().steps.iter().any(|s| s.name == "TrailFox hooks" && s.ok));
 }
 
 // fake-agent contract test
@@ -890,7 +890,7 @@ fn test_copilot_uninstall_preserves_unrelated() {
     std::fs::write(&bin, b"fake").unwrap();
     let c = CopilotConnector::with_paths(hooks.clone(), dir.path().join("state"));
 
-    // Case 1: untouched since install → AgentTracker's file goes away entirely (or is left with none of its hooks).
+    // Case 1: untouched since install → TrailFox's file goes away entirely (or is left with none of its hooks).
     c.install(&bin).unwrap();
     c.uninstall().unwrap();
     if hooks.exists() {

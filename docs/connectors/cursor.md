@@ -5,14 +5,14 @@
 | | |
 |---|---|
 | Docs checked | <https://cursor.com/docs/agent/hooks> (2026-11-03; the page carries no version number) |
-| Version | Not published. AgentTracker shows `cursor --version` if it answers, and payloads include `cursor_version` |
+| Version | Not published. TrailFox shows `cursor --version` if it answers, and payloads include `cursor_version` |
 | Config file | `%USERPROFILE%\.cursor\hooks.json` (`{"version": 1, "hooks": {...}}`) |
 | Events registered | `sessionStart`, `postToolUse`, `postToolUseFailure`, `afterShellExecution`, `afterMCPExecution`, `afterFileEdit`, `stop`, `sessionEnd` |
 | Hook command | `"<path>\agenttracker-hook.exe" --connector cursor --event <event> --at-owner agenttracker` |
 
 ## How install works
 It works the same way as Claude Code: preview the diff, then connect (with a one-time backup, and safe to repeat). Disconnect
-restores your file or removes only AgentTracker's marked entries.
+restores your file or removes only TrailFox's marked entries.
 
 ## What is captured
 - Session start/end, finished tool calls, shell commands, MCP calls, file edits, and the agent
@@ -22,7 +22,7 @@ restores your file or removes only AgentTracker's marked entries.
 
 ## What isn't captured
 - **Your prompt** (`beforeSubmitPrompt`) and **tool start** (`preToolUse`). Those hooks can block
-  Cursor, and AgentTracker never registers blocking hooks.
+  Cursor, and TrailFox never registers blocking hooks.
 - The transcript and model reasoning.
 
 ## Limitations

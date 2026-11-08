@@ -391,7 +391,7 @@ pub fn export_json(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         "format": "agenttracker-report/1",
         "generated_at": crate::now_ms(),
         "app_version": crate::VERSION,
-        "note": "AgentTracker observes and reports. It does not block agents, and a passing result only means the configured checks passed.",
+        "note": "TrailFox observes and reports. It does not block agents, and a passing result only means the configured checks passed.",
         "task": task,
         "run": run,
         "agent_events": events,
@@ -473,19 +473,19 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         .collect();
     let folders: String = task.folders.iter().map(|f| format!("<li>{} <span class=\"m\">({})</span></li>", esc(&f.folder_path), f.role.as_str())).collect();
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>AgentTracker report — {title}</title>
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>TrailFox report — {title}</title>
 <style>body{{font:15px/1.6 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;background:#f7f5f0;color:#2c2825;max-width:860px;margin:32px auto;padding:0 20px}}
 .card{{background:#fff;border:1px solid #e8e2d9;border-radius:20px;padding:20px 24px;margin:16px 0}}
 .verdict{{border-radius:20px;padding:22px 26px;font-size:22px;font-weight:600}}.passed{{background:#e7f6ee;color:#1a6a48}}.failed{{background:#fbeaea;color:#a83030}}.unsure,.unable_to_verify{{background:#fbf1dc;color:#8a5d08}}.neutral,.not_applicable,.insufficient_coverage{{background:#eef0f3;color:#3f4650}}
 .glance{{border-collapse:collapse;width:100%;margin:10px 0}}.glance caption{{text-align:left;font-weight:600;padding-bottom:4px}}.glance th,.glance td{{text-align:left;vertical-align:top;padding:6px 10px;border-top:1px solid #eee7dc}}.glance th{{width:34%;font-weight:600}}.note{{margin:4px 0}}
 .check{{border-radius:12px;padding:12px 16px;margin:10px 0}}.c{{border-radius:12px;padding:8px 14px;margin:8px 0;background:#faf8f4}}.c.you{{background:#eef3fb}}.c.bad{{background:#fbeaea}}.t{{white-space:pre-wrap;word-break:break-word}}.svh{{border-width:2px}}.svh.passed{{border-color:#bfe9d4}}.svh.failed{{border-color:#f5d0d0}}.svh.unsure{{border-color:#f0dcae}}.svh.neutral{{border-color:#d9dde3}}.svh p{{margin:6px 0}}summary{{cursor:pointer}}.m,.ev,.lim{{color:#7a736b;font-size:13px}}h2{{font-size:17px}}</style></head><body>
-<h1>AgentTracker report</h1><div class="verdict {cls}">{icon} {head}</div>
+<h1>TrailFox report</h1><div class="verdict {cls}">{icon} {head}</div>
 {svh}
 <div class="card"><h2>What you asked</h2><p><b>{title}</b></p><p>{instr}</p><ul>{folders}</ul><p class="m">Task definition version {ver} &middot; checked {when}</p></div>
 <div class="card"><h2>What the agent said</h2><ul>{ev}</ul></div>
 <div class="card"><h2>What we saw</h2>{req}{opt}</div>
 {conv}
-<p class="m">AgentTracker observes and reports; it doesn't block agents or undo changes. A pass means the configured checks passed &mdash; not that the work is correct in every way.</p>
+<p class="m">TrailFox observes and reports; it doesn't block agents or undo changes. A pass means the configured checks passed &mdash; not that the work is correct in every way.</p>
 </body></html>"#,
         title = esc(&display_title(task)),
         instr = esc(&task.instruction),
@@ -541,7 +541,7 @@ pub fn propose_from_incident(task: &TaskDefinition, result: &CheckResult) -> Inc
         "required_outputs_exist" => {
             let missing: Vec<String> = items.iter().filter_map(|s| s.strip_suffix(" is missing")).map(str::to_string).collect();
             if missing.is_empty() {
-                return not_mappable("This incident can't be turned into an automated check: AgentTracker couldn't tell which files were missing.");
+                return not_mappable("This incident can't be turned into an automated check: TrailFox couldn't tell which files were missing.");
             }
             ("These outputs must exist".to_string(), json!({"paths": missing, "min_size_bytes": 1}), "These files were missing. This rule fails if any of them is missing or empty next time.".to_string())
         }

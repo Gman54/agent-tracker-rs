@@ -237,7 +237,7 @@ async fn handle(State(r): State<Arc<Relay>>, req: Request) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
     let host_name = if host.starts_with('[') { host.trim_start_matches('[').split(']').next().unwrap_or("").to_string() } else { host.split(':').next().unwrap_or("").to_string() };
     if !is_loopback(&host_name) {
-        return err_json(403, "The AgentTracker chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
+        return err_json(403, "The TrailFox chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
     }
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
@@ -295,7 +295,7 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
         Ok(x) => x,
         Err(ureq::Error::Status(_, x)) => x,
         Err(ureq::Error::Transport(t)) => {
-            let msg = format!("AgentTracker could not reach your model server at {}. Check that LM Studio's server (or Ollama) is running. ({t})", r.upstream);
+            let msg = format!("TrailFox could not reach your model server at {}. Check that LM Studio's server (or Ollama) is running. ({t})", r.upstream);
             let _ = head_tx.send(Err(msg.clone()));
             if let Some(api) = job.api {
                 let call = Call { api, path: &job.path, client: job.client.clone(), request: &job.body, response: &[], content_type: None, status: None, error: Some(msg), started };

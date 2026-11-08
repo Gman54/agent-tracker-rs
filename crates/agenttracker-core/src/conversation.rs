@@ -108,7 +108,7 @@ pub struct Entry {
     pub tool: Option<String>,
     pub is_error: bool,
     /// Claude Code's id for the tool call (on actions and their results). Hooks send the same id,
-    /// so an action here can be matched to the start/finish records AgentTracker captured.
+    /// so an action here can be matched to the start/finish records TrailFox captured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
     /// Actions only: your latest request before this action (shortened).

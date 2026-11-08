@@ -90,7 +90,7 @@ impl Proj {
         self.fx.deliver(claude_envelope(if failed { "PostToolUseFailure" } else { "PostToolUse" }, self.next_ts(), post));
     }
 
-    /// Any later agent activity in the repo (shows AgentTracker was listening).
+    /// Any later agent activity in the repo (shows TrailFox was listening).
     fn agent_reads(&self, id: &str) {
         let p = json!({"session_id": "s1", "cwd": self.cwd(), "tool_name": "Read", "tool_use_id": id, "tool_input": {"file_path": self.path("main.rs")}, "tool_response": {}});
         self.fx.deliver(claude_envelope("PostToolUse", self.next_ts(), p));

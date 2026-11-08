@@ -1,6 +1,6 @@
 [package]
 name = "agenttracker-runtime"
-description = "AgentTracker instrumented decision runtime: structured decision proposals, provenance, controlled tools"
+description = "TrailFox instrumented decision runtime: structured decision proposals, provenance, controlled tools"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

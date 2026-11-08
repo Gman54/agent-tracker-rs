@@ -1,6 +1,15 @@
-# AgentTracker
+# TrailFox
 
-**Did your AI agent really do what it said it did?** AgentTracker records what local AI coding
+![TrailFox](static/trailfox-logo.png)
+
+*See what your AI agent does. Check that the job is done.*
+
+> TrailFox used to be called AgentTracker. Updating keeps your saved tasks, recordings and
+> settings (they stay in `%LOCALAPPDATA%\com.agenttracker.app`), the new installer quietly
+> removes the old AgentTracker program entry, and connected agents are re-pointed at the new
+> install the first time TrailFox starts.
+
+**Did your AI agent really do what it said it did?** TrailFox records what local AI coding
 agents (Claude Code, Cursor, GitHub Copilot in VS Code) report while they work, takes a fingerprint snapshot of your folders
 before and after, and runs simple checks to tell you — in plain language — whether the job was
 actually done.
@@ -21,7 +30,7 @@ actually done.
 
 ## What it doesn't do
 - It never blocks, pauses or undoes anything an externally connected agent does. It only watches and
-  checks. (Models running *inside* the AgentTracker decision runtime can only act through its four
+  checks. (Models running *inside* the TrailFox decision runtime can only act through its four
   confined tools, and those are enforced.)
 - It can't restore files. Snapshots are fingerprints, not copies.
 - It doesn't send anything off your computer.
@@ -70,14 +79,14 @@ demo/                       harmless demo task — see demo/README.md
 ## Building the Windows installer (GitHub Actions)
 The workflow `.github/workflows/build.yml` runs on `windows-latest`, targets
 `x86_64-pc-windows-msvc`, runs the tests, builds the release binaries, bundles the hook next to the
-app, and produces `AgentTracker_<version>_x64-setup.exe` (NSIS) and
-`AgentTracker_<version>_x64_en-US.msi`, uploaded as the **AgentTracker-windows-x64** artifact.
+app, and produces `TrailFox_<version>_x64-setup.exe` (NSIS) and
+`TrailFox_<version>_x64_en-US.msi`, uploaded as the **TrailFox-windows-x64** artifact.
 
 Configure these under **Settings → Secrets and variables → Actions** of the GitHub repo:
 
 | Name | Kind | Required | Purpose |
 |---|---|---|---|
-| `AGENTTRACKER_API_KEY` | Secret | Yes (for release builds) | AgentTracker license API key, baked in at build time. If unset the build works with a placeholder (shown clearly in the app). |
+| `AGENTTRACKER_API_KEY` | Secret | Yes (for release builds) | TrailFox license API key, baked in at build time. If unset the build works with a placeholder (shown clearly in the app). |
 | `AGENTTRACKER_LICENSE_URL` | Secret *or* Variable | Optional | License server URL baked into the build (default `https://license.invalid/agenttracker`; server wiring is a stub). |
 | `TAURI_PRIVATE_KEY` | Secret | Optional | Tauri signing key (passed as both `TAURI_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY`). Only needed once the updater is enabled. |
 | `TAURI_KEY_PASSWORD` | Secret | Optional | Password for `TAURI_PRIVATE_KEY`, if it has one. |
@@ -121,13 +130,13 @@ supported yet. The only live model tried (`qwen2.5:1.5b`) did not produce a vali
 Walkthrough:
 1. Open **Connections**. Each agent card says whether it's found on this PC, whether it's connected,
    and exactly which events it can report.
-2. Click **Show what will change**. You'll see the exact lines AgentTracker would add to the
+2. Click **Show what will change**. You'll see the exact lines TrailFox would add to the
    agent's settings file. Nothing has been written yet.
 3. Click **Yes, connect it** (or **Connect…**). A one-time backup of your file is kept. Doing it
    twice changes nothing.
 4. Restart the agent, then click **Test** on the card.
 5. To undo, click **Disconnect**. Your file is restored, or, if you've edited it since, only
-   AgentTracker's own entries are removed.
+   TrailFox's own entries are removed.
 
 Per-connector details (docs checked, events, what is and isn't captured): see
 [docs/connectors/claude_code.md](docs/connectors/claude_code.md),
@@ -141,9 +150,9 @@ Edits `%USERPROFILE%\.claude\settings.json`, adding to `hooks` for `SessionStart
 (tool events get `"matcher": "*"`) such as:
 ```json
 { "matcher": "*", "hooks": [ { "type": "command", "timeout": 5,
-  "command": "\"C:/Program Files/AgentTracker/agenttracker-hook.exe\" --connector claude_code --event PreToolUse --at-owner agenttracker" } ] }
+  "command": "\"C:/Program Files/TrailFox/agenttracker-hook.exe\" --connector claude_code --event PreToolUse --at-owner agenttracker" } ] }
 ```
-The `--at-owner agenttracker` marker is how AgentTracker recognises (and only ever removes) its own entries.
+The `--at-owner agenttracker` marker is how TrailFox recognises (and only ever removes) its own entries.
 
 ### Cursor (experimental — not live-tested)
 Edits `%USERPROFILE%\.cursor\hooks.json` (`{"version": 1, "hooks": {...}}`) with the same kind of

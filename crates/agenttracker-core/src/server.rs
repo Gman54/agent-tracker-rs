@@ -104,6 +104,38 @@ impl AppState {
         CopilotConnector { state_dir: self.agenttracker_home.join("connectors"), ..CopilotConnector::for_user() }
     }
 
+    /// One-time tidy-ups after updating from an AgentTracker install to TrailFox. The new installer
+    /// lives in a new folder (%LOCALAPPDATA%\TrailFox) and removes the old one, so:
+    /// - agent hooks that still point at the old, now-missing hook program are re-pointed at the
+    ///   one next to this app (only TrailFox's own entries are touched, as with "Connect");
+    /// - if "Start with Windows" is on, its Run entry is rewritten for this app's location.
+    /// Safe to call on every start: it does nothing when everything is already in place.
+    pub fn after_update_fixups(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(current) = self.hook_binary.clone().filter(|p| p.exists()) {
+            let stale = |p: Option<PathBuf>| p.is_some_and(|p| !p.exists());
+            let fixes: [(&str, bool, Box<dyn Fn() -> crate::Result<crate::connectors::InstallReport>>); 3] = [
+                ("Claude Code", stale(self.claude().installed_hook_path()), Box::new(|| self.claude().install(&current))),
+                ("Cursor", stale(self.cursor().installed_hook_path()), Box::new(|| self.cursor().install(&current))),
+                ("Copilot", stale(self.copilot().installed_hook_path()), Box::new(|| self.copilot().install(&current))),
+            ];
+            for (name, needs_fix, fix) in fixes {
+                if needs_fix {
+                    match fix() {
+                        Ok(_) => notes.push(format!("{name}: hooks now point at {}", current.display())),
+                        Err(e) => notes.push(format!("{name}: couldn't update hooks ({e})")),
+                    }
+                }
+            }
+        }
+        if self.setting("start_with_windows") == "1" {
+            if let Err(e) = apply_autostart(true) {
+                notes.push(format!("Start with Windows: {e}"));
+            }
+        }
+        notes
+    }
+
     pub fn setting(&self, key: &str) -> String {
         self.engine.db.get_setting(key).ok().flatten().unwrap_or_else(|| SETTING_DEFAULTS.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string()).unwrap_or_default())
     }
@@ -157,7 +189,7 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
     }
     if path.starts_with("/api/ui/") {
         if !st.has_session(req.headers()) {
-            return err(401, "Open AgentTracker from its window or tray icon");
+            return err(401, "Open TrailFox from its window or tray icon");
         }
         if req.method() != Method::GET && req.method() != Method::HEAD && hdr(req.headers(), CSRF_HEADER) != Some(CSRF_VALUE) {
             return err(403, "Missing CSRF header");
@@ -250,6 +282,8 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
         "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
+        "trailfox-logo.png" => (include_bytes!("../../../static/trailfox-logo.png"), "image/png"),
+        "trailfox-mark.png" => (include_bytes!("../../../static/trailfox-mark.png"), "image/png"),
         _ => return None,
     })
 }
@@ -276,7 +310,7 @@ async fn launch(State(st): State<Arc<AppState>>, Query(q): Query<HashMap<String,
         valid
     };
     if !valid {
-        return (StatusCode::FORBIDDEN, "This link has expired. Open AgentTracker from its window or tray icon.").into_response();
+        return (StatusCode::FORBIDDEN, "This link has expired. Open TrailFox from its window or tray icon.").into_response();
     }
     let sid = security::token_urlsafe(32);
     st.ui_sessions.lock().unwrap_or_else(|p| p.into_inner()).insert(sid.clone());
@@ -468,7 +502,7 @@ async fn connector_action(State(st): State<Arc<AppState>>, UrlPath((name, action
     let s = st.clone();
     let r = blocking(move || -> crate::Result<Value> {
         let hook = s.hook_binary.clone();
-        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The AgentTracker hook program wasn't found next to the app. Reinstall AgentTracker.".into()));
+        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The TrailFox hook program wasn't found next to the app. Reinstall TrailFox.".into()));
         let mut v = match (name.as_str(), action.as_str()) {
             ("claude_code", "install") => serde_json::to_value(s.claude().install(&need_hook()?)?)?,
             ("claude_code", "uninstall") => serde_json::to_value(s.claude().uninstall()?)?,
@@ -653,11 +687,14 @@ fn apply_autostart(enabled: bool) -> std::result::Result<(), String> {
     {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+        // Before the rename the entry was called "AgentTracker" and pointed at the old install
+        // folder. Always clear that one so Windows never starts a stale copy.
+        let _ = crate::connectors::hidden_command("reg").args(["delete", key, "/v", "AgentTracker", "/f"]).output();
         let mut cmd = crate::connectors::hidden_command("reg");
         if enabled {
-            cmd.args(["add", key, "/v", "AgentTracker", "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
+            cmd.args(["add", key, "/v", APP_NAME, "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
         } else {
-            cmd.args(["delete", key, "/v", "AgentTracker", "/f"]);
+            cmd.args(["delete", key, "/v", APP_NAME, "/f"]);
         }
         let out = cmd.output().map_err(|e| e.to_string())?;
         if !enabled || out.status.success() {
@@ -798,7 +835,7 @@ async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath
     };
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"agenttracker-report-{stamp}.{ext}\""))
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"trailfox-report-{stamp}.{ext}\""))
         .body(Body::from(body))
         .unwrap()
 }

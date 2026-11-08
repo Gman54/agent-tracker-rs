@@ -1,4 +1,4 @@
-// AgentTracker UI — plain JS, no build step, no external assets.
+// TrailFox UI — plain JS, no build step, no external assets.
 // Every call goes to the loopback server that served this page (session cookie + CSRF header).
 'use strict';
 
@@ -62,7 +62,7 @@ async function api(method, path, body) {
   const res = await fetch(path, opts);
   let data = null;
   try { data = await res.json(); } catch (_) { /* empty body */ }
-  if (res.status === 401) throw new Error('This window lost its sign-in. Please reopen AgentTracker from the tray.');
+  if (res.status === 401) throw new Error('This window lost its sign-in. Please reopen TrailFox from the tray.');
   if (!res.ok) throw new Error((data && data.error) || `Something went wrong (error ${res.status}).`);
   return data;
 }
@@ -453,14 +453,14 @@ function renderWizard() {
   let body = '';
   if (w.step === 1) {
     body = `${ART.wave}
-      <h2 id="wizard-title" class="center">Welcome to AgentTracker</h2>
-      <p>AgentTracker records what an AI agent does on your computer and checks the outcome independently:</p>
+      <h2 id="wizard-title" class="center">Welcome to TrailFox</h2>
+      <p>TrailFox records what an AI agent does on your computer and checks the outcome independently:</p>
       <ul>
         <li><b>Reported activity</b>: the agent's actions and its completion claims.</li>
         <li><b>Observed changes</b>: what actually changed in your folders, measured separately.</li>
         <li><b>Your checks</b>: rules such as "these files must exist" or "originals must not change".</li>
       </ul>
-      <div class="note note-plain">AgentTracker does not see a model's internal reasoning. For connected agents it observes and reports; it does not block or undo actions. The Agent Runtime additionally enforces tool policy for sessions it runs.</div>
+      <div class="note note-plain">TrailFox does not see a model's internal reasoning. For connected agents it observes and reports; it does not block or undo actions. The Agent Runtime additionally enforces tool policy for sessions it runs.</div>
       <div class="wizard-actions"><button class="btn btn-primary btn-big" data-act="wiz-next">Continue</button></div>`;
   } else if (w.step === 2) {
     body = `<h2 id="wizard-title">How do you want to start?</h2>
@@ -701,7 +701,7 @@ async function render_connections() {
   screenEl.innerHTML = `
     <div class="page-head">
       <h1>Connections</h1>
-      <p class="lead">Connecting an agent adds a small, clearly labelled entry to its settings file so AgentTracker hears what it does. You see the exact change first. “Configured” means the entry is in place; the last event time shows whether anything has actually arrived.</p>
+      <p class="lead">Connecting an agent adds a small, clearly labelled entry to its settings file so TrailFox hears what it does. You see the exact change first. “Configured” means the entry is in place; the last event time shows whether anything has actually arrived.</p>
     </div>
     <div class="grid-2">${conns.map(connectorCard).join('')}</div>
     <div id="relay-card" class="mt"></div>
@@ -742,7 +742,7 @@ actions['conn-install'] = async d => {
   await render_connections();
 };
 actions['conn-uninstall'] = async d => {
-  if (!confirm(`Disconnect ${connectorName(d.name)}? Only AgentTracker's own entries are removed from its settings file.`)) return;
+  if (!confirm(`Disconnect ${connectorName(d.name)}? Only TrailFox's own entries are removed from its settings file.`)) return;
   const r = await api('POST', `/api/ui/connectors/${d.name}/uninstall`);
   showToast(r.removed ? `${connectorName(d.name)} disconnected.` : 'There was nothing of mine to remove.', 'success');
   await render_connections();
@@ -876,7 +876,7 @@ function createStepBody() {
         <label class="field"><span class="field-label">Protected files or folders <span class="muted">(one per line)</span></span>
           <textarea id="c-protected" placeholder="originals&#10;notes/important.docx">${esc(d.protectedText)}</textarea>
           <span class="field-hint">These files must not be changed. You will be alerted if they are. Paths can be inside your folder (like <code>originals</code>) or full paths.</span></label>
-        <div class="note note-plain">If left empty, AgentTracker checks that no existing file in the folder changes. New files are allowed.</div>`;
+        <div class="note note-plain">If left empty, TrailFox checks that no existing file in the folder changes. New files are allowed.</div>`;
     case 4: {
       const tpl = state.templates.length
         ? `<h3 class="mt-lg">Your saved checks</h3><div class="stack-sm">${state.templates.map(t => `<label class="check-option ${d.templates[t.id] ? 'checked' : ''}">
@@ -892,7 +892,7 @@ function createStepBody() {
           ${checkOption('folder_structure_matches', `<span class="input-row mt-xs"><input id="c-root" type="text" value="${esc(d.structRoot)}" aria-label="Folder to look at"><input id="c-patterns" type="text" value="${esc(d.structPatterns)}" aria-label="Name patterns"></span><span class="field-hint">Folder to look at, then file name patterns (comma separated, like <code>*.jpg, *.txt</code>).</span>`)}
         </div>
         ${tpl}
-        <div class="note mt">Only the checks you define are evaluated. AgentTracker cannot judge whether the work is semantically correct.</div>`;
+        <div class="note mt">Only the checks you define are evaluated. TrailFox cannot judge whether the work is semantically correct.</div>`;
     }
     default: {
       const t = buildTask();
@@ -1384,7 +1384,7 @@ actions['toggle-evidence'] = (d, btn) => {
 };
 
 actions.export = async d => {
-  const name = await downloadPost(`/api/ui/export/${d.fmt}/${d.id}`, `agenttracker-report.${d.fmt}`);
+  const name = await downloadPost(`/api/ui/export/${d.fmt}/${d.id}`, `trailfox-report.${d.fmt}`);
   showToast(`Saved ${name} to your downloads.`, 'success');
 };
 
@@ -1532,10 +1532,10 @@ async function render_settings() {
 
       <div class="card">
         <h3>What stays on this computer</h3>
-        <p class="small">Your tasks, agent messages, snapshots and reports are saved in the storage folder on this computer. AgentTracker doesn’t upload them anywhere, and its window talks to it only over this computer’s own local connection.</p>
+        <p class="small">Your tasks, agent messages, snapshots and reports are saved in the storage folder on this computer. TrailFox doesn’t upload them anywhere, and its window talks to it only over this computer’s own local connection.</p>
         <p class="small"><b>What can use the internet, only if you use it:</b></p>
         <ul class="small plain-list">
-          <li><b>Code changes:</b> “Check the remote now” runs <code>git fetch</code> to your project’s remote (for example GitHub). If you add a GitHub token, AgentTracker also asks GitHub about your commits and pull requests.</li>
+          <li><b>Code changes:</b> “Check the remote now” runs <code>git fetch</code> to your project’s remote (for example GitHub). If you add a GitHub token, TrailFox also asks GitHub about your commits and pull requests.</li>
           <li><b>Agent Runtime:</b> sends prompts and file excerpts to the model app you set up. That is normally on this computer (like LM Studio); another computer is used only if you allow it.</li>
           <li><b>Links</b> you open, such as a commit on GitHub, open in your web browser.</li>
         </ul>
@@ -1617,7 +1617,7 @@ async function render_settings() {
           <dt>Hook program</dt><dd>${s.hook_binary ? `<code>${esc(s.hook_binary)}</code>` : 'Not found'}</dd>
           <dt>Machine ID</dt><dd>${esc(s.machine_id_prefix)}…</dd>
         </dl>
-        <p class="small muted mt-xs">AgentTracker only watches and reports. It never blocks or undoes anything your agent does.</p>
+        <p class="small muted mt-xs">TrailFox only watches and reports. It never blocks or undoes anything your agent does.</p>
       </div>
     </div>`;
 }

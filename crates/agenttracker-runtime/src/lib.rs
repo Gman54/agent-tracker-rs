@@ -1,4 +1,4 @@
-//! AgentTracker instrumented decision runtime.
+//! TrailFox instrumented decision runtime.
 //!
 //! A model running through this runtime must submit a structured *decision proposal* before any
 //! tool runs. The runtime records the application-level context it sent, validates the proposal,

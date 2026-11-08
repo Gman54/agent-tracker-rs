@@ -152,7 +152,7 @@ impl Runtime {
         pc["settings"] = self.provider.settings();
         insert(&tx, "rt_sessions", json!({"id": session_id, "task_id": task_id, "parent_session_id": spec.parent_session_id, "idempotency_key": spec.idempotency_key,
             "working_dir": root_s, "provider_config": pc, "limits": self.cfg.limits, "status": "running", "status_reason": null, "steps_used": 0, "tool_calls_used": 0, "created_at": now, "updated_at": now}))?;
-        let sys = ContextItem::new(new_id(ids::INSTRUCTION), "instruction_1".into(), "instruction", "system", "application", "AgentTracker runtime system instruction", None, context::SYSTEM_INSTRUCTION.into());
+        let sys = ContextItem::new(new_id(ids::INSTRUCTION), "instruction_1".into(), "instruction", "system", "application", "TrailFox runtime system instruction", None, context::SYSTEM_INSTRUCTION.into());
         add_item(&tx, &session_id, sys)?;
         let user = ContextItem::new(new_id(ids::INSTRUCTION), "instruction_2".into(), "instruction", "user", "user", "Task request typed by the user", Some(task_id.clone()), spec.instruction.clone());
         add_item(&tx, &session_id, user)?;

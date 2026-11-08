@@ -1,4 +1,4 @@
-# AgentTracker: status
+# TrailFox: status
 
 Last updated: 2026-11-04 (Code changes / Git tracking). Every line below says exactly how far that feature has been checked.
 "Fake-agent tested" means an automated test sends hand-built hook payloads in the documented

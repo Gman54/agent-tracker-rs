@@ -1,4 +1,4 @@
-// AgentTracker "Code changes" screen: local Git tracking and optional GitHub links.
+// TrailFox "Code changes" screen: local Git tracking and optional GitHub links.
 // Loaded after app.js; reuses its helpers (api, esc, when, pill, status, emptyState, showToast, actions, changes, navigate, SCREENS, RENDER).
 // Routes: #code (projects), #code/<repoId> (commits), #code/<repoId>_<sha> (one commit).
 'use strict';
@@ -56,12 +56,12 @@ async function renderProjects() {
         ${repos.length ? `<button class="btn btn-secondary btn-small" data-act="git-fetch-all" data-count="${repos.length}">Check all projects</button>` : ''}</div>
       ${repos.length ? checkAllBox(repos) : ''}
       ${repos.length ? `<div class="task-list">${repos.map(projectRow).join('')}</div>`
-        : emptyState('box', 'No projects yet', 'Add the folder of a project that uses Git. AgentTracker will remember edits your agent makes there from now on.')}
+        : emptyState('box', 'No projects yet', 'Add the folder of a project that uses Git. TrailFox will remember edits your agent makes there from now on.')}
       <label class="field mt"><span class="field-label">Add a project folder</span>
         <div class="input-row"><input type="text" id="git-path" placeholder="For example C:\\Users\\Greg\\projects\\frontier-warp" aria-label="Project folder">
           <button class="btn btn-secondary" data-act="git-browse">Browse...</button>
           <button class="btn btn-primary" data-act="git-add">Add</button></div>
-        <span class="field-hint">Any folder inside the project works. AgentTracker finds the top of the project for you.</span></label>
+        <span class="field-hint">Any folder inside the project works. TrailFox finds the top of the project for you.</span></label>
     </div>
     <div class="card">
       <h3>GitHub links <span class="muted small">(optional)</span></h3>
@@ -326,12 +326,12 @@ async function renderCommit(repoId, sha) {
     ${ghLinks}
     <h2 class="mt">Agent edits in this commit</h2>
     ${r.edits.length ? r.edits.map(m => editCard(m, byPath[m.path])).join('')
-      : `<div class="card">${emptyState('ear', 'No recorded agent edits are in this commit', 'Either a person made these changes, or AgentTracker wasn\'t recording when the agent made them.')}</div>`}
+      : `<div class="card">${emptyState('ear', 'No recorded agent edits are in this commit', 'Either a person made these changes, or TrailFox wasn\'t recording when the agent made them.')}</div>`}
     ${r.not_in_commit.length ? `<h2 class="mt">Agent edits that aren't in this commit</h2>
       <p class="muted small">The agent made these since the previous commit, but they didn't go into this one.</p>
       ${r.not_in_commit.map(m => editCard(m, null)).join('')}` : ''}
     ${r.other_sources.length ? `<h2 class="mt">Work from someone else</h2>
-      <div class="card"><p class="small muted">These added lines don't come from any recorded agent edit. A person, another tool, or an agent AgentTracker wasn't watching made them.</p>
+      <div class="card"><p class="small muted">These added lines don't come from any recorded agent edit. A person, another tool, or an agent TrailFox wasn't watching made them.</p>
       ${r.other_sources.map(o => `<p class="small mt-xs"><b class="mono">${esc(o.path)}</b>: ${o.lines} line(s)</p>${diffBlock(o.sample.map(t => ({ kind: 'add', text: t })))}`).join('')}</div>` : ''}
     <h2 class="mt">Everything in this commit</h2>
     <div class="card">${(r.files || []).map(f => `

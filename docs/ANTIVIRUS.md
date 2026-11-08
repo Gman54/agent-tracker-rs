@@ -1,7 +1,7 @@
-# Antivirus and AgentTracker
+# Antivirus and TrailFox
 
 ## Why antivirus sometimes complains
-AgentTracker isn't code-signed yet. Antivirus programs (including Windows Defender and SmartScreen) are wary of programs that:
+TrailFox isn't code-signed yet. Antivirus programs (including Windows Defender and SmartScreen) are wary of programs that:
 - have no digital signature,
 - are new and haven't been downloaded by many people yet,
 - live in `AppData` and get started over and over by another program (that's exactly what the hook helper does each time an AI agent takes a step).
@@ -21,16 +21,16 @@ Both need a certificate you buy, plus a change to the build workflow. That hasn'
 
 ## What you can do today
 
-### 1. Tell Windows Defender to trust the AgentTracker folders
+### 1. Tell Windows Defender to trust the TrailFox folders
 Open **PowerShell as administrator** (right-click Start, then "Terminal (Admin)") and run:
 
 ```powershell
-Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\AgentTracker"
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\TrailFox"
 Add-MpPreference -ExclusionPath "$env:USERPROFILE\.agenttracker"
 ```
 
 - The first folder holds the app (the installer uses a per-user install) and the hook helper.
-- The second holds AgentTracker's data and settings.
+- The second holds TrailFox's data and settings.
 
 To check the exclusions:
 
@@ -41,7 +41,7 @@ To check the exclusions:
 To undo them later:
 
 ```powershell
-Remove-MpPreference -ExclusionPath "$env:LOCALAPPDATA\AgentTracker"
+Remove-MpPreference -ExclusionPath "$env:LOCALAPPDATA\TrailFox"
 Remove-MpPreference -ExclusionPath "$env:USERPROFILE\.agenttracker"
 ```
 

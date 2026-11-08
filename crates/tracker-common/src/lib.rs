@@ -1,4 +1,4 @@
-//! Shared building blocks used by AgentTracker.
+//! Shared building blocks used by TrailFox.
 pub mod canonical;
 pub mod hash_chain;
 pub mod license;
