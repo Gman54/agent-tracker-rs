@@ -21,6 +21,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Modification {
+    /// Ask the same question again with nothing changed: does the answer hold?
+    Keep,
     Remove,
     Replace { text: String },
 }
@@ -28,6 +30,7 @@ pub enum Modification {
 impl Modification {
     fn describe(&self, label: &str) -> String {
         match self {
+            Modification::Keep => "nothing changed".into(),
             Modification::Remove => format!("{label} removed from the request"),
             Modification::Replace { text } => format!("{label} replaced with {} characters of user-supplied text", text.chars().count()),
         }
@@ -104,8 +107,11 @@ pub fn run(db: &Db, provider: &dyn Provider, vault: Option<&ReplayVault>, spec: 
         Ok(inv_id.clone())
     };
 
-    let Some(target) = target else {
-        return not_replayable("the selected item was not included in the request that produced this decision, so removing it cannot change that request.".into(), limitations);
+    let keep = matches!(spec.modification, Modification::Keep);
+    let target = match target {
+        Some(t) if !keep => Some(t),
+        _ if keep => None,
+        _ => return not_replayable("the selected item was not included in the request that produced this decision, so removing it cannot change that request.".into(), limitations),
     };
     let info = provider.info();
     if req["model"].as_str() != Some(info.model.as_str()) {
@@ -142,14 +148,15 @@ pub fn run(db: &Db, provider: &dyn Provider, vault: Option<&ReplayVault>, spec: 
         limitations.push("MODIFIED REPLAY: the exact original payload is not available (redacted content and no replay capture), so the baseline differs from what the model originally received.".into());
     }
 
+    let target_id = target.as_ref().map(|t| t.id.clone()).unwrap_or_default();
     let modified_items: Vec<ContextItem> = included
         .iter()
         .filter_map(|i| {
-            if i.id != target.id {
+            if i.id != target_id {
                 return Some(i.clone());
             }
             match &spec.modification {
-                Modification::Remove => None,
+                Modification::Keep | Modification::Remove => None,
                 Modification::Replace { text } => {
                     let mut c = i.clone();
                     c.content = text.clone();
@@ -165,7 +172,7 @@ pub fn run(db: &Db, provider: &dyn Provider, vault: Option<&ReplayVault>, spec: 
 
     // Confounds: other included content derived from the selected item.
     let mut confounds = Vec::new();
-    {
+    if let Some(target) = &target {
         let conn = db.conn();
         for it in &included {
             if it.id == target.id {
@@ -212,7 +219,9 @@ pub fn run(db: &Db, provider: &dyn Provider, vault: Option<&ReplayVault>, spec: 
     }
 
     let mut counts = json!({});
-    for (arm, msgs, ctx) in [("baseline", &baseline, &base_ctx), ("modified", &modified, &mod_ctx)] {
+    let arms: Vec<(&str, &Vec<ChatMessage>, &ValidationCtx)> =
+        if keep { vec![("baseline", &baseline, &base_ctx)] } else { vec![("baseline", &baseline, &base_ctx), ("modified", &modified, &mod_ctx)] };
+    for (arm, msgs, ctx) in arms {
         let (mut matches, mut valid, mut errors) = (0u32, 0u32, 0u32);
         let mut by_outcome: BTreeMap<String, u32> = BTreeMap::new();
         for t in 0..trials {
@@ -248,11 +257,18 @@ pub fn run(db: &Db, provider: &dyn Provider, vault: Option<&ReplayVault>, spec: 
         counts[arm] = json!({"matches_original": matches, "trials": trials, "valid": valid, "provider_errors": errors, "by_outcome": by_outcome});
     }
     let desc = describe_action(&original_action);
-    let summary = format!(
+    let summary = if keep {
+        format!(
+            "Asked the same question {trials} times with nothing changed: it proposed {desc} in {}/{trials} trials. A high count means the choice is steady for this model and these settings; a low count means it varies from run to run.",
+            counts["baseline"]["matches_original"]
+        )
+    } else {
+        format!(
         "Baseline proposed {desc} in {}/{trials} trials. Modified context ({}) proposed it in {}/{trials} trials. This is evidence of behavioural sensitivity under the tested conditions, not proof of the original cause.{}",
-        counts["baseline"]["matches_original"], spec.modification.describe(&target.label), counts["modified"]["matches_original"],
+        counts["baseline"]["matches_original"], spec.modification.describe(target.as_ref().map(|t| t.label.as_str()).unwrap_or("item")), counts["modified"]["matches_original"],
         if confounded { " Confounded: derived information remained in the modified context." } else { "" }
-    );
+        )
+    };
     let conn = db.conn();
     conn.execute(
         "UPDATE rt_investigations SET status='completed', summary=?2, counts=?3, limitations=?4, finished_at=?5 WHERE id=?1",

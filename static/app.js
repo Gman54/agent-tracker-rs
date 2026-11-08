@@ -704,7 +704,9 @@ async function render_connections() {
       <p class="lead">Connecting an agent adds a small, clearly labelled entry to its settings file so AgentTracker hears what it does. You see the exact change first. “Configured” means the entry is in place; the last event time shows whether anything has actually arrived.</p>
     </div>
     <div class="grid-2">${conns.map(connectorCard).join('')}</div>
+    <div id="relay-card" class="mt"></div>
     <p class="small muted mt">None of these connections have been tested against a live agent yet. If something looks off, “Test connection” will tell you plainly what worked and what didn’t.</p>`;
+  if (window.renderRelayCard) await window.renderRelayCard($('#relay-card'));
   if (state.param) {
     const card = $(`#conn-${CSS.escape(state.param)}`);
     const det = card && card.querySelector('details');

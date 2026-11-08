@@ -56,6 +56,7 @@ RENDER.runtime = async function render_runtime() {
   if (p.startsWith('ses_')) return renderSession(p);
   if (p.startsWith('act_') || p.startsWith('dec_')) return renderWhy(p);
   if (p.startsWith('inv_')) return renderInvestigation(p);
+  if (p.startsWith('conv_')) return renderConversation(p);
   return renderRuntimeHome();
 };
 
@@ -63,7 +64,7 @@ RENDER.runtime = async function render_runtime() {
 // Home: tabs
 // =====================================================================================================
 async function renderRuntimeHome() {
-  const tabs = [['sessions', 'Sessions'], ['start', 'Start a task'], ['demos', 'Demonstrations'], ['provider', 'Model provider']];
+  const tabs = [['sessions', 'Sessions'], ['start', 'Start a task'], ['demos', 'Demonstrations'], ['chats', 'Chat recordings'], ['provider', 'Model provider']];
   screenEl.innerHTML = `
     <div class="page-head">
       <h1>Agent Runtime</h1>
@@ -75,6 +76,7 @@ async function renderRuntimeHome() {
   if (RT.tab === 'sessions') return renderSessions(body);
   if (RT.tab === 'start') return renderStart(body);
   if (RT.tab === 'demos') return renderDemos(body);
+  if (RT.tab === 'chats') return renderChats(body);
   return renderProvider(body);
 }
 actions.rtTab = d => { RT.tab = d.tab; navigate('runtime'); };
@@ -468,17 +470,19 @@ async function renderWhy(id) {
 
     ${b.later_decisions.length ? `<h2 class="section-title">Later decisions and corrections</h2><div class="card"><ul class="timeline">${b.later_decisions.map(x => `<li>${x.revises_decision_id === d.id ? pill('amber', 'Revises this decision') : pill('', `Step ${x.step}`)} <span class="mono">${esc(short(x.id))}</span> ${esc(x.kind)}<div class="small muted">${esc((x.proposal && x.proposal.stated_rationale) || '')}</div></li>`).join('')}</ul></div>` : ''}
 
-    <h2 class="section-title">Test this influence</h2>
+    <h2 class="section-title">Would it change its mind?</h2>
     <div class="card">
-      <p class="small muted">Replays this decision's request several times with the original context (baseline) and with one item removed or replaced (modified), then compares the proposed actions. No tools are executed. Results show behavioural sensitivity under these conditions only, not proof of cause. Seeds are passed to the provider but do not guarantee reproducible output.</p>
+      <p class="small">Ask the model the same question again, a few times, and see whether it picks the same action. You can ask with nothing changed (does the answer hold?), or with one item taken out or rewritten (did that item matter?). Nothing is run on your files.</p>
+      <p class="small muted">This shows how this model behaves under these settings. It is good evidence, not proof of why it chose what it did. Seeds are passed to the model server but do not guarantee the same output.</p>
       <div class="form-grid">
-        <div class="field"><label class="field-label" for="inv-item">Context item</label><select id="inv-item">${items.filter(i => i.included).map(i => `<option value="${esc(i.id)}">${esc(i.label)}: ${esc(i.source)}</option>`).join('')}</select></div>
-        <div class="field"><label class="field-label" for="inv-mod">Modification</label><select id="inv-mod"><option value="remove">Remove the item</option><option value="replace">Replace its text</option></select></div>
-        <div class="field"><label class="field-label" for="inv-n">Trials per arm</label><input id="inv-n" type="number" value="5" min="1" max="25"></div>
+        <div class="field"><label class="field-label" for="inv-item">Item (for take out / rewrite)</label><select id="inv-item">${items.filter(i => i.included).map(i => `<option value="${esc(i.id)}">${esc(i.label)}: ${esc(i.source)}</option>`).join('')}</select></div>
+        <div class="field"><label class="field-label" for="inv-mod">What to try</label><select id="inv-mod"><option value="keep">Ask again, nothing changed</option><option value="remove">Take this item out</option><option value="replace">Rewrite this item's text</option></select></div>
+        <div class="field"><label class="field-label" for="inv-n">How many times to ask</label><input id="inv-n" type="number" value="5" min="1" max="25"></div>
       </div>
-      <div class="field"><label class="field-label" for="inv-text">Replacement text (for Replace)</label><textarea id="inv-text"></textarea></div>
-      <div class="row row-end"><button class="btn btn-primary" data-act="rtInvestigate" data-id="${esc(d.id)}" ${d.kind === 'action' ? '' : 'disabled'}>Run investigation</button></div>
-      ${b.investigations.length ? `<h4 class="mt">Previous investigations</h4>${b.investigations.map(v => `<div class="row mt-xs">${pill(v.status === 'completed' ? 'blue' : 'amber', v.status)} <button class="btn-link" data-act="go" data-screen="runtime" data-param="${esc(v.id)}">${esc(short(v.id))}</button><span class="small muted">${esc(v.summary || '')}</span></div>`).join('')}` : ''}
+      <div class="field"><label class="field-label" for="inv-text">New text (for rewrite)</label><textarea id="inv-text"></textarea></div>
+      <div class="row row-end"><button class="btn btn-primary" data-act="rtInvestigate" data-id="${esc(d.id)}" ${d.kind === 'action' ? '' : 'disabled'}>Ask again</button></div>
+      ${d.kind === 'action' ? '' : '<p class="small muted">Only steps that proposed an action can be checked this way.</p>'}
+      ${b.investigations.length ? `<h4 class="mt">Earlier checks</h4>${b.investigations.map(v => `<div class="row mt-xs">${pill(v.status === 'completed' ? 'blue' : 'amber', v.status)} <button class="btn-link" data-act="go" data-screen="runtime" data-param="${esc(v.id)}">${esc(short(v.id))}</button><span class="small muted">${esc(v.summary || '')}</span></div>`).join('')}` : ''}
     </div>
 
     <details class="history"><summary>Recorded model request (redacted audit copy)</summary>
@@ -498,8 +502,9 @@ actions.rtAnalyze = async d => {
 };
 actions.rtInvestigate = async d => {
   const mod = $('#inv-mod').value;
-  const modification = mod === 'replace' ? { kind: 'replace', text: $('#inv-text').value } : { kind: 'remove' };
-  showToast('Running replay trials. No tools will be executed.', 'info');
+  const modification = mod === 'replace' ? { kind: 'replace', text: $('#inv-text').value } : { kind: mod };
+  if (mod === 'replace' && !modification.text.trim()) { showToast('Type the new text first.', 'error'); return; }
+  showToast('Asking the model again. Nothing will be run on your files. This can take a minute.', 'info');
   const r = await api('POST', '/api/ui/runtime/investigations', {
     decision_id: d.id, context_item_id: $('#inv-item').value, modification, trials_per_arm: Number($('#inv-n').value) || 5,
   });
@@ -522,11 +527,11 @@ async function renderInvestigation(id) {
   screenEl.innerHTML = `
     <div class="page-head">
       <button class="btn-link" data-act="go" data-screen="runtime" data-param="${esc(v.decision_id)}">Back to decision</button>
-      <h1>Influence investigation</h1>
+      <h1>${v.modification && v.modification.kind === 'keep' ? 'Does the answer hold?' : 'Would it change its mind?'}</h1>
       <div class="row">${pill(v.status === 'completed' ? 'blue' : 'amber', v.status.replace(/_/g, ' '))} ${pill('', `Replay fidelity: ${v.replay_fidelity.replace(/_/g, ' ')}`)} ${v.confounded ? pill('red', 'Confounded') : ''} <span class="mono muted">${esc(v.id)}</span></div>
     </div>
     <div class="notice">${esc(r.label)}</div>
-    ${v.summary ? `<div class="card mt"><h3>Result</h3><p>${esc(v.summary)}</p>${bar('Baseline', 'baseline', '')}${bar('Modified context', 'modified', 'mod')}
+    ${v.summary ? `<div class="card mt"><h3>Result</h3>${plainVerdict(v)}<p class="small">${esc(v.summary)}</p>${bar(v.modification && v.modification.kind === 'keep' ? 'Same question, nothing changed' : 'As it was', 'baseline', '')}${bar('With the change', 'modified', 'mod')}
       <p class="small muted mt">Counts show how many trials proposed the same normalized action as the original decision. Comparison method: ${esc(v.comparison_method)}.</p></div>` : ''}
     ${v.confounded ? `<div class="gaps mt"><h3>Confound detected</h3><p class="small">${esc(pretty(v.confound_detail))}</p></div>` : ''}
     <div class="gaps mt"><h3>Limitations</h3><ul>${(v.limitations || []).map(l => `<li>${esc(l)}</li>`).join('')}</ul></div>
@@ -535,3 +540,179 @@ async function renderInvestigation(id) {
       ${r.trials.map(t => `<tr><td>${esc(t.arm)}</td><td>${esc(t.trial_no)}</td><td>${esc(t.seed ?? '—')}</td><td>${t.valid ? 'yes' : 'no'}</td><td class="mono">${esc(pretty(t.normalized_action))}${t.error ? `<div class="small muted">${esc(t.error)}</div>` : ''}</td></tr>`).join('')}
     </tbody></table></div>`;
 }
+
+// A one-line answer in plain words, worked out from the counts. The detailed summary stays below it.
+function plainVerdict(v) {
+  const c = v.counts || {};
+  const b = c.baseline, m = c.modified;
+  if (!b || !b.trials) return '';
+  const rate = x => x.matches_original / x.trials;
+  let text;
+  if (!m) {
+    const r = rate(b);
+    text = r >= 0.8 ? 'Yes, the answer holds: it picked the same action almost every time.'
+      : r >= 0.5 ? 'Mostly: it picked the same action more often than not, but not every time.'
+        : 'No, the answer is shaky: it often picked something different when asked again.';
+  } else if (rate(b) < 0.5) {
+    text = "Can't tell: even with nothing changed it rarely repeated the original action, so the change can't be judged.";
+  } else if (rate(b) - rate(m) >= 0.4) {
+    text = 'Yes, it changed its mind: without that item it usually picked something else, so the item looks like it mattered.';
+  } else if (rate(b) - rate(m) >= 0.2) {
+    text = 'A little: it picked the original action less often with the change. Try more asks to be surer.';
+  } else {
+    text = 'No, it made the same choice with or without the change, so that item does not look like it mattered.';
+  }
+  return `<p><b>${esc(text)}</b>${v.confounded ? ' <span class="small muted">(Some of the same information was still present elsewhere, so this is not a clean test.)</span>' : ''}</p>`;
+}
+
+// =====================================================================================================
+// Chat recorder (relay): Connections card + "Chat recordings" tab + one conversation
+// =====================================================================================================
+const RELAY_REASONING = {
+  reasoning_content: 'sent by the model server as reasoning_content',
+  reasoning: 'sent by the model server as reasoning',
+  thinking: 'sent by Ollama as thinking',
+  think_tags: 'written by the model inside <think> tags',
+  reasoning_items: 'sent by the model server as reasoning items',
+};
+
+async function renderRelayCard(el) {
+  if (!el) return;
+  let r;
+  try { r = await api('GET', '/api/ui/runtime/relay'); } catch (e) { el.innerHTML = `<div class="card">${status('bad', e.message)}</div>`; return; }
+  const c = r.config, on = r.status.running;
+  el.innerHTML = `<div class="card conn-card" id="conn-relay">
+    <div class="conn-head">
+      <div class="conn-logo logo-manual" aria-hidden="true">Ch</div>
+      <div class="spacer">
+        <h3>Chat app (through LM Studio or Ollama)</h3>
+        <div class="row row-tight">${on ? status('ok', 'Recording') : status('muted', 'Off')} ${pill('amber', 'Experimental')}</div>
+        <div class="small muted mt-xs">${esc(r.conversations)} conversation(s), ${esc(r.calls)} message(s) recorded</div>
+      </div>
+    </div>
+    <p class="small">AgentTracker sits between your chat app and your model server, records each message and reply (and the model's thinking, when it sends any), and passes everything through unchanged.</p>
+    <ol class="small relay-steps">
+      <li>Make sure LM Studio's server (Developer tab, Start Server) or Ollama is running.</li>
+      <li>Turn the recorder on below.</li>
+      <li>In your chat app, change the server address to this one:
+        <div class="row row-tight mt-xs"><code class="relay-addr">${esc(r.address)}</code><button class="btn btn-secondary btn-small" data-act="rtCopy" data-text="${esc(r.address)}" data-keep-enabled="1">Copy</button></div>
+        <span class="muted">For apps that expect an Ollama address, use <code>${esc(r.ollama_address)}</code> instead.</span></li>
+      <li>Chat as usual. Your chats show up under Agent Runtime, Chat recordings.</li>
+    </ol>
+    ${r.status.error ? `<div class="note note-warn">${esc(r.status.error)}</div>` : ''}
+    <div class="row">
+      <button class="btn ${on ? 'btn-secondary' : 'btn-primary'}" data-act="relayToggle" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
+      <button class="btn btn-secondary" data-act="relayTest" ${on ? '' : 'disabled'}>Check it works</button>
+      <button class="btn-link" data-act="relayOpenChats">See recorded chats</button>
+    </div>
+    <div class="conn-out" id="relay-out"></div>
+    <details class="conn-details">
+      <summary>Settings and limits</summary>
+      <div class="form-grid mt-xs">
+        <div class="field"><label class="field-label" for="relay-up">Your model server</label><input id="relay-up" type="text" value="${esc(c.upstream)}"><span class="field-hint">LM Studio: http://127.0.0.1:1234 · Ollama: http://127.0.0.1:11434</span></div>
+        <div class="field"><label class="field-label" for="relay-port">Recorder port</label><input id="relay-port" type="number" value="${esc(c.port)}" min="1024" max="65535"><span class="field-hint">1235 unless something else uses it.</span></div>
+      </div>
+      <div class="row"><button class="btn btn-secondary btn-small" data-act="relaySave">Save settings</button></div>
+      <ul class="small muted conn-notes">
+        <li>Works with chat apps that let you set the server address (many local chat apps do). Cloud apps such as Claude desktop, ChatGPT or Grok can't use it: their model runs on someone else's servers.</li>
+        <li>Thinking text is only recorded when the model actually writes it (for example Qwen3 or DeepSeek-R1). Models like qwen2.5-coder reply without it.</li>
+        <li>Secrets that look like keys or passwords are blanked before saving. Recordings stay on this computer, and you can delete them at any time.</li>
+        <li>The recorder only listens on this computer (127.0.0.1) and only forwards to a model server on this computer.</li>
+        <li>Not yet tested with a live chat app on Windows.</li>
+      </ul>
+    </details>
+  </div>`;
+}
+window.renderRelayCard = renderRelayCard;
+
+async function relaySaveWith(enabled) {
+  const r0 = await api('GET', '/api/ui/runtime/relay');
+  const up = $('#relay-up'), port = $('#relay-port');
+  const cfg = { enabled, upstream: up ? up.value.trim() : r0.config.upstream, port: port ? Number(port.value) || 1235 : r0.config.port };
+  try {
+    await api('POST', '/api/ui/runtime/relay', cfg);
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+  await renderRelayCard($('#relay-card'));
+}
+actions.relayToggle = async d => {
+  await relaySaveWith(d.on === '1');
+  showToast(d.on === '1' ? 'Chat recorder is on. Paste the address into your chat app.' : 'Chat recorder is off.', 'success');
+};
+actions.relaySave = async () => {
+  const r = await api('GET', '/api/ui/runtime/relay');
+  await relaySaveWith(r.config.enabled);
+  showToast('Saved.', 'success');
+};
+actions.relayTest = async () => {
+  const out = $('#relay-out');
+  out.innerHTML = '<p class="small muted"><span class="spinner"></span> Asking your model server for its model list, through the recorder…</p>';
+  try {
+    const r = await api('POST', '/api/ui/runtime/relay/test');
+    out.innerHTML = `<div class="card card-soft mt">${r.ok ? status('ok', 'The recorder can reach your model server') : status('bad', 'The recorder could not reach your model server')}
+      <p class="small mt-xs">${esc(r.detail)}</p>${r.models.length ? `<p class="small muted">Models: ${esc(r.models.join(', '))}</p>` : ''}
+      <p class="small muted">This checks the recorder and your model server. It doesn't check your chat app: send one message there and it should appear under Chat recordings.</p></div>`;
+  } catch (e) {
+    out.innerHTML = `<div class="mt">${status('bad', e.message)}</div>`;
+  }
+};
+actions.relayOpenChats = () => { RT.tab = 'chats'; navigate('runtime'); };
+
+async function renderChats(body) {
+  const [{ conversations }, rs] = await Promise.all([api('GET', '/api/ui/runtime/relay/conversations'), api('GET', '/api/ui/runtime/relay')]);
+  const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the AgentTracker chat recorder. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
+  if (!conversations.length) {
+    body.innerHTML = head + `<div class="card">${emptyState('clipboard', 'No chats recorded yet', 'Turn on the chat recorder in Connections, paste its address into your chat app, and send a message.',
+      '<button class="btn btn-primary" data-act="go" data-screen="connections" data-param="relay">Set up the chat recorder</button>')}</div>`;
+    return;
+  }
+  body.innerHTML = head + `
+    <div class="card table-wrap"><table class="table">
+      <thead><tr><th>Conversation</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
+      <tbody>${conversations.map(c => `
+        <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
+          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.errors ? `<div class="small">${pill('red', `${c.errors} problem(s)`)}</div>` : ''}</td>
+          <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
+          <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
+          <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>
+          <td class="small muted">${esc(when(c.last_at))}</td>
+        </tr>`).join('')}</tbody></table></div>
+    <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete">Delete all chat recordings</button></div>`;
+}
+
+async function renderConversation(id) {
+  const r = await api('GET', `/api/ui/runtime/relay/conversations/${encodeURIComponent(id)}`);
+  const calls = r.calls;
+  const first = calls[0];
+  const turn = (c, i) => `<div class="card mt">
+      <div class="row row-tight"><b>Message ${i + 1}</b> ${modelCell(c.model)} <span class="small muted">${esc(when(c.started_at))}${c.finished_at ? ` · ${esc(((c.finished_at - c.started_at) / 1000).toFixed(1))} s` : ''}${c.streamed ? ' · streamed' : ''}</span>
+        ${c.error ? pill('red', 'Problem') : ''}</div>
+      ${c.last_user_redacted ? `<h4 class="mt-xs">You asked</h4><pre class="ctx-body">${esc(c.last_user_redacted)}</pre>` : ''}
+      ${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
+      <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}
+      ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. Whether your chat app ran it is not known here.</p>` : ''}
+      ${c.error ? `<div class="note note-warn mt-xs">${esc(c.error)}</div>` : ''}
+      <details class="history"><summary>Details</summary>
+        ${kv([['Sent by', esc(c.client || 'Unknown app')], ['Kind of call', esc(c.api)], ['Messages in the request', esc(c.message_count ?? '—')], ['Finished because', esc(c.finish_reason || '—')],
+          ['Tokens', esc(c.usage ? `${c.usage.prompt_tokens ?? c.usage.input_tokens ?? '?'} in, ${c.usage.completion_tokens ?? c.usage.output_tokens ?? '?'} out` : 'Not reported')], ['Server status', esc(c.http_status ?? 'No answer')],
+          ['Request hash', `<span class="mono">${esc(short('sha_' + c.request_sha256))}</span>`]])}
+        <h4 class="mt-xs">Full request (redacted)</h4><pre class="diff">${esc(pretty(c.request_redacted))}</pre>
+      </details>
+    </div>`;
+  screenEl.innerHTML = `
+    <div class="page-head">
+      <button class="btn-link" data-act="relayOpenChats">All chat recordings</button>
+      <h1>${esc(first.title || 'Chat')}</h1>
+      <p class="small muted">Recorded by the chat recorder. Messages are grouped by their first message, so two chats that start the same way may appear together.</p>
+    </div>
+    ${calls.map(turn).join('')}
+    <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete" data-conv="${esc(id)}">Delete this conversation</button></div>`;
+}
+actions.relayDelete = async d => {
+  if (!confirm(d.conv ? 'Delete this recorded conversation?' : 'Delete every recorded chat?')) return;
+  const r = await api('POST', '/api/ui/runtime/relay/delete', d.conv ? { conversation_id: d.conv } : {});
+  showToast(`Deleted ${r.deleted} message(s).`, 'success');
+  RT.tab = 'chats';
+  navigate('runtime');
+};

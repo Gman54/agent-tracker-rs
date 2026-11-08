@@ -12,6 +12,7 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     ("v004", include_str!("../../../migrations/v004_runtime.sql")),
     ("v005", include_str!("../../../migrations/v005_auto_tasks.sql")),
     ("v006", include_str!("../../../migrations/v006_git_tracking.sql")),
+    ("v007", include_str!("../../../migrations/v007_chat_relay.sql")),
 ];
 
 pub struct Migrator;

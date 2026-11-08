@@ -14,6 +14,7 @@ use tracker_common::hash_chain::ChainStore;
 const JSON_COLS: &[&str] = &[
     "protected_paths", "provider_config", "limits", "tool_definitions", "compaction", "omitted", "settings", "payload_redacted", "response_redacted",
     "errors", "proposal", "instruction_ids", "evidence_ids", "args", "output_redacted", "detail", "excerpts", "modification", "counts", "limitations", "normalized_action",
+    "request_redacted", "tool_calls", "usage",
 ];
 
 fn to_sql(v: &Value) -> SqlValue {
@@ -28,15 +29,23 @@ fn to_sql(v: &Value) -> SqlValue {
 
 /// Inserts `row` into `table` (internal constant names only) and appends it to the hash chain.
 pub fn insert(conn: &Connection, table: &'static str, row: Value) -> Result<()> {
+    insert_plain(conn, table, &row)?;
     let obj = row.as_object().cloned().unwrap_or_default();
-    let cols: Vec<&String> = obj.keys().collect();
-    let sql = format!("INSERT INTO {table} ({}) VALUES ({})", cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(","), (1..=cols.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(","));
-    conn.execute(&sql, params_from_iter(obj.values().map(to_sql)))?;
     let id = obj.get("id").and_then(|v| v.as_str()).map(String::from).or_else(|| obj.get("action_id").and_then(|v| v.as_str()).map(|a| format!("{a}#state"))).unwrap_or_default();
     let mut ev = Map::new();
     ev.insert("rt_table".into(), Value::String(table.into()));
     ev.insert("record".into(), Value::Object(obj));
     ChainStore::append_with(conn, &id, &Value::Object(ev), crate::now_ms())?;
+    Ok(())
+}
+
+/// Inserts `row` into `table` (internal constant names only) without touching the hash chain.
+pub fn insert_plain(conn: &Connection, table: &'static str, row: &Value) -> Result<()> {
+    let empty = Map::new();
+    let obj = row.as_object().unwrap_or(&empty);
+    let cols: Vec<&String> = obj.keys().collect();
+    let sql = format!("INSERT INTO {table} ({}) VALUES ({})", cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(","), (1..=cols.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(","));
+    conn.execute(&sql, params_from_iter(obj.values().map(to_sql)))?;
     Ok(())
 }
 

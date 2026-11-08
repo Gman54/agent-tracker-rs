@@ -18,6 +18,7 @@
 //! - [`checks`] — deterministic contradiction checks (+ optional, labelled inferred analysis).
 //! - [`investigate`] — experimental "Test this influence" replays (decision stage only).
 //! - [`replay_vault`] — optional encrypted replay-capture store.
+//! - [`relay`] — the chat recorder: a local pass-through between a chat app and LM Studio / Ollama.
 //! - [`http`] — axum routes mounted under `/api/ui/runtime/*` by the desktop shell.
 pub mod checks;
 pub mod config;
@@ -28,6 +29,7 @@ pub mod ids;
 pub mod investigate;
 pub mod proposal;
 pub mod provider;
+pub mod relay;
 pub mod replay_vault;
 pub mod runtime;
 pub mod store;

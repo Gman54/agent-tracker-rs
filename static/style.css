@@ -694,3 +694,7 @@ details.conv[open] > summary.conv-who { margin-bottom: 6px; }
 .glance th, .glance td { text-align: left; vertical-align: top; padding: 6px 10px; border-top: 1px solid var(--border, #e8e2d9); }
 .glance th { width: 34%; font-weight: 600; }
 .conv-note { margin: 6px 0 2px; }
+
+/* Chat recorder card */
+.relay-steps { margin: 6px 0 10px; padding-left: 20px; line-height: 1.6; }
+.relay-addr { font-size: 15px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2, #f3f1ec); user-select: all; }

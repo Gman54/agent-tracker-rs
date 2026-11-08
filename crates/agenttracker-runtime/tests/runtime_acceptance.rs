@@ -389,6 +389,33 @@ fn investigations_execute_no_tools_and_report_counts_and_limitations() {
     assert_eq!(inv["replay_fidelity"], "exact_application_payload");
 }
 
+/// "Ask again, nothing changed": one arm only, no item needed, nothing executed.
+#[test]
+fn ask_again_unchanged_runs_one_arm_and_reports_whether_the_answer_holds() {
+    let db = Db::open_in_memory().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let (dir, s) = demo::prepare(base.path(), Demo::A).unwrap();
+    let rt = rt_with(&db, demo::fixture_provider(Demo::A));
+    let o = rt.start_task(&s).unwrap();
+    rt.run(&o.session_id).unwrap();
+    let before = hash_tree(&dir);
+    let actions_before = count(&db, "SELECT COUNT(*) FROM rt_actions");
+    let dec = q(&db, "SELECT id FROM rt_decisions WHERE kind='action'")[0]["id"].as_str().unwrap().to_string();
+    let p = sensitive_provider("organized/2026", "scripted");
+    let id = investigate::run(&db, &p, None, &InvestigationSpec { decision_id: dec, context_item_id: String::new(), modification: Modification::Keep, trials_per_arm: 3, seed_base: None }).unwrap();
+    assert_eq!(p.calls(), 3, "only the unchanged arm is asked");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM rt_actions"), actions_before, "no tool executed");
+    assert_eq!(hash_tree(&dir), before, "working folder unchanged");
+    let inv = &q(&db, &format!("SELECT * FROM rt_investigations WHERE id='{id}'"))[0];
+    assert_eq!(inv["status"], "completed");
+    assert_eq!(inv["modification"]["kind"], "keep");
+    assert_eq!(inv["counts"]["baseline"]["matches_original"], 3);
+    assert!(inv["counts"].get("modified").is_none());
+    let summary = inv["summary"].as_str().unwrap();
+    assert!(summary.contains("nothing changed") && summary.contains("in 3/3 trials"), "{summary}");
+    assert_eq!(count(&db, &format!("SELECT COUNT(*) FROM rt_replay_trials WHERE investigation_id='{id}' AND arm='modified'")), 0);
+}
+
 #[test]
 fn investigation_refuses_when_model_differs_and_flags_confounds() {
     let db = Db::open_in_memory().unwrap();

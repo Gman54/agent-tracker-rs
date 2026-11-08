@@ -8,6 +8,7 @@ use crate::investigate::{self, InvestigationSpec};
 use crate::provider::{OpenAiCompatProvider, Provider};
 use crate::replay_vault::{self, ReplayVault};
 use crate::runtime::{Runtime, TaskSpec};
+use crate::relay::{self, RelayConfig};
 use crate::{checks, store, why, RtError};
 use agenttracker_core::db::Db;
 use agenttracker_core::server::AppState;
@@ -42,6 +43,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/demo/:which", post(demo_run))
         .route("/api/ui/runtime/replay/delete", post(replay_delete))
         .route("/api/ui/runtime/recover", post(recover))
+        .route("/api/ui/runtime/relay", get(relay_get).post(relay_set))
+        .route("/api/ui/runtime/relay/test", post(relay_test))
+        .route("/api/ui/runtime/relay/conversations", get(relay_conversations))
+        .route("/api/ui/runtime/relay/conversations/:id", get(relay_conversation))
+        .route("/api/ui/runtime/relay/delete", post(relay_delete))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -358,4 +364,115 @@ async fn replay_delete(State(st): St) -> Response {
 
 async fn recover(State(st): St) -> Response {
     blocking(move || Ok(json!({"recovered": Runtime::recover_unknown(&st.engine.db)?}))).await
+}
+
+// ---- chat recorder (relay) ----------------------------------------------------------------------
+
+fn relay_state(db: &Db) -> crate::Result<Value> {
+    let cfg = relay::load_config(db);
+    let st = relay::status();
+    let port = st["port"].as_u64().unwrap_or(cfg.port as u64);
+    let conn = db.conn();
+    let (calls, convs): (i64, i64) = conn.query_row("SELECT COUNT(*), COUNT(DISTINCT conversation_id) FROM relay_calls", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(json!({"config": cfg, "status": st, "address": format!("http://127.0.0.1:{port}/v1"), "ollama_address": format!("http://127.0.0.1:{port}"),
+        "calls": calls, "conversations": convs}))
+}
+
+async fn relay_get(State(st): St) -> Response {
+    blocking(move || relay_state(&st.engine.db)).await
+}
+
+async fn relay_set(State(st): St, Json(cfg): Json<RelayConfig>) -> Response {
+    let mut cfg = cfg;
+    cfg.upstream = relay::upstream_root(&cfg.upstream);
+    if let Err(e) = relay::validate(&cfg) {
+        return rt_err(e);
+    }
+    if let Err(e) = relay::save_config(&st.engine.db, &cfg) {
+        return rt_err(e);
+    }
+    if cfg.enabled {
+        if let Err(e) = relay::start(st.engine.db.clone(), cfg).await {
+            return rt_err(e);
+        }
+    } else {
+        relay::stop();
+    }
+    blocking(move || relay_state(&st.engine.db)).await
+}
+
+/// Asks the model server for its model list THROUGH the recorder, so a pass means the whole path
+/// (recorder -> model server) answers. Model-list calls are not recorded.
+async fn relay_test(State(_st): St) -> Response {
+    blocking(move || {
+        let Some(port) = relay::running_port() else {
+            return Err(RtError::Invalid("The chat recorder is off. Turn it on first.".into()));
+        };
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+        let mut tried = Vec::new();
+        for path in ["/v1/models", "/api/tags"] {
+            match agent.get(&format!("http://127.0.0.1:{port}{path}")).call() {
+                Ok(r) => {
+                    let v: Value = r.into_json().unwrap_or(Value::Null);
+                    let models: Vec<String> = v["data"].as_array().or_else(|| v["models"].as_array()).into_iter().flatten()
+                        .filter_map(|m| m["id"].as_str().or_else(|| m["name"].as_str()).map(String::from)).collect();
+                    return Ok(json!({"ok": true, "models": models, "detail": format!("Your model server answered through the recorder ({path}).")}));
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let body = r.into_string().unwrap_or_default();
+                    tried.push(format!("{path}: HTTP {code} {}", body.chars().take(200).collect::<String>()));
+                }
+                Err(e) => tried.push(format!("{path}: {e}")),
+            }
+        }
+        Ok(json!({"ok": false, "models": [], "detail": tracker_common::redaction::redact_text(&tried.join(" | "))}))
+    })
+    .await
+}
+
+async fn relay_conversations(State(st): St) -> Response {
+    blocking(move || {
+        let conn = st.engine.db.conn();
+        let rows = store::rows(&conn, "SELECT c.conversation_id, COUNT(*) AS calls, MIN(c.started_at) AS first_at, MAX(c.started_at) AS last_at,
+            (SELECT x.title FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at LIMIT 1) AS title,
+            (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
+            (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
+            SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
+            SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools,
+            SUM(CASE WHEN c.error IS NOT NULL THEN 1 ELSE 0 END) AS errors
+            FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;
+        Ok(json!({"conversations": rows}))
+    })
+    .await
+}
+
+async fn relay_conversation(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
+    blocking(move || {
+        let conn = st.engine.db.conn();
+        let calls = store::rows(&conn, "SELECT * FROM relay_calls WHERE conversation_id=?1 ORDER BY started_at", &[&id])?;
+        if calls.is_empty() {
+            return Err(RtError::NotFound(id));
+        }
+        Ok(json!({"conversation_id": id, "calls": calls}))
+    })
+    .await
+}
+
+#[derive(Deserialize, Default)]
+struct RelayDeleteIn {
+    #[serde(default)]
+    conversation_id: Option<String>,
+}
+
+async fn relay_delete(State(st): St, body: Option<Json<RelayDeleteIn>>) -> Response {
+    let conv = body.and_then(|b| b.0.conversation_id).filter(|s| !s.is_empty());
+    blocking(move || {
+        let conn = st.engine.db.conn();
+        let n = match &conv {
+            Some(c) => conn.execute("DELETE FROM relay_calls WHERE conversation_id=?1", [c])?,
+            None => conn.execute("DELETE FROM relay_calls", [])?,
+        };
+        Ok(json!({"deleted": n}))
+    })
+    .await
 }
