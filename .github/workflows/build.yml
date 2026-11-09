@@ -74,8 +74,8 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: AgentTracker-windows-x64
+          name: TrailFox-windows-x64
           if-no-files-found: error
           path: |
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/AgentTracker_*.exe
-            target/x86_64-pc-windows-msvc/release/bundle/msi/AgentTracker_*_x64_en-US.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/TrailFox_*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/msi/TrailFox-windows-x64_en-US.msi
