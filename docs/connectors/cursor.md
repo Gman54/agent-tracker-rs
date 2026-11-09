@@ -25,6 +25,13 @@ restores your file or removes only TrailFox's marked entries.
   Cursor, and TrailFox never registers blocking hooks.
 - The transcript and model reasoning.
 
+## Notes from the first real run (Windows)
+- Cursor sends folders as `/c:/Users/...`. TrailFox now turns these into `c:/Users/...` so the folder can be checked.
+- Cursor also runs Claude Code's hooks ("third-party hooks"). Those deliveries use Cursor's own event names and are
+  now skipped by the Claude Code connection, since the Cursor connection already records them.
+- Tool calls arrive only once they finish (no "before" hooks), so the report doesn't count them as gaps.
+- Grok Bot (the separate desktop app) doesn't read `~/.cursor/hooks.json`, so it isn't captured. Use "Just check a folder".
+
 ## Limitations
 - Cursor's hook API is new and may change between releases. Treat agent activity as best effort.
   File checks are unaffected.

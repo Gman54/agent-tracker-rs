@@ -338,6 +338,12 @@ impl ClaudeConnector {
 pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     let p = &env.payload;
     let name = p.get("hook_event_name").and_then(Value::as_str).unwrap_or(&env.hook_event);
+    // Cursor also runs Claude Code's hooks (its "third-party hooks" setting), but sends its own
+    // camelCase event names and fields. Those runs are recorded by the Cursor connection, so they're
+    // skipped here instead of showing up as "Couldn't understand a message from the agent".
+    if p.get("cursor_version").is_some() || name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return None;
+    }
     let t = match name {
         "SessionStart" => EventType::SessionStarted,
         "UserPromptSubmit" => EventType::TaskSubmitted,

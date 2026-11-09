@@ -298,6 +298,10 @@ pub fn at_a_glance(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         "Nothing was captured from the agent.".to_string()
     } else if calls == 0 {
         "Agent messages arrived, but no tool calls.".to_string()
+    } else if task.connector == crate::connectors::cursor::NAME && !events.iter().any(|e| e.event_type == EventType::ToolStarted) {
+        // TrailFox never registers Cursor's "before" hooks (they can block Cursor), so Cursor tool
+        // calls only ever arrive once they've finished. That's expected, not a gap.
+        format!("{} recorded when finished (Cursor only reports tool calls afterwards)", plural(calls, "tool call", "tool calls"))
     } else if matched == calls {
         format!("{} with matching start/end records", plural(calls, "tool call", "tool calls"))
     } else {

@@ -174,6 +174,20 @@ impl CursorConnector {
     }
 }
 
+/// Cursor on Windows sends folders as "/c:/Users/Greg/x" (and sometimes "file:///c%3A/..."). Turns
+/// those into "c:/Users/Greg/x" so the folder can be read; other paths are returned unchanged.
+pub fn windows_path(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    if let Some(rest) = s.strip_prefix("file://") {
+        s = rest.replace("%3A", ":").replace("%3a", ":").replace("%20", " ");
+    }
+    let b = s.as_bytes();
+    if b.len() >= 3 && (b[0] == b'/' || b[0] == b'\\') && b[1].is_ascii_alphabetic() && b[2] == b':' && (b.len() == 3 || b[3] == b'/' || b[3] == b'\\') {
+        s.remove(0);
+    }
+    s
+}
+
 pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     let p = &env.payload;
     let name = p.get("hook_event_name").and_then(Value::as_str).unwrap_or(&env.hook_event);
@@ -190,10 +204,20 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
     ev.session_id = s("conversation_id").or_else(|| s("session_id"));
     ev.agent_version = s("cursor_version");
-    ev.working_dir = p.get("workspace_roots").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str).map(str::to_string).or_else(|| s("cwd"));
+    ev.working_dir = p.get("workspace_roots").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str).map(str::to_string).or_else(|| s("cwd")).map(|w| windows_path(&w));
     ev.tool_call_id = s("tool_use_id").or_else(|| s("generation_id"));
     let mut payload = p.clone();
     if let Some(o) = payload.as_object_mut() {
+        if let Some(f) = o.get("file_path").and_then(Value::as_str).map(windows_path) {
+            o.insert("file_path".into(), Value::String(f));
+        }
+        if let Some(Value::Array(roots)) = o.get_mut("workspace_roots") {
+            for r in roots.iter_mut() {
+                if let Some(x) = r.as_str().map(windows_path) {
+                    *r = Value::String(x);
+                }
+            }
+        }
         // Drop identifying/bulky fields we don't need to keep.
         o.remove("user_email");
         o.remove("transcript_path");
@@ -202,4 +226,41 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     ev.payload_redacted = if t == EventType::CaptureError { json!({"error": format!("unrecognized Cursor hook \"{name}\""), "payload": payload}) } else { json!({"hook": name, "data": payload}) };
     ev.redact();
     Some(ev)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn env(connector: &str, event: &str, payload: Value) -> HookEnvelope {
+        serde_json::from_value(json!({"connector": connector, "hook_event": event, "hook_ts_ns": 1, "payload": payload})).unwrap()
+    }
+
+    #[test]
+    fn windows_paths_from_cursor_are_fixed() {
+        assert_eq!(windows_path("/c:/Users/Greg/.agents"), "c:/Users/Greg/.agents");
+        assert_eq!(windows_path("file:///c%3A/Users/Greg/My%20Stuff"), "c:/Users/Greg/My Stuff");
+        assert_eq!(windows_path("/c:"), "c:");
+        assert_eq!(windows_path("C:\\Users\\Greg"), "C:\\Users\\Greg");
+        assert_eq!(windows_path("/home/greg/x"), "/home/greg/x");
+        assert_eq!(windows_path("/ab/c"), "/ab/c");
+    }
+
+    #[test]
+    fn cursor_event_gets_a_readable_folder_and_file() {
+        let e = env("cursor", "afterFileEdit", json!({"hook_event_name": "afterFileEdit", "cursor_version": "2.0", "conversation_id": "c1", "workspace_roots": ["/c:/Users/Greg/.agents"], "file_path": "/c:/Users/Greg/.agents/test86.txt"}));
+        let ev = normalize(&e).unwrap();
+        assert_eq!(ev.working_dir.as_deref(), Some("c:/Users/Greg/.agents"));
+        assert_eq!(ev.payload_redacted.pointer("/data/file_path").and_then(Value::as_str), Some("c:/Users/Greg/.agents/test86.txt"));
+    }
+
+    #[test]
+    fn claude_hooks_run_by_cursor_are_skipped() {
+        let e = env("claude_code", "PostToolUse", json!({"hook_event_name": "postToolUse", "cursor_version": "2.0", "conversation_id": "c1"}));
+        assert!(crate::connectors::claude_code::normalize(&e).is_none());
+        let e = env("claude_code", "Stop", json!({"hook_event_name": "stop"}));
+        assert!(crate::connectors::claude_code::normalize(&e).is_none());
+        let real = env("claude_code", "Stop", json!({"hook_event_name": "Stop", "session_id": "s1", "cwd": "C:/x"}));
+        assert!(crate::connectors::claude_code::normalize(&real).is_some());
+    }
 }
