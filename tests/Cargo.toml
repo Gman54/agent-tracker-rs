@@ -1,6 +1,6 @@
 [package]
 name = "agenttracker-acceptance"
-description = "Acceptance tests for TrailFox (fake-agent contract tests; no live connectors)"
+description = "Acceptance tests for Houndbit (fake-agent contract tests; no live connectors)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -28,7 +28,7 @@ impl Verifier for RequiredOutputsExist {
         for p in &paths {
             let abs = ev.resolve(p);
             let Some((vm, rel)) = locate(&ev.verifications, &abs) else {
-                f.uncertain.push(format!("{abs} is outside every folder TrailFox snapshotted"));
+                f.uncertain.push(format!("{abs} is outside every folder Houndbit snapshotted"));
                 continue;
             };
             f.evidence.push(format!("verification:{}:{rel}", vm.id));

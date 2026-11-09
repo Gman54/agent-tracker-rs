@@ -1,6 +1,6 @@
 [package]
 name = "agenttracker-core"
-description = "TrailFox core: storage, events, tasks, filesystem snapshots, verifiers, connectors, collector"
+description = "Houndbit core: storage, events, tasks, filesystem snapshots, verifiers, connectors, collector"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

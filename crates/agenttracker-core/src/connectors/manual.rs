@@ -1,5 +1,5 @@
 //! Manual connector (spec §9): no agent integration. The user picks folders and checks,
-//! TrailFox captures a "before" snapshot, the user (or any tool) does the work, then
+//! Houndbit captures a "before" snapshot, the user (or any tool) does the work, then
 //! "Verify now" captures the "after" snapshot and runs the checks.
 use super::{Capability, ConnectorInfo, DetectResult, Maturity};
 use crate::engine::Engine;

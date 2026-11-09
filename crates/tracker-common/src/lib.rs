@@ -1,4 +1,4 @@
-//! Shared building blocks used by TrailFox.
+//! Shared building blocks used by Houndbit.
 pub mod canonical;
 pub mod hash_chain;
 pub mod license;

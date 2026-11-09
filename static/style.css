@@ -1,4 +1,4 @@
-/* TrailFox design system: warm off-white surfaces, fox-orange accents, navy sidebar, crisp type.
+/* Houndbit design system: warm off-white surfaces, warm orange accents, navy sidebar, crisp type.
    No external assets. */
 
 :root {
@@ -8,7 +8,7 @@
   --ink: #1e293b;
   --muted: #4b5563;
   --line: #ebe3d9;
-  --blue: #c2410c;      /* fox orange, deepened so white button text stays readable */
+  --blue: #c2410c;      /* warm orange, deepened so white button text stays readable */
   --blue-dark: #9a3412;
   --blue-soft: #fff1e8;
   --mint: #10b981;

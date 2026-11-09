@@ -1,6 +1,6 @@
 [package]
 name = "agenttracker-hook"
-description = "Tiny hook program invoked by AI agents; forwards events to the local TrailFox collector"
+description = "Tiny hook program invoked by AI agents; forwards events to the local Houndbit collector"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

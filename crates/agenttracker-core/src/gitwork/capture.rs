@@ -1,4 +1,4 @@
-//! Records what agents do inside Git repositories, from the hook events TrailFox already gets:
+//! Records what agents do inside Git repositories, from the hook events Houndbit already gets:
 //! - file edits (with the agent's decision id, repo identity, path and before/after evidence)
 //! - `git commit` / `git push` commands run through the agent's shell tool.
 //! Read-only towards the repository: files are read and `git rev-parse` is run, nothing else.

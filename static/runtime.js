@@ -1,4 +1,4 @@
-// TrailFox decision runtime UI. Loaded after app.js and reuses its helpers
+// Houndbit decision runtime UI. Loaded after app.js and reuses its helpers
 // (api, esc, when, pill, status, emptyState, showToast, actions, changes, navigate, SCREENS, RENDER).
 // Routes: #runtime (tabs), #runtime/ses_* (session), #runtime/act_* | dec_* (Why this action?), #runtime/inv_* (investigation).
 'use strict';
@@ -68,7 +68,7 @@ async function renderRuntimeHome() {
   screenEl.innerHTML = `
     <div class="page-head">
       <h1>Agent Runtime</h1>
-      <p class="lead">Run a local model through TrailFox's instrumented runtime. Before any tool runs, the model must submit a structured decision proposal, which is validated and saved. You can then inspect what the model was given, its stated rationale, and what actually happened.</p>
+      <p class="lead">Run a local model through Houndbit's instrumented runtime. Before any tool runs, the model must submit a structured decision proposal, which is validated and saved. You can then inspect what the model was given, its stated rationale, and what actually happened.</p>
     </div>
     <div class="tabs" role="tablist">${tabs.map(([k, t]) => `<button class="tab ${RT.tab === k ? 'active' : ''}" role="tab" data-act="rtTab" data-tab="${k}">${t}</button>`).join('')}</div>
     <div id="rt-body"></div>`;
@@ -93,7 +93,7 @@ async function renderSessions(body) {
   const mixed = sessions.some(isFixture) && sessions.some(x => !isFixture(x));
   const allOrigin = mixed ? '' : (isFixture(sessions[0]) ? 'All sessions below used recorded fixtures (not live model output).' : 'All sessions below are runtime sessions.');
   body.innerHTML = `
-    <div class="note note-plain mb-sm">These sessions ran through the TrailFox runtime. Externally connected agents (Claude Code, Cursor, Copilot) appear under Live Task and Results and are not mixed in here.${allOrigin ? ` ${esc(allOrigin)}` : ''}</div>
+    <div class="note note-plain mb-sm">These sessions ran through the Houndbit runtime. Externally connected agents (Claude Code, Cursor, Copilot) appear under Live Task and Results and are not mixed in here.${allOrigin ? ` ${esc(allOrigin)}` : ''}</div>
     <div class="card table-wrap"><table class="table rt-sessions">
       <thead><tr><th>Task</th>${mixed ? '<th>Origin</th>' : ''}<th class="col-model">Model</th><th>Status</th><th>Actions</th><th>Findings</th><th>Started</th></tr></thead>
       <tbody>${sessions.map(s => `
@@ -164,7 +164,7 @@ async function renderDemos(body) {
           <button class="btn btn-secondary btn-small" data-act="rtDemo" data-which="b" data-mode="live">Run with configured model</button></div>
       </div>
     </div>
-    <div class="note note-plain mt">Demonstrations run in new disposable folders under the TrailFox data folder. Recorded fixtures are hand-written, deterministic responses used for UI tests and are labelled "Recorded fixture" everywhere. They are not model output. Live runs show whatever the configured model actually produced.</div>`;
+    <div class="note note-plain mt">Demonstrations run in new disposable folders under the Houndbit data folder. Recorded fixtures are hand-written, deterministic responses used for UI tests and are labelled "Recorded fixture" everywhere. They are not model output. Live runs show whatever the configured model actually produced.</div>`;
 }
 actions.rtDemo = async d => {
   if (d.mode === 'live') showToast('Calling the configured model. This can take several minutes on CPU.', 'info');
@@ -458,7 +458,7 @@ async function renderWhy(id) {
           ${a.args_sha256 !== d.args_sha256 ? '<div class="note note-warn">Executed arguments differ from the approved decision.</div>' : ''}` : '<p class="muted">Nothing was executed for this decision.</p>'}
       </div>
       <div class="why-sec"><h3>Observed changes ${lbl(L.observed)}</h3>
-        <p class="small muted">Measured by TrailFox comparing file hashes before and after, separately from what the tool reported.</p>
+        <p class="small muted">Measured by Houndbit comparing file hashes before and after, separately from what the tool reported.</p>
         ${b.verifications.map(v => `<p class="small"><b>${esc(v.method === 'manifest_diff' ? 'Before/after comparison' : 'Reconciliation')}</b>: ${esc(v.summary)}</p>`).join('')}
         ${b.observed_changes.length ? `<table class="table"><thead><tr><th>Path</th><th>Change</th><th>After hash</th></tr></thead><tbody>${b.observed_changes.map(c => `<tr><td class="mono">${esc(c.rel_path)}</td><td>${esc(c.change_kind)}</td><td class="mono muted">${esc(short(c.after_sha256 ? 'sha_' + c.after_sha256 : ''))}</td></tr>`).join('')}</tbody></table>` : `<p class="muted">${a ? 'No file changes observed.' : esc(L.unavailable)}</p>`}
       </div>
@@ -590,7 +590,7 @@ async function renderRelayCard(el) {
         <div class="small muted mt-xs">${esc(r.conversations)} conversation(s), ${esc(r.calls)} message(s) recorded</div>
       </div>
     </div>
-    <p class="small">TrailFox sits between your chat app and your model server, records each message and reply (and the model's thinking, when it sends any), and passes everything through unchanged.</p>
+    <p class="small">Houndbit sits between your chat app and your model server, records each message and reply (and the model's thinking, when it sends any), and passes everything through unchanged.</p>
     <ol class="small relay-steps">
       <li>Make sure LM Studio's server (Developer tab, Start Server) or Ollama is running.</li>
       <li>Turn the recorder on below.</li>
@@ -661,7 +661,7 @@ actions.relayOpenChats = () => { RT.tab = 'chats'; navigate('runtime'); };
 
 async function renderChats(body) {
   const [{ conversations }, rs] = await Promise.all([api('GET', '/api/ui/runtime/relay/conversations'), api('GET', '/api/ui/runtime/relay')]);
-  const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the TrailFox chat recorder. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
+  const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the Houndbit chat recorder. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
   if (!conversations.length) {
     body.innerHTML = head + `<div class="card">${emptyState('clipboard', 'No chats recorded yet', 'Turn on the chat recorder in Connections, paste its address into your chat app, and send a message.',
       '<button class="btn btn-primary" data-act="go" data-screen="connections" data-param="relay">Set up the chat recorder</button>')}</div>`;

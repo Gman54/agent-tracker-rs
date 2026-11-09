@@ -1,4 +1,4 @@
-//! TrailFox desktop shell: starts the collector + 127.0.0.1-only backend, opens the UI in a
+//! Houndbit desktop shell: starts the collector + 127.0.0.1-only backend, opens the UI in a
 //! native window and keeps a tray icon (Open / Pause Collection / Quit).
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
@@ -87,7 +87,7 @@ fn build_runtime(port: u16, launch_token: String) -> Runtime {
         Err(e) => eprintln!("could not resume running tasks: {e}"),
     }
     let state = AppState::new(engine, collector, port, Some(launch_token), secret, hook_binary(), data_dir, home.clone());
-    // After updating from AgentTracker: re-point hooks and "Start with Windows" at this install.
+    // After updating from AgentTracker or TrailFox: re-point hooks and "Start with Windows" at this install.
     let fix_state = state.clone();
     std::thread::spawn(move || {
         for note in fix_state.after_update_fixups() {
@@ -161,8 +161,8 @@ fn main() {
     }
 
     tauri::Builder::default()
-        // Must be first: if TrailFox is already running (often just as a tray icon), a second
-        // launch - Start menu, desktop shortcut, Setup's "Start TrailFox now" - brings the
+        // Must be first: if Houndbit is already running (often just as a tray icon), a second
+        // launch - Start menu, desktop shortcut, Setup's "Start Houndbit now" - brings the
         // existing window to the front and exits before it touches the database or hook file.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)))
         .plugin(tauri_plugin_shell::init())
@@ -186,7 +186,7 @@ fn main() {
 
             // ---- tray -------------------------------------------------------------------------
             let paused = state.collector.is_paused();
-            let open_i = MenuItem::with_id(app, "open", "Open TrailFox", true, None::<&str>)?;
+            let open_i = MenuItem::with_id(app, "open", "Open Houndbit", true, None::<&str>)?;
             let pause_i = MenuItem::with_id(app, "pause", if paused { "Resume Collection" } else { "Pause Collection" }, true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open_i, &pause_i, &quit_i])?;
@@ -256,7 +256,7 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building TrailFox")
+        .expect("error while building Houndbit")
         .run(|app, event| {
             // Only the copy that started the runtime owns the hook discovery file.
             if let (tauri::RunEvent::Exit, Some(shared)) = (event, app.try_state::<Shared>()) {

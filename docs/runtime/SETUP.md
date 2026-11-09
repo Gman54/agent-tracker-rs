@@ -75,7 +75,7 @@ documents (one relative path per line; they are recorded as lower-trust retrieve
 
 ## Data and privacy
 
-- Records are stored in the existing TrailFox SQLite database (`rt_*` tables).
+- Records are stored in the existing Houndbit SQLite database (`rt_*` tables).
 - Audit copies of requests are redacted. Exact payloads are kept only if you enable
   **Encrypted replay capture**. Delete them with **Delete all replay captures**.
 - Nothing leaves your computer unless you point the endpoint at a remote server and allow it.

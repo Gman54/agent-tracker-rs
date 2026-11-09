@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TrailFox",
+  "productName": "Houndbit",
   "version": "0.1.0",
   "identifier": "com.agenttracker.app",
   "build": {
@@ -17,9 +17,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
-    "publisher": "TrailFox",
+    "publisher": "Houndbit",
     "shortDescription": "Checks whether AI agents really did what they said",
-    "longDescription": "TrailFox records what local AI coding agents report and verifies the result against real file snapshots. Runs entirely on this PC.",
+    "longDescription": "Houndbit records what local AI coding agents report and verifies the result against real file snapshots. Runs entirely on this PC.",
     "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",
@@ -33,7 +33,7 @@
       "webviewInstallMode": { "type": "embedBootstrapper", "silent": true },
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "TrailFox",
+        "startMenuFolder": "Houndbit",
         "displayLanguageSelector": false,
         "installerHooks": "./windows/hooks.nsh"
       },

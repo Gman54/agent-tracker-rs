@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Wording for the TrailFox MSI (bundle.windows.wix.language.en-US.localePath).
+<!-- Wording for the Houndbit MSI (bundle.windows.wix.language.en-US.localePath).
      Tauri adds its own default strings for anything not listed here. -->
 <WixLocalization Culture="en-us" xmlns="http://schemas.microsoft.com/wix/2006/localization">
-  <String Id="LaunchApp">Start TrailFox now</String>
-  <String Id="ExitDialogTitle">{\WixUI_Font_Bigger}TrailFox Setup is finished</String>
-  <String Id="ExitDialogDescription">All done. TrailFox is installed and ready to use, and you can open it any time from the Start menu. (If you chose to repair or remove it instead, that is finished too.) Click Finish to close Setup.</String>
+  <String Id="LaunchApp">Start Houndbit now</String>
+  <String Id="ExitDialogTitle">{\WixUI_Font_Bigger}Houndbit Setup is finished</String>
+  <String Id="ExitDialogDescription">All done. Houndbit is installed and ready to use, and you can open it any time from the Start menu. (If you chose to repair or remove it instead, that is finished too.) Click Finish to close Setup.</String>
 </WixLocalization>

@@ -286,7 +286,7 @@ async fn decision_approve(State(st): St, UrlPath(id): UrlPath<String>) -> Respon
     blocking(move || {
         let sid: String = st.engine.db.conn().query_row("SELECT session_id FROM rt_decisions WHERE id=?1", [&id], |r| r.get(0))?;
         let rt = runtime_for_session(&st, &sid)?;
-        let approval = rt.approve(&id, "local user (TrailFox UI)")?;
+        let approval = rt.approve(&id, "local user (Houndbit UI)")?;
         Ok(json!({"approval_id": approval, "status": rt.run(&sid)?}))
     })
     .await

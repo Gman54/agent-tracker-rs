@@ -1,6 +1,6 @@
 # Known limitations
 
-TrailFox is honest about what it can and can't tell you. Please read this before relying on a verdict.
+Houndbit is honest about what it can and can't tell you. Please read this before relying on a verdict.
 
 ## 1. Connectors were not tested against live agents in this environment
 The Claude Code, Cursor and GitHub Copilot (VS Code) connectors were written against their **published hook documentation**
@@ -17,9 +17,9 @@ Cursor's hook API is newer and less stable. Event coverage is partial (see the c
 "What I can see from this agent" list) and the format may change between Cursor releases. Treat Cursor results
 as best-effort; file checks still work regardless.
 
-VS Code agent hooks (used by the Copilot connector) are a **Preview** feature. TrailFox never
+VS Code agent hooks (used by the Copilot connector) are a **Preview** feature. Houndbit never
 registers `preToolUse` / `permissionRequest` (they can deny tool calls), so "tool started" isn't
-captured. Workspace trust or organization policy can switch hooks off without TrailFox knowing.
+captured. Workspace trust or organization policy can switch hooks off without Houndbit knowing.
 Payloads missing `sessionId`/`timestamp` are shown as **Unsupported version**.
 
 Codex is **not supported yet** (planned post-release); use manual mode.
@@ -31,12 +31,12 @@ access) can rewrite the entire database **and** recompute the chain. The chain i
 against casual edits only; it is not tamper-*proof*.
 
 ## 4. Observational only — no enforcement
-TrailFox never blocks, pauses or undoes an agent's actions. Hooks always exit successfully so
+Houndbit never blocks, pauses or undoes an agent's actions. Hooks always exit successfully so
 they can't break your agent. It records and verifies after the fact.
 
 ## 5. No restore — a manifest is not a backup
 Snapshots store file **fingerprints** (SHA-256, size, timestamps), not file contents. If an agent
-deletes or damages a file, TrailFox can tell you *that* it happened, but can't bring it back.
+deletes or damages a file, Houndbit can tell you *that* it happened, but can't bring it back.
 Keep real backups / version control.
 
 ## 6. Snapshot limits
@@ -73,7 +73,7 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
   Actions; they were not built or run in the development sandbox.
 - Event attribution to a task uses the agent's working directory; two tasks running in *different*
   folders are told apart (tested), but two tasks in the same folder at once can't be.
-- Changes made while TrailFox was closed aren't seen live; the Live Task screen lists this as
+- Changes made while Houndbit was closed aren't seen live; the Live Task screen lists this as
   a gap, and the final snapshot comparison still catches them.
 - The UI is English only.
 
@@ -104,7 +104,7 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
   saved sign-in: it never asks for a password in a terminal, but on Windows Git Credential Manager
   may open its own sign-in window for an HTTPS remote. It stops after 2 minutes. It was tested only
   with local bare remotes, not against github.com or on Windows. "Last checked" only counts checks
-  made from TrailFox, not fetches you run yourself.
+  made from Houndbit, not fetches you run yourself.
   **Check all projects** runs the same check for every project, up to 4 at a time, each with its
   own 2-minute limit, so with many slow remotes it can take several minutes; the screen waits
   for all of them before showing the summary. If several projects use HTTPS remotes that need
@@ -113,7 +113,7 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
 - "Agent ran git push" is based on the agent's own tool report. Whether it succeeded comes from the
   exit status the agent reported.
 - Binary files and files over 512 KB are compared by Git blob id only, not line by line.
-- The GitHub token is stored in TrailFox's local settings database without extra encryption.
+- The GitHub token is stored in Houndbit's local settings database without extra encryption.
   Use a fine-grained, read-only token limited to the projects you pick.
 - GitHub links were tested against a local mock server only, not the real GitHub API. Nothing in
   this feature has been tested with a live agent or on Windows yet.
@@ -126,4 +126,4 @@ activation, revocation or machine binding happens yet. `AGENTTRACKER_API_KEY` an
 - Results saved by older versions are re-read with these rules when you open them. Only the wording and status change; files aren't checked again.
 - The Conversation section shows Claude's **written explanations**: the text it wrote in the conversation. That is its stated justification, not verified reasoning, and it isn't hidden thinking. Thinking entries appear only when Claude Code saved them.
 - "Claude's written note before this action" is linked by order: it's the text Claude wrote since your last message or the last tool result. Actions Claude starts together share the same note. Each action is linked to its tool-call id, which matches the start/finish records the hooks sent.
-- A structured rationale captured *before* each action (linked to the instruction and the tool-call id) is only enforced in the Agent Runtime. For Claude Code, TrailFox can only read what Claude chose to write.
+- A structured rationale captured *before* each action (linked to the instruction and the tool-call id) is only enforced in the Agent Runtime. For Claude Code, Houndbit can only read what Claude chose to write.

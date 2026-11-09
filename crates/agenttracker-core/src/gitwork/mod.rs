@@ -287,7 +287,7 @@ impl<'a> RepoStore<'a> {
         }
     }
 
-    /// Forgets the repository in TrailFox only; the folder itself is untouched.
+    /// Forgets the repository in Houndbit only; the folder itself is untouched.
     pub fn remove(&self, id: &str) -> Result<()> {
         let n = self.db.conn().execute("DELETE FROM git_repos WHERE id=?1", [id])?;
         if n == 0 {

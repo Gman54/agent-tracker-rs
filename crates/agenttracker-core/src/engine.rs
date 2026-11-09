@@ -20,7 +20,7 @@ pub struct Engine {
     pub templates: TemplateStore,
     pub registry: VerifierRegistry,
     pub snapshotter: Snapshotter,
-    /// TrailFox's own files (DB, queue, evidence) — never snapshotted.
+    /// Houndbit's own files (DB, queue, evidence) — never snapshotted.
     pub exclude_paths: Vec<PathBuf>,
     observers: Mutex<HashMap<String, Vec<ObserverHandle>>>,
     hints: Mutex<HashMap<String, Vec<ChangeHint>>>,
@@ -127,12 +127,12 @@ impl Engine {
     }
 
     /// After an app restart: restart live watching for tasks that were running and record the
-    /// gap (changes made while TrailFox was closed are only seen by the final snapshot).
+    /// gap (changes made while Houndbit was closed are only seen by the final snapshot).
     pub fn resume_running(&self) -> Result<Vec<String>> {
         let mut resumed = vec![];
         for t in self.tasks.list()? {
             if t.lifecycle == Lifecycle::Running && !self.observers.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&t.id) {
-                self.add_gap(&t.id, "TrailFox was restarted while this task was running. Live watching resumed; changes made while it was closed will still be found by the final snapshot comparison.".into());
+                self.add_gap(&t.id, "Houndbit was restarted while this task was running. Live watching resumed; changes made while it was closed will still be found by the final snapshot comparison.".into());
                 self.start_observers(&t);
                 resumed.push(t.id.clone());
             }

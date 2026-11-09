@@ -242,7 +242,7 @@ async fn handle(State(r): State<Arc<Relay>>, req: Request) -> Response {
         // with a reset and the client can lose the 403 we already sent (it saw a connection error
         // instead). Bounded in size and time so a refused client can't hold the connection open.
         let _ = tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(req.into_body(), 1 << 20)).await;
-        let mut resp = err_json(403, "The TrailFox chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
+        let mut resp = err_json(403, "The Houndbit chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
         resp.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
         return resp;
     }
@@ -302,7 +302,7 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
         Ok(x) => x,
         Err(ureq::Error::Status(_, x)) => x,
         Err(ureq::Error::Transport(t)) => {
-            let msg = format!("TrailFox could not reach your model server at {}. Check that LM Studio's server (or Ollama) is running. ({t})", r.upstream);
+            let msg = format!("Houndbit could not reach your model server at {}. Check that LM Studio's server (or Ollama) is running. ({t})", r.upstream);
             let _ = head_tx.send(Err(msg.clone()));
             if let Some(api) = job.api {
                 let call = Call { api, path: &job.path, client: job.client.clone(), request: &job.body, response: &[], content_type: None, status: None, error: Some(msg), started };

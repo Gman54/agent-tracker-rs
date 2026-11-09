@@ -13,13 +13,13 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName",      "TrailFox"
-            VALUE "FileDescription",  "TrailFox hook helper (forwards AI agent events to TrailFox on this PC)"
+            VALUE "CompanyName",      "Houndbit"
+            VALUE "FileDescription",  "Houndbit hook helper (forwards AI agent events to Houndbit on this PC)"
             VALUE "FileVersion",      "0.1.0"
             VALUE "InternalName",     "agenttracker-hook"
-            VALUE "LegalCopyright",   "TrailFox"
+            VALUE "LegalCopyright",   "Houndbit"
             VALUE "OriginalFilename", "agenttracker-hook.exe"
-            VALUE "ProductName",      "TrailFox"
+            VALUE "ProductName",      "Houndbit"
             VALUE "ProductVersion",   "0.1.0"
         END
     END

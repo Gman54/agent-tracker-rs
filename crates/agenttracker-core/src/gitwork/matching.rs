@@ -411,13 +411,13 @@ fn decision_record(db: &Db, e: &EditRow) -> DecisionRecord {
 
 fn evidence_json(e: &EditRow) -> (Value, Value) {
     let before_label = match e.before_source.as_str() {
-        "pre_hook_snapshot" => "Read by TrailFox just before the agent's tool ran",
+        "pre_hook_snapshot" => "Read by Houndbit just before the agent's tool ran",
         "agent_report" => "The original file as the agent reported it",
         _ => "Not available",
     };
     (
         serde_json::json!({"source": e.before_source, "label": before_label, "blob": e.before_blob, "head_at_edit": e.head_at_edit, "has_text": e.before_file.is_some()}),
-        serde_json::json!({"blob": e.after_blob, "label": if e.after_blob.is_some() { "Read by TrailFox right after the edit" } else { "The file couldn't be read after the edit" }, "has_text": e.after_file.is_some()}),
+        serde_json::json!({"blob": e.after_blob, "label": if e.after_blob.is_some() { "Read by Houndbit right after the edit" } else { "The file couldn't be read after the edit" }, "has_text": e.after_file.is_some()}),
     )
 }
 
@@ -575,7 +575,7 @@ fn match_edit(db: &Db, root: &Path, head: Option<&str>, c: &CommitInfo, e: &Edit
     // Exact: the committed file is byte-for-byte what the agent left behind.
     if latest_on_file && e.after_blob.is_some() && e.after_blob == f.blob {
         set(&mut m, "shipped_as_is", "high");
-        m.basis.push(format!("The file in this commit has the same Git blob id ({}) as the file TrailFox read right after the agent's edit.", &f.blob.clone().unwrap_or_default()[..12.min(f.blob.as_deref().unwrap_or("").len())]));
+        m.basis.push(format!("The file in this commit has the same Git blob id ({}) as the file Houndbit read right after the agent's edit.", &f.blob.clone().unwrap_or_default()[..12.min(f.blob.as_deref().unwrap_or("").len())]));
         m.agent_lines_shipped = added;
         return Some(m);
     }
@@ -838,9 +838,9 @@ fn edit_fact(edits: &[EditMatch], s: &Summary, listening: bool) -> Fact {
         return if edits.iter().any(|m| m.outcome == "unknown") {
             Fact { status: "unknown", label: "An agent touched files in this commit, but we can't tell what of its work shipped.".into(), evidence: edits.iter().flat_map(|m| m.basis.clone()).collect(), detail: Value::Null }
         } else if listening {
-            Fact { status: "not_observed", label: "TrailFox was listening in this repository and saw no agent edits that ended up in this commit.".into(), evidence, detail: Value::Null }
+            Fact { status: "not_observed", label: "Houndbit was listening in this repository and saw no agent edits that ended up in this commit.".into(), evidence, detail: Value::Null }
         } else {
-            Fact { status: "unknown", label: "We don't know. TrailFox has no agent activity recorded for this repository around that time.".into(), evidence, detail: Value::Null }
+            Fact { status: "unknown", label: "We don't know. Houndbit has no agent activity recorded for this repository around that time.".into(), evidence, detail: Value::Null }
         };
     }
     let all_high = shipped.iter().all(|m| m.confidence == "high");
@@ -875,7 +875,7 @@ fn authorship_fact(c: &CommitInfo, cmds: &[CmdFact], listening: bool) -> Fact {
         return Fact { status: "likely", label: "The agent probably ran this commit.".into(), evidence, detail: serde_json::json!({"agent_ran_commit": null, "git": detail}) };
     }
     if listening {
-        evidence.push("TrailFox saw agent activity in this repository but no agent git commit that produced this commit.".into());
+        evidence.push("Houndbit saw agent activity in this repository but no agent git commit that produced this commit.".into());
         Fact { status: "not_observed", label: format!("No agent commit was seen. {} (per Git) or another tool most likely committed it.", c.committer_name), evidence, detail: serde_json::json!({"agent_ran_commit": false, "git": detail}) }
     } else {
         evidence.push("No agent activity was recorded for this repository around that time, so we can't say who ran the commit.".into());
@@ -898,7 +898,7 @@ fn push_fact(root: &Path, c: &CommitInfo, cmds: &[CmdFact], listening_after: boo
         };
     }
     if listening_after {
-        Fact { status: "not_observed", label: "No agent git push was seen for this commit. If it was pushed, a person or another tool did it.".into(), evidence: vec!["TrailFox saw agent activity in this repository after the commit, but no git push command.".into()], detail: Value::Null }
+        Fact { status: "not_observed", label: "No agent git push was seen for this commit. If it was pushed, a person or another tool did it.".into(), evidence: vec!["Houndbit saw agent activity in this repository after the commit, but no git push command.".into()], detail: Value::Null }
     } else {
         Fact { status: "unknown", label: "We don't know whether an agent pushed this.".into(), evidence: vec!["No agent activity was recorded for this repository after the commit.".into()], detail: Value::Null }
     }

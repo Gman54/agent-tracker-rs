@@ -1,6 +1,6 @@
 [package]
 name = "agenttracker"
-description = "TrailFox - checks whether AI agents really did what they reported"
+description = "Houndbit - checks whether AI agents really did what they reported"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

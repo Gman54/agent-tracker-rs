@@ -104,10 +104,10 @@ impl AppState {
         CopilotConnector { state_dir: self.agenttracker_home.join("connectors"), ..CopilotConnector::for_user() }
     }
 
-    /// One-time tidy-ups after updating from an AgentTracker install to TrailFox. The new installer
-    /// lives in a new folder (%LOCALAPPDATA%\TrailFox) and removes the old one, so:
+    /// One-time tidy-ups after updating from an older install (AgentTracker or TrailFox) to Houndbit. The new installer
+    /// lives in a new folder (%LOCALAPPDATA%\Houndbit) and removes the old one, so:
     /// - agent hooks that still point at the old, now-missing hook program are re-pointed at the
-    ///   one next to this app (only TrailFox's own entries are touched, as with "Connect");
+    ///   one next to this app (only Houndbit's own entries are touched, as with "Connect");
     /// - if "Start with Windows" is on, its Run entry is rewritten for this app's location.
     /// Safe to call on every start: it does nothing when everything is already in place.
     pub fn after_update_fixups(&self) -> Vec<String> {
@@ -189,7 +189,7 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
     }
     if path.starts_with("/api/ui/") {
         if !st.has_session(req.headers()) {
-            return err(401, "Open TrailFox from its window or tray icon");
+            return err(401, "Open Houndbit from its window or tray icon");
         }
         if req.method() != Method::GET && req.method() != Method::HEAD && hdr(req.headers(), CSRF_HEADER) != Some(CSRF_VALUE) {
             return err(403, "Missing CSRF header");
@@ -282,8 +282,8 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
         "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
-        "trailfox-logo.png" => (include_bytes!("../../../static/trailfox-logo.png"), "image/png"),
-        "trailfox-mark.png" => (include_bytes!("../../../static/trailfox-mark.png"), "image/png"),
+        "houndbit-logo.png" => (include_bytes!("../../../static/houndbit-logo.png"), "image/png"),
+        "houndbit-mark.png" => (include_bytes!("../../../static/houndbit-mark.png"), "image/png"),
         _ => return None,
     })
 }
@@ -310,7 +310,7 @@ async fn launch(State(st): State<Arc<AppState>>, Query(q): Query<HashMap<String,
         valid
     };
     if !valid {
-        return (StatusCode::FORBIDDEN, "This link has expired. Open TrailFox from its window or tray icon.").into_response();
+        return (StatusCode::FORBIDDEN, "This link has expired. Open Houndbit from its window or tray icon.").into_response();
     }
     let sid = security::token_urlsafe(32);
     st.ui_sessions.lock().unwrap_or_else(|p| p.into_inner()).insert(sid.clone());
@@ -502,7 +502,7 @@ async fn connector_action(State(st): State<Arc<AppState>>, UrlPath((name, action
     let s = st.clone();
     let r = blocking(move || -> crate::Result<Value> {
         let hook = s.hook_binary.clone();
-        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The TrailFox hook program wasn't found next to the app. Reinstall TrailFox.".into()));
+        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The Houndbit hook program wasn't found next to the app. Reinstall Houndbit.".into()));
         let mut v = match (name.as_str(), action.as_str()) {
             ("claude_code", "install") => serde_json::to_value(s.claude().install(&need_hook()?)?)?,
             ("claude_code", "uninstall") => serde_json::to_value(s.claude().uninstall()?)?,
@@ -687,9 +687,11 @@ fn apply_autostart(enabled: bool) -> std::result::Result<(), String> {
     {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        // Before the rename the entry was called "AgentTracker" and pointed at the old install
-        // folder. Always clear that one so Windows never starts a stale copy.
-        let _ = crate::connectors::hidden_command("reg").args(["delete", key, "/v", "AgentTracker", "/f"]).output();
+        // Before the renames the entry was called "AgentTracker" and then "TrailFox", pointing at
+        // the old install folders. Always clear those so Windows never starts a stale copy.
+        for old in ["AgentTracker", "TrailFox"] {
+            let _ = crate::connectors::hidden_command("reg").args(["delete", key, "/v", old, "/f"]).output();
+        }
         let mut cmd = crate::connectors::hidden_command("reg");
         if enabled {
             cmd.args(["add", key, "/v", APP_NAME, "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
@@ -835,7 +837,7 @@ async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath
     };
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"trailfox-report-{stamp}.{ext}\""))
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"houndbit-report-{stamp}.{ext}\""))
         .body(Body::from(body))
         .unwrap()
 }

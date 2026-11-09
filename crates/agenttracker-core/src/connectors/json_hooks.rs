@@ -38,17 +38,17 @@ pub(crate) fn owned_events<F: HooksFormat>(fmt: &F, cfg: &Value) -> Vec<(String,
     out
 }
 
-/// Pure merge: computes the config TrailFox would write, without touching disk.
+/// Pure merge: computes the config Houndbit would write, without touching disk.
 /// Returns (merged config, added events, updated events).
 pub(crate) fn merge<F: HooksFormat>(fmt: &F, connector: &str, existing: Option<&Value>, config_path: &Path, events: &[&str], hook_binary: &Path) -> Result<(Value, Vec<String>, Vec<String>)> {
     let mut cfg = existing.cloned().unwrap_or_else(|| Value::Object(Map::new()));
     let Some(root) = cfg.as_object_mut() else {
-        return Err(CoreError::Invalid(format!("{} doesn't contain a JSON object; TrailFox won't modify it", config_path.display())));
+        return Err(CoreError::Invalid(format!("{} doesn't contain a JSON object; Houndbit won't modify it", config_path.display())));
     };
     fmt.ensure_root(root);
     let hooks = root.entry("hooks").or_insert_with(|| Value::Object(Map::new()));
     let Some(hooks) = hooks.as_object_mut() else {
-        return Err(CoreError::Invalid("\"hooks\" in the config is not an object; TrailFox won't modify it".into()));
+        return Err(CoreError::Invalid("\"hooks\" in the config is not an object; Houndbit won't modify it".into()));
     };
     let (mut added, mut updated) = (vec![], vec![]);
     for ev in events {

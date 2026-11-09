@@ -45,7 +45,7 @@ impl GithubClient {
 
     /// GET returning (status, json). Network failures map to Err with a plain message.
     fn get(&self, path: &str) -> Result<(u16, Value), String> {
-        let mut req = self.agent.get(&format!("{}{path}", self.api_base)).set("Accept", "application/vnd.github+json").set("User-Agent", "TrailFox").set("X-GitHub-Api-Version", "2022-11-28");
+        let mut req = self.agent.get(&format!("{}{path}", self.api_base)).set("Accept", "application/vnd.github+json").set("User-Agent", "Houndbit").set("X-GitHub-Api-Version", "2022-11-28");
         if let Some(t) = &self.token {
             req = req.set("Authorization", &format!("Bearer {t}"));
         }

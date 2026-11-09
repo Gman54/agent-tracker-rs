@@ -108,7 +108,7 @@ pub struct Entry {
     pub tool: Option<String>,
     pub is_error: bool,
     /// Claude Code's id for the tool call (on actions and their results). Hooks send the same id,
-    /// so an action here can be matched to the start/finish records TrailFox captured.
+    /// so an action here can be matched to the start/finish records Houndbit captured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
     /// Actions only: your latest request before this action (shortened).
@@ -430,7 +430,7 @@ pub fn for_task(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEve
         json!({"status": status, "message": message, "path": path, "session_id": session_id, "entries": [], "skipped_lines": 0, "total_lines": 0, "windowed": false, "capped": false, "partial_read": false})
     };
     if task.connector == crate::connectors::cursor::NAME && !claude_events {
-        return base("not_claude", "Cursor doesn't share its conversation with TrailFox, so only what the agent did is shown, not what it wrote.", None);
+        return base("not_claude", "Cursor doesn't share its conversation with Houndbit, so only what the agent did is shown, not what it wrote.", None);
     }
     if task.connector != crate::connectors::claude_code::NAME && !claude_events {
         return base("not_claude", "Conversations show up for Claude Code tasks. The regular Claude chat doesn't share its conversation.", None);

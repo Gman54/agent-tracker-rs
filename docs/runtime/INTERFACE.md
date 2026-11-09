@@ -10,7 +10,7 @@ The runtime records:
 - the application-level request it sent to the model, including the context items it listed;
 - the model's structured decision proposal, including its **stated rationale**;
 - validation attempts, the accepted decision, and the approval if one was needed;
-- the action, the tool-reported result, and file changes that TrailFox observed independently.
+- the action, the tool-reported result, and file changes that Houndbit observed independently.
 
 It does **not** record internal model computation, provider-internal chat templates or hidden
 prompts, or tokenisation. Nothing in these records proves which input caused an action. A citation
@@ -35,7 +35,7 @@ confinement and protected paths itself; it does not trust the validator.
 
 | Item | Purpose |
 |---|---|
-| `runtime::Runtime::new(db, provider, cfg, vault)` | Build a runtime over the shared TrailFox `Db` |
+| `runtime::Runtime::new(db, provider, cfg, vault)` | Build a runtime over the shared Houndbit `Db` |
 | `Runtime::start_task(&TaskSpec) -> StartOutcome` | Creates task, session and context items. `idempotency_key` returns the existing session instead of starting a duplicate |
 | `Runtime::run(session_id) -> SessionStatus` | Runs steps until done, paused (needs approval/clarification, limits, invalid proposals) or failed |
 | `Runtime::approve(decision_id, who)` | Records an approval for the exact `args_sha256`. Different arguments need a new decision |
@@ -139,7 +139,7 @@ All routes sit behind the existing core guards: Host check, launch-token cookie 
 | POST | `/api/ui/runtime/demo/a`, `/demo/b` | `{"mode":"fixture"}` (default) or `{"mode":"live"}` |
 | POST | `/api/ui/runtime/replay/delete`, `/recover` | Delete replay captures; reconcile interrupted actions |
 
-## Relationship to existing TrailFox features
+## Relationship to existing Houndbit features
 
 - **Reused:** the `Db` and migration runner, redaction (`tracker_common::redaction`), the hash chain,
   the folder `Snapshotter` (before/after hashing), the loopback server guards and the UI shell.
