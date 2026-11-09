@@ -51,7 +51,9 @@ fn fake_server() -> u16 {
 }
 
 fn rows(db: &Db) -> Vec<Value> {
-    store::rows(&db.conn(), "SELECT * FROM relay_calls ORDER BY started_at", &[]).unwrap()
+    // Two calls can start in the same millisecond and are recorded in the background, so break
+    // ties by the plain (not streamed) call first; the tests below send it first.
+    store::rows(&db.conn(), "SELECT * FROM relay_calls ORDER BY started_at, streamed", &[]).unwrap()
 }
 
 fn wait_rows(db: &Db, n: usize) -> Vec<Value> {
@@ -61,6 +63,32 @@ fn wait_rows(db: &Db, n: usize) -> Vec<Value> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     rows(db)
+}
+
+/// Sends one POST over a plain TCP socket with exactly one Host header and returns everything
+/// that came back (status line, headers and body), or a description of the socket error.
+fn raw_post(port: u16, host: &str, body: &str) -> String {
+    use std::net::TcpStream;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect to relay");
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    s.set_nodelay(true).unwrap();
+    let head = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    s.write_all(head.as_bytes()).expect("send headers");
+    s.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let sent_body = s.write_all(body.as_bytes()).and_then(|_| s.flush());
+    let mut out = Vec::new();
+    let read = s.read_to_end(&mut out);
+    let text = String::from_utf8_lossy(&out).into_owned();
+    match (sent_body, read) {
+        (_, Ok(_)) if !text.is_empty() => text,
+        (Err(e), _) => format!("<could not send the body: {e}; got so far: {text:?}>"),
+        (_, Err(e)) => format!("<read failed: {e} ({:?}); got so far: {text:?}>", e.kind()),
+        (_, Ok(_)) => "<connection closed with no reply>".into(),
+    }
 }
 
 #[test]
@@ -125,9 +153,18 @@ fn relay_passes_through_unchanged_and_records_calls() {
     assert!(chain.contains(a["request_sha256"].as_str().unwrap()));
     assert!(!chain.contains("Paris") && !chain.contains("haiku"));
 
-    // Host check: a request addressed to another host name is refused.
-    let refused = ureq::post(&format!("{base}/v1/chat/completions")).set("Host", "evil.example").send_json(req.clone());
-    assert!(matches!(refused, Err(ureq::Error::Status(403, _))));
+    // Host check, sent as raw HTTP/1.1 so exactly one Host header goes out and nothing depends on
+    // how an HTTP client library treats an overridden Host. The body follows the headers a moment
+    // later, the way real clients often send it, so the refusal must not leave it unread.
+    let body = req.to_string();
+    let refused = raw_post(port, "evil.example", &body);
+    assert!(refused.starts_with("HTTP/1.1 403"), "a request addressed to another host name must get 403; got: {refused:?}");
+    assert!(refused.contains("only accepts requests addressed to 127.0.0.1 or localhost"), "got: {refused:?}");
+    for ok_host in [format!("localhost:{port}"), format!("127.0.0.1:{port}")] {
+        let accepted = raw_post(port, &ok_host, &body);
+        assert!(accepted.starts_with("HTTP/1.1 200"), "Host {ok_host} must be accepted; got: {accepted:?}");
+    }
+    assert_eq!(wait_rows(&db, 4).len(), 4, "the two accepted raw calls were recorded, the refused one was not");
 
     relay::stop();
     assert_eq!(relay::running_port(), None);

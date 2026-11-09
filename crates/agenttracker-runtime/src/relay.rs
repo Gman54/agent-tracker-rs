@@ -237,7 +237,14 @@ async fn handle(State(r): State<Arc<Relay>>, req: Request) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
     let host_name = if host.starts_with('[') { host.trim_start_matches('[').split(']').next().unwrap_or("").to_string() } else { host.split(':').next().unwrap_or("").to_string() };
     if !is_loopback(&host_name) {
-        return err_json(403, "The TrailFox chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
+        // Read (and throw away) the request body before refusing. Replying while the body is still
+        // on its way makes the server close a socket that then receives data; Windows answers that
+        // with a reset and the client can lose the 403 we already sent (it saw a connection error
+        // instead). Bounded in size and time so a refused client can't hold the connection open.
+        let _ = tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(req.into_body(), 1 << 20)).await;
+        let mut resp = err_json(403, "The TrailFox chat recorder only accepts requests addressed to 127.0.0.1 or localhost.");
+        resp.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));
+        return resp;
     }
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
