@@ -107,6 +107,40 @@ pub fn event_label(t: EventType) -> &'static str {
     }
 }
 
+/// One line for an event in the report list. A Cursor tool step that failed says so, with the
+/// reason Cursor gave, instead of looking like a normal finished step.
+pub fn event_line(e: &AgentEvent) -> String {
+    let hook = e.raw_source.as_ref().and_then(|r| r.get("hook_event")).and_then(Value::as_str);
+    if e.event_type == EventType::ToolFinished && hook == Some("postToolUseFailure") {
+        let why = e.payload_redacted.pointer("/data/error_message").and_then(Value::as_str).map(str::trim).filter(|w| !w.is_empty());
+        return match why {
+            Some(w) => {
+                let w: String = w.chars().take(160).collect();
+                format!("Agent tried a tool and it didn't work: {w}")
+            }
+            None => "Agent tried a tool and it didn't work".to_string(),
+        };
+    }
+    event_label(e.event_type).to_string()
+}
+
+/// Turns a millisecond timestamp into a readable date and time, like "2026-11-09 14:47 UTC".
+pub fn friendly_time(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since 1970-01-01 to a calendar date (Howard Hinnant's civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
+}
+
 /// Friendly check name (kept in step with `CHECKS` in static/app.js).
 pub fn check_name(t: &str) -> String {
     match t {
@@ -308,7 +342,9 @@ pub fn at_a_glance(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         format!("{}, {} without both a start and a finish record", plural(calls, "tool call", "tool calls"), calls - matched)
     };
 
-    let explanation = if conversation.get("status").and_then(Value::as_str) != Some("ok") {
+    let explanation = if conversation.get("status").and_then(Value::as_str) != Some("ok") && task.connector == crate::connectors::cursor::NAME {
+        "Cursor doesn't share what the agent wrote, so no written explanation was captured.".to_string()
+    } else if conversation.get("status").and_then(Value::as_str) != Some("ok") {
         "No conversation record was available, so no written explanation was captured.".to_string()
     } else {
         let entries = conversation.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -473,7 +509,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
     let opt_html = if opt.is_empty() { String::new() } else { format!("<h2>Optional checks</h2>{}", opt.iter().map(|r| card(r)).collect::<String>()) };
     let ev_html: String = events
         .iter()
-        .map(|e| format!("<li>{} <span class=\"m\">{}</span></li>", esc(event_label(e.event_type)), esc(&e.connector_name)))
+        .map(|e| format!("<li>{} <span class=\"m\">{}</span></li>", esc(&event_line(e)), esc(&e.connector_name)))
         .collect();
     let folders: String = task.folders.iter().map(|f| format!("<li>{} <span class=\"m\">({})</span></li>", esc(&f.folder_path), f.role.as_str())).collect();
     format!(
@@ -494,7 +530,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         title = esc(&display_title(task)),
         instr = esc(&task.instruction),
         ver = run.definition_version,
-        when = run.finished_at.unwrap_or(run.started_at),
+        when = friendly_time(run.finished_at.unwrap_or(run.started_at)),
         ev = if ev_html.is_empty() { "<li class=\"m\">No agent activity was recorded (file checks only).</li>".to_string() } else { ev_html },
         req = req_html,
         opt = opt_html,
@@ -676,5 +712,17 @@ mod tests {
         let html = conversation_html(&conv);
         assert!(html.contains("Claude's written note before this action:"));
         assert!(html.contains("No note written before this action."));
+    }
+}
+
+#[cfg(test)]
+mod time_and_event_tests {
+    use super::*;
+
+    #[test]
+    fn friendly_time_reads_like_a_date() {
+        assert_eq!(friendly_time(0), "1970-01-01 00:00 UTC");
+        assert_eq!(friendly_time(1_794_235_666_264), "2026-11-09 14:47 UTC");
+        assert_eq!(friendly_time(951_782_400_000), "2000-02-29 00:00 UTC");
     }
 }
