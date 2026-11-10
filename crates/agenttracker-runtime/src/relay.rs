@@ -80,9 +80,22 @@ pub fn save_config(db: &Db, c: &RelayConfig) -> Result<()> {
 }
 
 /// `http://127.0.0.1:1234/v1/` -> `http://127.0.0.1:1234` (the chat app's path is appended as-is).
+/// Also forgives the common ways people copy the address: no `http://` (`localhost:1234`), and the
+/// "listen everywhere" addresses LM Studio / Ollama print (`0.0.0.0`, `[::]`), which mean this
+/// computer and are reached through 127.0.0.1.
 pub fn upstream_root(u: &str) -> String {
-    let b = u.trim().trim_end_matches('/');
-    b.strip_suffix("/v1").unwrap_or(b).trim_end_matches('/').to_string()
+    let t = u.trim();
+    let with_scheme = if t.is_empty() || t.contains("://") { t.to_string() } else { format!("http://{t}") };
+    let b = with_scheme.trim_end_matches('/');
+    let b = b.strip_suffix("/v1").unwrap_or(b).trim_end_matches('/');
+    for any in ["http://0.0.0.0", "http://[::]"] {
+        if let Some(rest) = b.strip_prefix(any) {
+            if rest.is_empty() || rest.starts_with(':') || rest.starts_with('/') {
+                return format!("http://127.0.0.1{rest}");
+            }
+        }
+    }
+    b.to_string()
 }
 
 fn host_port(url: &str) -> Option<(String, u16)> {
@@ -99,8 +112,26 @@ fn host_port(url: &str) -> Option<(String, u16)> {
     }
 }
 
+/// True when `h` names this computer: localhost, any 127.x address, ::1, or an IP address that
+/// belongs to one of this computer's own network adapters (LM Studio shows e.g. 192.168.1.20
+/// when "serve on local network" is on). Host *names* other than localhost are still refused,
+/// which keeps the DNS-rebinding guard.
+pub fn is_this_computer(h: &str) -> bool {
+    let h = h.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let h = h.trim_end_matches('.');
+    if h == "localhost" {
+        return true;
+    }
+    let Ok(ip) = h.parse::<std::net::IpAddr>() else { return false };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    // Binding succeeds only for addresses owned by this machine.
+    std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
 fn is_loopback(h: &str) -> bool {
-    matches!(h.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
+    is_this_computer(h)
 }
 
 /// Port 0 means "any free port" (used by tests).
@@ -109,11 +140,14 @@ pub fn validate(c: &RelayConfig) -> Result<()> {
         return Err(RtError::Invalid("Pick a port number from 1024 to 65535. 1235 is a good choice.".into()));
     }
     let up = upstream_root(&c.upstream);
+    if up.starts_with("https://") {
+        return Err(RtError::Invalid(format!("The model server address \"{}\" starts with https://. LM Studio and Ollama use plain http://, for example http://127.0.0.1:1234.", c.upstream.trim())));
+    }
     let Some((host, port)) = host_port(&up) else {
-        return Err(RtError::Invalid("The model server address should look like http://127.0.0.1:1234 (LM Studio) or http://127.0.0.1:11434 (Ollama).".into()));
+        return Err(RtError::Invalid(format!("Houndbit couldn't read the model server address \"{}\". It should look like http://127.0.0.1:1234 (LM Studio) or http://127.0.0.1:11434 (Ollama).", c.upstream.trim())));
     };
     if !is_loopback(&host) {
-        return Err(RtError::Invalid("The recorder only forwards to a model server on this computer (127.0.0.1 or localhost).".into()));
+        return Err(RtError::Invalid(format!("The model server address \"{}\" doesn't point at this computer, so the recorder won't use it. Try http://127.0.0.1:1234 for LM Studio or http://127.0.0.1:11434 for Ollama.", c.upstream.trim())));
     }
     if c.port != 0 && port == c.port {
         return Err(RtError::Invalid("The recorder's port and the model server's port are the same. Use a different port for the recorder (for example 1235).".into()));

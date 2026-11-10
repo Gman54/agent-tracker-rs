@@ -198,6 +198,18 @@ fn settings_are_checked() {
     assert!(relay::validate(&RelayConfig { port: 1234, ..ok.clone() }).is_err(), "same port as the server refused");
     assert!(relay::validate(&RelayConfig { port: 80, ..ok.clone() }).is_err());
     assert_eq!(relay::upstream_root("http://127.0.0.1:1234/v1/"), "http://127.0.0.1:1234");
+    // Addresses people copy from LM Studio / Ollama are accepted and pointed at this computer.
+    assert_eq!(relay::upstream_root("localhost:1234"), "http://localhost:1234");
+    assert_eq!(relay::upstream_root(" http://0.0.0.0:1234/v1 "), "http://127.0.0.1:1234");
+    assert_eq!(relay::upstream_root("http://[::]:11434"), "http://127.0.0.1:11434");
+    assert_eq!(relay::upstream_root("http://0.0.0.0.evil.example:1"), "http://0.0.0.0.evil.example:1");
+    for up in ["localhost:1234", "http://0.0.0.0:1234", "http://LOCALHOST:1234/v1/", "http://127.0.0.2:1234", "http://[::1]:1234"] {
+        let c = RelayConfig { upstream: relay::upstream_root(up), ..ok.clone() };
+        assert!(relay::validate(&c).is_ok(), "{up} should be accepted");
+    }
+    assert!(relay::validate(&RelayConfig { upstream: "https://127.0.0.1:1234".into(), ..ok.clone() }).is_err());
+    assert!(relay::validate(&RelayConfig { upstream: "http://lmstudio.example:1234".into(), ..ok.clone() }).is_err());
+    assert!(relay::is_this_computer("localhost.") && relay::is_this_computer("[::1]") && !relay::is_this_computer("8.8.8.8"));
 }
 
 #[test]
