@@ -328,3 +328,33 @@ fn normal_text_is_not_flagged() {
     assert_eq!(c["latest_user"], "How are you?");
     assert_eq!(c["earlier_messages"].as_array().unwrap().len(), 3);
 }
+
+/// Saves one chat call the way the relay would.
+fn record_call(db: &Db, messages: Value, reply: &str) {
+    let req = json!({"model": "qwen/qwen3.8-27b", "messages": messages}).to_string();
+    let resp = json!({"choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]}).to_string();
+    relay::record(db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", client: None, request: req.as_bytes(), response: resp.as_bytes(),
+        content_type: Some("application/json".into()), status: Some(200), error: None, started: 1 }).unwrap();
+}
+
+#[test]
+fn conversation_list_counts_typed_tool_requests() {
+    let db = Db::open_in_memory().unwrap();
+    let typed = "```json\n{\"name\": \"search\", \"arguments\": {\"query\": \"crime rate\"}}\n```";
+    // Affected chat: the first reply is typed (flagged in the reply), and the second call re-sends
+    // it in the history (flagged there), so 2 calls.
+    let sys = json!({"role": "system", "content": "You can use tools."});
+    let ask = json!({"role": "user", "content": "Find the crime rate"});
+    record_call(&db, json!([sys, ask]), typed);
+    record_call(&db, json!([sys, ask, {"role": "assistant", "content": typed}, {"role": "user", "content": "Well?"}]), "Sorry about that.");
+    // Normal chat, including JSON that has a name but no arguments.
+    record_call(&db, json!([{"role": "user", "content": "Hi"}]), "Hello! Here is JSON: {\"name\": \"Greg\"}");
+
+    let list = relay::list_conversations(&db).unwrap();
+    assert_eq!(list.len(), 2, "got: {list:?}");
+    let by_title = |t: &str| list.iter().find(|c| c["title"] == t).unwrap_or_else(|| panic!("no {t} in {list:?}")).clone();
+    let affected = by_title("Find the crime rate");
+    assert_eq!(affected["calls"], 2);
+    assert_eq!(affected["typed_tool_calls"], 2);
+    assert_eq!(by_title("Hi")["typed_tool_calls"], 0);
+}

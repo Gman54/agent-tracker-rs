@@ -431,19 +431,7 @@ async fn relay_test(State(_st): St) -> Response {
 }
 
 async fn relay_conversations(State(st): St) -> Response {
-    blocking(move || {
-        let conn = st.engine.db.conn();
-        let rows = store::rows(&conn, "SELECT c.conversation_id, COUNT(*) AS calls, MIN(c.started_at) AS first_at, MAX(c.started_at) AS last_at,
-            (SELECT x.title FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at LIMIT 1) AS title,
-            (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
-            (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
-            SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
-            SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools,
-            SUM(CASE WHEN c.error IS NOT NULL THEN 1 ELSE 0 END) AS errors
-            FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;
-        Ok(json!({"conversations": rows}))
-    })
-    .await
+    blocking(move || Ok(json!({"conversations": relay::list_conversations(&st.engine.db)?}))).await
 }
 
 async fn relay_conversation(State(st): St, UrlPath(id): UrlPath<String>) -> Response {

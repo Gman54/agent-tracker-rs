@@ -659,6 +659,12 @@ actions.relayTest = async () => {
 };
 actions.relayOpenChats = () => { RT.tab = 'chats'; navigate('runtime'); };
 
+// Small note on a list row when the model wrote tool requests as plain text.
+function relayTypedBadge(n) {
+  if (!n) return '';
+  return `<div class="small mt-xs"><span title="The model wrote a tool request as plain text, so your chat app didn't run it.">${pill('amber', `Tool request typed as text (${n})`)}</span></div>`;
+}
+
 async function renderChats(body) {
   const [{ conversations }, rs] = await Promise.all([api('GET', '/api/ui/runtime/relay/conversations'), api('GET', '/api/ui/runtime/relay')]);
   const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the Houndbit chat recorder. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
@@ -672,7 +678,7 @@ async function renderChats(body) {
       <thead><tr><th>Conversation</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
       <tbody>${conversations.map(c => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
-          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.errors ? `<div class="small">${pill('red', `${c.errors} problem(s)`)}</div>` : ''}</td>
+          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.errors ? `<div class="small">${pill('red', `${c.errors} problem(s)`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
           <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
           <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
           <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>

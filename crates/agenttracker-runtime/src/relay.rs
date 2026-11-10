@@ -784,6 +784,51 @@ pub fn typed_tool_calls_in_request(api: &str, req: &Value) -> usize {
         .count()
 }
 
+/// (reply typed a tool request as text with no real call, earlier assistant turns that did) for
+/// one saved `relay_calls` row.
+pub fn typed_tool_call_flags(call: &Value) -> (bool, usize) {
+    let api = call["api"].as_str().unwrap_or("");
+    let reply = call["reply_redacted"].as_str().unwrap_or("");
+    let real_reply_calls = call["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+    let in_reply = !real_reply_calls && looks_like_typed_tool_call(reply);
+    (in_reply, typed_tool_calls_in_request(api, &call["request_redacted"]))
+}
+
+/// Most calls scanned for the list view's typed-tool-request counts. Only calls whose saved text
+/// mentions "arguments" at all are scanned, newest first; past this cap counts may be too low.
+const LIST_SCAN_CAP: i64 = 2000;
+
+/// The chat recordings list: one row per conversation (newest first, at most 300), each with
+/// `typed_tool_calls`, the number of its calls where the model typed a tool request as text
+/// (same rule as `typed_tool_call` in the conversation view).
+pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
+    let conn = db.conn();
+    let mut rows = store::rows(&conn, "SELECT c.conversation_id, COUNT(*) AS calls, MIN(c.started_at) AS first_at, MAX(c.started_at) AS last_at,
+        (SELECT x.title FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at LIMIT 1) AS title,
+        (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
+        (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
+        SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
+        SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools,
+        SUM(CASE WHEN c.error IS NOT NULL THEN 1 ELSE 0 END) AS errors
+        FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;
+    // Cheap pre-filter in SQL: a typed tool request always contains the word "arguments".
+    let candidates = store::rows(&conn, "SELECT conversation_id, api, request_redacted, reply_redacted, tool_calls FROM relay_calls
+        WHERE instr(COALESCE(reply_redacted, ''), 'arguments') > 0 OR instr(COALESCE(request_redacted, ''), 'arguments') > 0
+        ORDER BY started_at DESC LIMIT ?1", &[&LIST_SCAN_CAP])?;
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for c in &candidates {
+        let (in_reply, in_history) = typed_tool_call_flags(c);
+        if in_reply || in_history > 0 {
+            *counts.entry(c["conversation_id"].as_str().unwrap_or_default().to_string()).or_default() += 1;
+        }
+    }
+    for r in &mut rows {
+        let n = counts.get(r["conversation_id"].as_str().unwrap_or_default()).copied().unwrap_or(0);
+        r["typed_tool_calls"] = json!(n);
+    }
+    Ok(rows)
+}
+
 /// Adds read-time fields to one `relay_calls` row for the conversation view:
 /// - `latest_user`: the newest user message in the request;
 /// - `earlier_messages`: the messages before it that the chat app re-sent ({role, text});
@@ -803,10 +848,7 @@ pub fn annotate_call(call: &mut Value) {
         Some(i) => (msgs[..i].iter().map(item).collect(), msgs[i + 1..].iter().map(item).collect()),
         None => (msgs.iter().map(item).collect(), Vec::new()),
     };
-    let reply = call["reply_redacted"].as_str().unwrap_or("");
-    let real_reply_calls = call["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
-    let in_reply = !real_reply_calls && looks_like_typed_tool_call(reply);
-    let in_history = typed_tool_calls_in_request(&api, &req);
+    let (in_reply, in_history) = typed_tool_call_flags(call);
     call["latest_user"] = json!(latest_user);
     call["earlier_messages"] = Value::Array(earlier);
     call["after_user_messages"] = Value::Array(after);
