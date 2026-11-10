@@ -618,32 +618,44 @@ async function renderRelayCard(el) {
         <li>Thinking text is only recorded when the model actually writes it (for example Qwen3 or DeepSeek-R1). Models like qwen2.5-coder reply without it.</li>
         <li>Secrets that look like keys or passwords are blanked before saving. Recordings stay on this computer, and you can delete them at any time.</li>
         <li>The recorder only listens on this computer (127.0.0.1) and only forwards to a model server on this computer.</li>
-        <li>Not yet tested with a live chat app on Windows.</li>
+        <li>Tried on Windows with Open WebUI and LM Studio. Other chat apps, and Ollama, haven't been tried yet.</li>
       </ul>
     </details>
   </div>`;
 }
 window.renderRelayCard = renderRelayCard;
 
-async function relaySaveWith(enabled) {
-  const r0 = await api('GET', '/api/ui/runtime/relay');
-  const up = $('#relay-up'), port = $('#relay-port');
-  const cfg = { enabled, upstream: up ? up.value.trim() : r0.config.upstream, port: port ? Number(port.value) || 1235 : r0.config.port };
+// Saves the recorder settings and returns true only when the server's answer confirms them
+// (and, when turning on, that the recorder is actually running). Any failure shows one error and
+// returns false, so callers never announce success after a failure.
+async function relaySaveWith(enabled, current) {
+  let ok = false;
   try {
-    await api('POST', '/api/ui/runtime/relay', cfg);
+    const r0 = current || await api('GET', '/api/ui/runtime/relay');
+    const up = $('#relay-up'), port = $('#relay-port');
+    const cfg = { enabled, upstream: up ? up.value.trim() : r0.config.upstream, port: port ? Number(port.value) || 1235 : r0.config.port };
+    const r = await api('POST', '/api/ui/runtime/relay', cfg);
+    if (!r || !r.config || r.config.enabled !== enabled) {
+      showToast('Houndbit could not confirm the change. Please try again.', 'error');
+    } else if (enabled && !(r.status && r.status.running)) {
+      showToast((r.status && r.status.error) || 'The settings were saved, but the chat recorder did not start.', 'error');
+    } else {
+      ok = true;
+    }
   } catch (e) {
     showToast(e.message, 'error');
   }
-  await renderRelayCard($('#relay-card'));
+  try { await renderRelayCard($('#relay-card')); } catch (_) { /* the card shows its own error state */ }
+  return ok;
 }
 actions.relayToggle = async d => {
-  await relaySaveWith(d.on === '1');
-  showToast(d.on === '1' ? 'Chat recorder is on. Paste the address into your chat app.' : 'Chat recorder is off.', 'success');
+  const on = d.on === '1';
+  if (await relaySaveWith(on)) showToast(on ? 'Chat recorder is on. Paste the address into your chat app.' : 'Chat recorder is off.', 'success');
 };
 actions.relaySave = async () => {
-  const r = await api('GET', '/api/ui/runtime/relay');
-  await relaySaveWith(r.config.enabled);
-  showToast('Saved.', 'success');
+  let r;
+  try { r = await api('GET', '/api/ui/runtime/relay'); } catch (e) { showToast(e.message, 'error'); return; }
+  if (await relaySaveWith(r.config.enabled, r)) showToast('Saved.', 'success');
 };
 actions.relayTest = async () => {
   const out = $('#relay-out');
@@ -738,7 +750,7 @@ function relayTiming(c) {
   const line = `Model server first sent something after ${secs(c.first_chunk_at - c.started_at)} · last sent something at ${secs(c.last_chunk_at - c.started_at)} · ${c.chunk_count} piece(s) received`;
   const idle = (c.finished_at || 0) - c.last_chunk_at;
   return `<p class="small muted mt-xs">${esc(line)}</p>${idle >= RELAY_IDLE_NOTE_MS
-    ? `<div class="note note-plain mt-xs">Time from last piece to close: ${esc(secs(idle))}. Nothing new arrived during that time, so it was waiting, not writing.</div>` : ''}`;
+    ? `<div class="note note-plain mt-xs">Time from last piece to close: ${esc(secs(idle))}. No new data reached Houndbit during this interval. The model server may still have been working or holding output back; the recorder can't tell which.</div>` : ''}`;
 }
 
 // A model server error with no thinking or reply text: what arrived was the error itself.
@@ -767,7 +779,8 @@ function relayTools(c) {
     ['Requested (real tool calls)', rq.length ? esc(names(rq)) : '<span class="muted">None</span>'],
     ['Typed as text in this reply', tyNow.length ? `${esc(plain(tyNow))} <span class="muted">— not a real tool request</span>` : '<span class="muted">None</span>'],
     ...(tyBefore.length ? [['Typed as text in earlier replies', `${esc(plain(tyBefore))} <span class="muted">— from the chat history, not this reply</span>`]] : []),
-    ['Ran', ex.length ? `${esc(names(ex))} <span class="muted">— a tool result with a matching id was sent back</span>` : 'No evidence any tool ran'],
+    ['Tool result reported', ex.length ? `${esc(names(ex))} <span class="muted">— your chat app sent back a tool result with a matching id. That is a report, not proof the tool did what it said.</span>` : '<span class="muted">None</span>'],
+    ['Execution verified', '<span class="muted">Not checked. The recorder only sees messages, not your files or programs.</span>'],
   ];
   const odd = c.tool_results_unmatched ? `<p class="small muted">${esc(c.tool_results_unmatched)} tool result message(s) in the history don't match a tool call id, so they aren't counted as evidence.</p>` : '';
   return `<h4 class="mt-xs">Tools</h4>${kv(rows)}${odd}`;
@@ -790,7 +803,7 @@ async function renderConversation(id) {
       ${(c.after_user_messages || []).map(m => `<h4 class="mt-xs">${esc(relayRole(m.role))}</h4><pre class="ctx-body">${esc(m.text || '(empty)')}</pre>`).join('')}
       ${relayErrorOnly(c) ? '<h4 class="mt-xs">Reply</h4><p class="small muted">None. The model server stopped with an error before any thinking or reply text arrived.</p>' : `${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
       <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}`}
-      ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. See "Ran" under Tools for any sign it ran.</p>` : ''}
+      ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. See "Tool result reported" under Tools for any reported result.</p>` : ''}
       ${relayOutcomeNote(c)}
       ${relayTools(c)}
       ${relayTypedWarning(c)}

@@ -13,7 +13,14 @@ None of this means something is wrong. It just means Windows doesn't know us yet
 - Neither the hook helper nor the app opens hidden console windows any more.
 
 ## The real fix: code signing (not done yet)
-The only reliable way to stop the warnings is to sign the installer and programs with a code-signing certificate. Two options:
+Right now neither program has an embedded Authenticode signature. Before sharing Houndbit widely, sign all three files:
+- the app (`agenttracker.exe`; it keeps its old file name inside the Houndbit folder),
+- the hook helper (`agenttracker-hook.exe`),
+- the release installers (the setup `.exe` and the `.msi`).
+
+Signing tells Windows who published the files. It does not promise that SmartScreen warnings go away straight away: SmartScreen also weighs how many people have downloaded the files, so a newly signed program can still be warned about for a while.
+
+Two ways to get a certificate:
 - **Azure Trusted Signing**: about $10 a month and the cheapest route for individuals.
 - **A regular code-signing certificate** from a certificate seller.
 
