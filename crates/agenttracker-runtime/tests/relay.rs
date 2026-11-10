@@ -248,3 +248,83 @@ fn parses_ollama_responses_api_and_bare_think_close() {
     let p = parse_response("chat_completions", Some("text/event-stream"), sse.as_bytes());
     assert_eq!(p.tool_calls, vec![(Some("t1".into()), "read_file".into(), "{\"path\":\"a.txt\"}".into())]);
 }
+
+
+/// A saved `relay_calls` row as the conversation view reads it back.
+fn saved_call(messages: Value, reply: &str, tool_calls: Value) -> Value {
+    json!({"api": "chat_completions", "request_redacted": {"model": "qwen/qwen3.8-27b", "messages": messages},
+           "reply_redacted": if reply.is_empty() { Value::Null } else { json!(reply) }, "tool_calls": tool_calls, "last_user_redacted": null})
+}
+
+#[test]
+fn typed_tool_call_in_a_json_fence_is_flagged() {
+    let typed = "I'll look that up.\n```json\n{\"name\": \"search\", \"arguments\": {\"query\": \"crime rate\"}}\n```";
+    assert!(relay::looks_like_typed_tool_call(typed));
+    // In the history: an earlier assistant turn with no tool_calls and no tool result after it.
+    let mut c = saved_call(json!([
+        {"role": "system", "content": "You can use tools."},
+        {"role": "user", "content": "Find the crime rate"},
+        {"role": "assistant", "content": typed},
+        {"role": "user", "content": "Well?"}]), "Sorry, here it is.", Value::Null);
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_calls_in_history"], 1);
+    assert_eq!(c["typed_tool_call_in_reply"], false);
+    assert_eq!(c["typed_tool_call"], true);
+    assert_eq!(c["latest_user"], "Well?");
+    assert_eq!(c["earlier_messages"].as_array().unwrap().len(), 3);
+    assert_eq!(c["earlier_messages"][2]["role"], "assistant");
+    // In the reply.
+    let mut c = saved_call(json!([{"role": "user", "content": "Find the crime rate"}]), typed, Value::Null);
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_call_in_reply"], true);
+    assert_eq!(c["typed_tool_call"], true);
+    assert_eq!(c["earlier_messages"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn bare_typed_tool_call_is_flagged() {
+    let bare = r#"{"name": "read_file", "arguments": {"path": "notes.txt"}}"#;
+    assert!(relay::looks_like_typed_tool_call(bare));
+    assert!(relay::looks_like_typed_tool_call(&format!("Calling it now: {bare} (waiting)")));
+    assert!(relay::looks_like_typed_tool_call(r#"[{"name": "search", "arguments": "{\"q\": 1}"}]"#));
+    let mut c = saved_call(json!([{"role": "user", "content": "Read notes.txt"}]), bare, Value::Null);
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_call_in_reply"], true);
+}
+
+#[test]
+fn real_tool_calls_are_not_flagged() {
+    let args = r#"{"name": "search", "arguments": {"query": "x"}}"#;
+    // The reply made a real tool call (the reply text happens to echo it).
+    let mut c = saved_call(json!([{"role": "user", "content": "Search for x"}]), args,
+        json!([{"id": "t1", "name": "search", "arguments": "{\"query\":\"x\"}"}]));
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_call"], false);
+    // Earlier turns: one with a tool_calls entry, one followed by a tool-role result.
+    let mut c = saved_call(json!([
+        {"role": "user", "content": "Search for x"},
+        {"role": "assistant", "content": args, "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "search", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "result"},
+        {"role": "assistant", "content": args},
+        {"role": "tool", "tool_call_id": "t2", "content": "result 2"},
+        {"role": "user", "content": "Thanks"}]), "You're welcome.", Value::Null);
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_calls_in_history"], 0);
+    assert_eq!(c["typed_tool_call"], false);
+}
+
+#[test]
+fn normal_text_is_not_flagged() {
+    for t in ["Hello! How can I help?", "Here is some JSON: {\"name\": \"Greg\", \"age\": 40}", "{\"arguments\": 1}", "```json\n{\"name\": \"x\"}\n```", "The word \"name\" and \"arguments\" but no JSON {here"] {
+        assert!(!relay::looks_like_typed_tool_call(t), "flagged: {t}");
+    }
+    let mut c = saved_call(json!([
+        {"role": "system", "content": "Be nice."},
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+        {"role": "user", "content": "How are you?"}]), "Fine, thanks.", Value::Null);
+    relay::annotate_call(&mut c);
+    assert_eq!(c["typed_tool_call"], false);
+    assert_eq!(c["latest_user"], "How are you?");
+    assert_eq!(c["earlier_messages"].as_array().unwrap().len(), 3);
+}

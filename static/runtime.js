@@ -681,6 +681,26 @@ async function renderChats(body) {
     <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete">Delete all chat recordings</button></div>`;
 }
 
+const RELAY_ROLES = { system: 'Instructions for the model', developer: 'Instructions for the model', user: 'You', assistant: 'Model', tool: 'Tool result' };
+const relayRole = r => RELAY_ROLES[r] || r || 'Message';
+
+// Chat apps send the whole chat again with every message. Keep those repeats out of the way.
+function relayEarlier(c) {
+  const msgs = c.earlier_messages || [];
+  if (!msgs.length) return '';
+  return `<details class="mt-xs"><summary class="small muted">Earlier messages in this chat (${msgs.length}), sent again by your chat app</summary>
+    ${msgs.map(m => `<div class="mt-xs"><div class="small"><b>${esc(relayRole(m.role))}</b></div><pre class="ctx-body">${esc(m.text || '(empty)')}</pre></div>`).join('')}
+  </details>`;
+}
+
+function relayTypedWarning(c) {
+  if (!c.typed_tool_call) return '';
+  const where = [];
+  if (c.typed_tool_call_in_reply) where.push('in this reply');
+  if (c.typed_tool_calls_in_history) where.push(c.typed_tool_calls_in_history === 1 ? 'in 1 earlier reply' : `in ${c.typed_tool_calls_in_history} earlier replies`);
+  return `<div class="note note-warn mt-xs">The model wrote a tool request as plain text (${esc(where.join(' and '))}), so your chat app didn't run it. This model or its LM Studio settings may not support tool calls.</div>`;
+}
+
 async function renderConversation(id) {
   const r = await api('GET', `/api/ui/runtime/relay/conversations/${encodeURIComponent(id)}`);
   const calls = r.calls;
@@ -688,10 +708,13 @@ async function renderConversation(id) {
   const turn = (c, i) => `<div class="card mt">
       <div class="row row-tight"><b>Message ${i + 1}</b> ${modelCell(c.model)} <span class="small muted">${esc(when(c.started_at))}${c.finished_at ? ` · ${esc(((c.finished_at - c.started_at) / 1000).toFixed(1))} s` : ''}${c.streamed ? ' · streamed' : ''}</span>
         ${c.error ? pill('red', 'Problem') : ''}</div>
-      ${c.last_user_redacted ? `<h4 class="mt-xs">You asked</h4><pre class="ctx-body">${esc(c.last_user_redacted)}</pre>` : ''}
+      ${relayEarlier(c)}
+      ${(c.latest_user || c.last_user_redacted) ? `<h4 class="mt-xs">You asked</h4><pre class="ctx-body">${esc(c.latest_user || c.last_user_redacted)}</pre>` : ''}
+      ${(c.after_user_messages || []).map(m => `<h4 class="mt-xs">${esc(relayRole(m.role))}</h4><pre class="ctx-body">${esc(m.text || '(empty)')}</pre>`).join('')}
       ${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
       <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}
       ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. Whether your chat app ran it is not known here.</p>` : ''}
+      ${relayTypedWarning(c)}
       ${c.error ? `<div class="note note-warn mt-xs">${esc(c.error)}</div>` : ''}
       <details class="history"><summary>Details</summary>
         ${kv([['Sent by', esc(c.client || 'Unknown app')], ['Kind of call', esc(c.api)], ['Messages in the request', esc(c.message_count ?? '—')], ['Finished because', esc(c.finish_reason || '—')],
@@ -706,6 +729,7 @@ async function renderConversation(id) {
       <h1>${esc(first.title || 'Chat')}</h1>
       <p class="small muted">Recorded by the chat recorder. Messages are grouped by their first message, so two chats that start the same way may appear together.</p>
     </div>
+    ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model wrote a tool request as plain text instead of making a real tool call, so your chat app didn't run those tools. This model or its LM Studio settings may not support tool calls. Look for the notes below.</div>` : ''}
     ${calls.map(turn).join('')}
     <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete" data-conv="${esc(id)}">Delete this conversation</button></div>`;
 }

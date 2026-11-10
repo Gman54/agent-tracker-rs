@@ -449,11 +449,13 @@ async fn relay_conversations(State(st): St) -> Response {
 async fn relay_conversation(State(st): St, UrlPath(id): UrlPath<String>) -> Response {
     blocking(move || {
         let conn = st.engine.db.conn();
-        let calls = store::rows(&conn, "SELECT * FROM relay_calls WHERE conversation_id=?1 ORDER BY started_at", &[&id])?;
+        let mut calls = store::rows(&conn, "SELECT * FROM relay_calls WHERE conversation_id=?1 ORDER BY started_at", &[&id])?;
         if calls.is_empty() {
             return Err(RtError::NotFound(id));
         }
-        Ok(json!({"conversation_id": id, "calls": calls}))
+        calls.iter_mut().for_each(relay::annotate_call);
+        let typed = calls.iter().filter(|c| c["typed_tool_call"].as_bool() == Some(true)).count();
+        Ok(json!({"conversation_id": id, "calls": calls, "typed_tool_call_count": typed}))
     })
     .await
 }

@@ -732,3 +732,85 @@ pub fn record(db: &Db, c: &Call) -> Result<String> {
     tx.commit()?;
     Ok(id)
 }
+
+
+// ---- reading recordings back -----------------------------------------------------------------
+
+fn is_tool_request_obj(v: &Value) -> bool {
+    v.get("name").and_then(Value::as_str).is_some_and(|n| !n.trim().is_empty()) && v.get("arguments").is_some()
+}
+
+/// True when `text` contains a JSON object with "name" and "arguments" keys, bare or inside a
+/// ```json fence: the model typed a tool request as text instead of making a real tool call.
+pub fn looks_like_typed_tool_call(text: &str) -> bool {
+    if !text.contains("\"name\"") || !text.contains("\"arguments\"") {
+        return false;
+    }
+    // Try parsing a JSON value at each '{' (also finds objects nested in arrays or wrappers).
+    // Capped so a huge reply full of braces stays cheap.
+    for (i, _) in text.match_indices('{').take(200) {
+        if let Some(Ok(v)) = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>().next() {
+            if is_tool_request_obj(&v) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The message items of a request, in order (chat messages or Responses API input items).
+fn request_items(api: &str, req: &Value) -> Vec<Value> {
+    let key = if api == "responses" { "input" } else { "messages" };
+    req[key].as_array().cloned().unwrap_or_default()
+}
+
+fn is_real_tool_item(v: &Value) -> bool {
+    v["role"].as_str() == Some("tool") || matches!(v["type"].as_str(), Some("function_call") | Some("function_call_output"))
+}
+
+/// How many earlier assistant turns in the request typed a tool request as text. A turn counts
+/// only when it has no `tool_calls` entry and isn't followed by a tool result (a real tool call).
+pub fn typed_tool_calls_in_request(api: &str, req: &Value) -> usize {
+    let items = request_items(api, req);
+    items
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| {
+            m["role"].as_str() == Some("assistant")
+                && looks_like_typed_tool_call(&text_of(&m["content"]))
+                && !m["tool_calls"].as_array().is_some_and(|a| !a.is_empty())
+                && !items.get(i + 1).is_some_and(is_real_tool_item)
+        })
+        .count()
+}
+
+/// Adds read-time fields to one `relay_calls` row for the conversation view:
+/// - `latest_user`: the newest user message in the request;
+/// - `earlier_messages`: the messages before it that the chat app re-sent ({role, text});
+/// - `after_user_messages`: anything after it in the same request (for example tool results);
+/// - `typed_tool_call_in_reply`: the reply typed a tool request as text and made no real call;
+/// - `typed_tool_calls_in_history`: earlier assistant turns that did the same;
+/// - `typed_tool_call`: either of the two.
+/// Works on recordings made before this existed, since it only reads saved columns.
+pub fn annotate_call(call: &mut Value) {
+    let api = call["api"].as_str().unwrap_or("").to_string();
+    let req = call["request_redacted"].clone();
+    let msgs = request_messages(&api, &req);
+    let last_user = msgs.iter().rposition(|(r, _)| r == "user");
+    let latest_user = last_user.map(|i| msgs[i].1.clone()).or_else(|| call["last_user_redacted"].as_str().map(String::from));
+    let item = |(r, t): &(String, String)| json!({"role": r, "text": t});
+    let (earlier, after): (Vec<Value>, Vec<Value>) = match last_user {
+        Some(i) => (msgs[..i].iter().map(item).collect(), msgs[i + 1..].iter().map(item).collect()),
+        None => (msgs.iter().map(item).collect(), Vec::new()),
+    };
+    let reply = call["reply_redacted"].as_str().unwrap_or("");
+    let real_reply_calls = call["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+    let in_reply = !real_reply_calls && looks_like_typed_tool_call(reply);
+    let in_history = typed_tool_calls_in_request(&api, &req);
+    call["latest_user"] = json!(latest_user);
+    call["earlier_messages"] = Value::Array(earlier);
+    call["after_user_messages"] = Value::Array(after);
+    call["typed_tool_call_in_reply"] = json!(in_reply);
+    call["typed_tool_calls_in_history"] = json!(in_history);
+    call["typed_tool_call"] = json!(in_reply || in_history > 0);
+}
