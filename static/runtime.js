@@ -662,7 +662,7 @@ actions.relayOpenChats = () => { RT.tab = 'chats'; navigate('runtime'); };
 // Small note on a list row when the model wrote tool requests as plain text.
 function relayTypedBadge(n) {
   if (!n) return '';
-  return `<div class="small mt-xs"><span title="The model wrote a tool request as plain text, so your chat app didn't run it.">${pill('amber', `Tool request typed as text (${n})`)}</span></div>`;
+  return `<div class="small mt-xs"><span title="The model wrote a tool request as plain text. That is not a real tool request, and there is no sign any tool ran.">${pill('amber', `Tool request typed as text (${n})`)}</span></div>`;
 }
 
 async function renderChats(body) {
@@ -678,7 +678,7 @@ async function renderChats(body) {
       <thead><tr><th>Conversation</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
       <tbody>${conversations.map(c => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
-          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.errors ? `<div class="small">${pill('red', `${c.errors} problem(s)`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
+          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.problems ? `<div class="small">${pill('red', `${c.problems} problem(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
           <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
           <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
           <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>
@@ -704,7 +704,59 @@ function relayTypedWarning(c) {
   const where = [];
   if (c.typed_tool_call_in_reply) where.push('in this reply');
   if (c.typed_tool_calls_in_history) where.push(c.typed_tool_calls_in_history === 1 ? 'in 1 earlier reply' : `in ${c.typed_tool_calls_in_history} earlier replies`);
-  return `<div class="note note-warn mt-xs">The model wrote a tool request as plain text (${esc(where.join(' and '))}), so your chat app didn't run it. This model or its LM Studio settings may not support tool calls.</div>`;
+  return `<div class="note note-warn mt-xs">The model wrote a tool request as plain text (${esc(where.join(' and '))}). That is not a real tool request, and there is no sign any tool ran. This model or its LM Studio settings may not support tool calls.</div>`;
+}
+
+// How the reply ended. "Finished" needs the model server's end-of-reply marker; HTTP 200 alone isn't enough.
+const RELAY_OUTCOME_PILL = { problem: 'red', interrupted: 'amber', complete: 'green' };
+function relayOutcomePill(c) {
+  const o = c.outcome;
+  return o ? pill(RELAY_OUTCOME_PILL[o.state] || 'amber', o.label) : '';
+}
+function relayOutcomeNote(c) {
+  const o = c.outcome;
+  if (!o || o.state === 'complete') return '';
+  if (o.state === 'problem') return `<div class="note note-warn mt-xs">${esc(o.cause)}</div>`;
+  return `<div class="note note-warn mt-xs"><b>Interrupted.</b> ${esc(o.cause)}${o.detail ? `<div class="small mt-xs">What the recorder saw: ${esc(o.detail)}</div>` : ''}</div>`;
+}
+
+// When things arrived from the model server, so waiting can be told apart from generating.
+const RELAY_IDLE_NOTE_MS = 30000;
+function relayTiming(c) {
+  const secs = ms => `${(ms / 1000).toFixed(1)} s`;
+  if (c.http_status == null) return '';
+  if (c.chunk_count == null) return '<p class="small muted mt-xs">Detailed timing wasn\'t recorded for this older message.</p>';
+  if (!c.chunk_count) return '<p class="small muted mt-xs">Nothing arrived from the model server before the connection closed.</p>';
+  const line = `Model server first sent something after ${secs(c.first_chunk_at - c.started_at)} · last sent something at ${secs(c.last_chunk_at - c.started_at)} · ${c.chunk_count} piece(s) received`;
+  const idle = (c.finished_at || 0) - c.last_chunk_at;
+  return `<p class="small muted mt-xs">${esc(line)}</p>${idle >= RELAY_IDLE_NOTE_MS
+    ? `<div class="note note-plain mt-xs">Time from last piece to close: ${esc(secs(idle))}. Nothing new arrived during that time, so it was waiting, not writing.</div>` : ''}`;
+}
+
+// Saved text that was cut to keep recordings a sensible size.
+function relayShortened(c) {
+  const parts = c.shortened || [];
+  if (!parts.length) return '';
+  const groups = {};
+  parts.forEach(p => { const k = `${Number(p.limit).toLocaleString('en-US')} ${p.unit}`; (groups[k] = groups[k] || []).push(p.part); });
+  return Object.entries(groups).map(([lim, ps]) => `<div class="note note-plain mt-xs">Saved text shortened at ${esc(lim)} (${esc(ps.join(', '))}). Your chat app still got everything.</div>`).join('');
+}
+
+// Tools offered, asked for, typed as text, and run (only with evidence).
+function relayTools(c) {
+  const av = c.tools_available || [], rq = c.tools_requested || [], ty = c.tools_typed_as_text || [], ex = c.tools_executed || [];
+  if (!av.length && !rq.length && !ty.length && !ex.length) return '';
+  const names = list => list.map(t => `${t.name || '?'} (${t.where})`).join(', ');
+  const offered = !av.length ? '<span class="muted">None offered</span>'
+    : av.length <= 6 ? esc(av.join(', ')) : `<details><summary>${esc(av.length)} tools</summary>${esc(av.join(', '))}</details>`;
+  const rows = [
+    ['Available to the model', offered],
+    ['Requested (real tool calls)', rq.length ? esc(names(rq)) : '<span class="muted">None</span>'],
+    ['Typed as text', ty.length ? `${esc(names(ty))} <span class="muted">— typed as text, not a real tool request</span>` : '<span class="muted">None</span>'],
+    ['Ran', ex.length ? `${esc(names(ex))} <span class="muted">— a tool result with a matching id was sent back</span>` : 'No evidence any tool ran'],
+  ];
+  const odd = c.tool_results_unmatched ? `<p class="small muted">${esc(c.tool_results_unmatched)} tool result message(s) in the history don't match a tool call id, so they aren't counted as evidence.</p>` : '';
+  return `<h4 class="mt-xs">Tools</h4>${kv(rows)}${odd}`;
 }
 
 async function renderConversation(id) {
@@ -713,18 +765,22 @@ async function renderConversation(id) {
   const first = calls[0];
   const turn = (c, i) => `<div class="card mt">
       <div class="row row-tight"><b>Message ${i + 1}</b> ${modelCell(c.model)} <span class="small muted">${esc(when(c.started_at))}${c.finished_at ? ` · ${esc(((c.finished_at - c.started_at) / 1000).toFixed(1))} s` : ''}${c.streamed ? ' · streamed' : ''}</span>
-        ${c.error ? pill('red', 'Problem') : ''}</div>
+        ${relayOutcomePill(c)}</div>
+      ${relayTiming(c)}
       ${relayEarlier(c)}
       ${(c.latest_user || c.last_user_redacted) ? `<h4 class="mt-xs">You asked</h4><pre class="ctx-body">${esc(c.latest_user || c.last_user_redacted)}</pre>` : ''}
       ${(c.after_user_messages || []).map(m => `<h4 class="mt-xs">${esc(relayRole(m.role))}</h4><pre class="ctx-body">${esc(m.text || '(empty)')}</pre>`).join('')}
       ${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
       <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}
-      ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. Whether your chat app ran it is not known here.</p>` : ''}
+      ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. See "Ran" under Tools for any sign it ran.</p>` : ''}
+      ${relayTools(c)}
       ${relayTypedWarning(c)}
-      ${c.error ? `<div class="note note-warn mt-xs">${esc(c.error)}</div>` : ''}
+      ${relayOutcomeNote(c)}
+      ${relayShortened(c)}
       <details class="history"><summary>Details</summary>
         ${kv([['Sent by', esc(c.client || 'Unknown app')], ['Kind of call', esc(c.api)], ['Messages in the request', esc(c.message_count ?? '—')], ['Finished because', esc(c.finish_reason || '—')],
-          ['Tokens', esc(c.usage ? `${c.usage.prompt_tokens ?? c.usage.input_tokens ?? '?'} in, ${c.usage.completion_tokens ?? c.usage.output_tokens ?? '?'} out` : 'Not reported')], ['Server status', esc(c.http_status ?? 'No answer')],
+          ['Tokens', esc(c.usage ? `${c.usage.prompt_tokens ?? c.usage.input_tokens ?? '?'} in, ${c.usage.completion_tokens ?? c.usage.output_tokens ?? '?'} out` : 'Not reported')], ['Server status', esc(c.http_status != null ? `${c.http_status} (the server answered; this alone doesn't mean the reply finished)` : 'No answer')],
+          ['End-of-reply marker', esc(c.end_marker == null ? 'Not recorded (older message)' : c.end_marker ? 'Received' : 'Not received')],
           ['Request hash', `<span class="mono">${esc(short('sha_' + c.request_sha256))}</span>`]])}
         <h4 class="mt-xs">Full request (redacted)</h4><pre class="diff">${esc(pretty(c.request_redacted))}</pre>
       </details>
@@ -735,7 +791,7 @@ async function renderConversation(id) {
       <h1>${esc(first.title || 'Chat')}</h1>
       <p class="small muted">Recorded by the chat recorder. Messages are grouped by their first message, so two chats that start the same way may appear together.</p>
     </div>
-    ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model wrote a tool request as plain text instead of making a real tool call, so your chat app didn't run those tools. This model or its LM Studio settings may not support tool calls. Look for the notes below.</div>` : ''}
+    ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model wrote a tool request as plain text instead of making a real tool call. Those are not real tool requests, and there is no sign those tools ran. This model or its LM Studio settings may not support tool calls. Look for the notes below.</div>` : ''}
     ${calls.map(turn).join('')}
     <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete" data-conv="${esc(id)}">Delete this conversation</button></div>`;
 }

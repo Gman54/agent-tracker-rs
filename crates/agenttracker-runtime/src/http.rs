@@ -441,7 +441,7 @@ async fn relay_conversation(State(st): St, UrlPath(id): UrlPath<String>) -> Resp
         if calls.is_empty() {
             return Err(RtError::NotFound(id));
         }
-        calls.iter_mut().for_each(relay::annotate_call);
+        relay::annotate_conversation(&mut calls);
         let typed = calls.iter().filter(|c| c["typed_tool_call"].as_bool() == Some(true)).count();
         Ok(json!({"conversation_id": id, "calls": calls, "typed_tool_call_count": typed}))
     })

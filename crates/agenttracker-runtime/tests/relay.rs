@@ -147,6 +147,16 @@ fn relay_passes_through_unchanged_and_records_calls() {
     assert_eq!(b["last_user_redacted"], "Now a haiku.");
     assert_eq!(b["message_count"], 4);
     assert_eq!(b["usage"]["completion_tokens"], 9);
+    // Stream details: finished properly, chat app stayed connected, timing recorded.
+    assert_eq!(b["end_marker"], 1);
+    assert_eq!(b["downstream_closed"], 0);
+    assert!(b["chunk_count"].as_i64().unwrap() >= 1);
+    assert!(b["first_chunk_at"].as_i64().unwrap() >= b["started_at"].as_i64().unwrap());
+    assert!(b["last_chunk_at"].as_i64().unwrap() <= b["finished_at"].as_i64().unwrap());
+    assert!(b["error"].is_null());
+    let mut b2 = b.clone();
+    relay::annotate_call(&mut b2);
+    assert_eq!(b2["outcome"]["state"], "complete");
 
     // The chain holds only hashes, so deleting a recording leaves no chat text behind.
     let chain: String = db.conn().query_row("SELECT group_concat(event_canonical) FROM chain_entries", [], |x| x.get(0)).unwrap();
@@ -333,8 +343,8 @@ fn normal_text_is_not_flagged() {
 fn record_call(db: &Db, messages: Value, reply: &str) {
     let req = json!({"model": "qwen/qwen3.8-27b", "messages": messages}).to_string();
     let resp = json!({"choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}]}).to_string();
-    relay::record(db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", client: None, request: req.as_bytes(), response: resp.as_bytes(),
-        content_type: Some("application/json".into()), status: Some(200), error: None, started: 1 }).unwrap();
+    relay::record(db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: resp.as_bytes(),
+        content_type: Some("application/json".into()), status: Some(200), started: 1, ..Default::default() }).unwrap();
 }
 
 #[test]
@@ -357,4 +367,267 @@ fn conversation_list_counts_typed_tool_requests() {
     assert_eq!(affected["calls"], 2);
     assert_eq!(affected["typed_tool_calls"], 2);
     assert_eq!(by_title("Hi")["typed_tool_calls"], 0);
+    assert_eq!(affected["problems"], 0);
+    assert_eq!(affected["interrupted"], 0);
+}
+
+// ---- how a reply ended, tools, timing, shortened text -------------------------------------------
+
+fn sse(events: &[Value], done: bool) -> String {
+    let mut out: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+    if done { out.push_str("data: [DONE]\n\n"); }
+    out
+}
+
+fn delta(text: &str) -> Value { json!({"choices": [{"delta": {"reasoning_content": text}}]}) }
+
+/// Records one streamed call and returns the saved row, annotated like the conversation view.
+fn record_stream(body: &str, downstream_closed: bool) -> Value {
+    let db = Db::open_in_memory().unwrap();
+    let req = json!({"model": "qwen/qwen3.8-27b", "stream": true, "messages": [{"role": "user", "content": "what is a prime number thats a million numbers?"}]}).to_string();
+    relay::record(&db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: body.as_bytes(),
+        content_type: Some("text/event-stream".into()), status: Some(200), started: 1_000, finished: 2_810_000, first_chunk_at: Some(3_000), last_chunk_at: Some(60_000),
+        chunk_count: Some(42), bytes_received: Some(body.len() as i64), downstream_closed, ..Default::default() }).unwrap();
+    let mut row = rows(&db).remove(0);
+    relay::annotate_call(&mut row);
+    row
+}
+
+#[test]
+fn stream_without_end_marker_and_no_disconnect_has_unknown_cause() {
+    let row = record_stream(&sse(&[delta("Let me think about primes"), delta(" with a million digits...")], false), false);
+    assert_eq!(row["http_status"], 200);
+    assert!(row["error"].is_null(), "an unfinished reply is not saved as an error: {}", row["error"]);
+    assert_eq!(row["end_marker"], 0);
+    assert_eq!(row["outcome"]["state"], "interrupted");
+    assert_eq!(row["outcome"]["label"], "Interrupted");
+    assert_eq!(row["outcome"]["cause"], "Stream ended before completion; cause unknown.");
+    assert_eq!(row["outcome"]["by_chat_app"], false);
+    assert_eq!(row["reasoning_redacted"], "Let me think about primes with a million digits...");
+}
+
+#[test]
+fn stream_cut_by_the_chat_app_is_attributed_to_it() {
+    let row = record_stream(&sse(&[delta("Thinking")], false), true);
+    assert_eq!(row["downstream_closed"], 1);
+    assert_eq!(row["outcome"]["state"], "interrupted");
+    assert_eq!(row["outcome"]["by_chat_app"], true);
+    assert!(row["outcome"]["cause"].as_str().unwrap().contains("chat app closed its connection"), "{}", row["outcome"]);
+}
+
+#[test]
+fn completed_stream_needs_the_end_marker() {
+    // finish_reason and [DONE]
+    let done = record_stream(&sse(&[delta("ok"), json!({"choices": [{"delta": {"content": "Yes."}, "finish_reason": "stop"}]})], true), false);
+    assert_eq!(done["end_marker"], 1);
+    assert_eq!(done["outcome"]["state"], "complete");
+    // [DONE] alone is enough too.
+    assert_eq!(record_stream(&sse(&[delta("ok")], true), false)["outcome"]["state"], "complete");
+    // A plain (not streamed) HTTP 200 reply without finish_reason is not counted as finished.
+    let db = Db::open_in_memory().unwrap();
+    let req = json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}).to_string();
+    let resp = json!({"choices": [{"message": {"role": "assistant", "content": "Hel"}}]}).to_string();
+    relay::record(&db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: resp.as_bytes(),
+        content_type: Some("application/json".into()), status: Some(200), started: 1, ..Default::default() }).unwrap();
+    let mut row = rows(&db).remove(0);
+    relay::annotate_call(&mut row);
+    assert_eq!(row["outcome"]["state"], "interrupted");
+    // Ollama: done:true is the marker.
+    let p = parse_response("ollama_chat", Some("application/x-ndjson"), b"{\"message\":{\"content\":\"a\"},\"done\":false}\n{\"message\":{\"content\":\"b\"},\"done\":true}\n");
+    assert!(p.end_marker);
+    let p = parse_response("ollama_chat", Some("application/x-ndjson"), b"{\"message\":{\"content\":\"a\"},\"done\":false}\n");
+    assert!(!p.end_marker);
+}
+
+#[test]
+fn real_errors_stay_problems_and_older_recordings_fall_back() {
+    let outcome = |row: Value| relay::call_outcome(&row);
+    assert_eq!(outcome(json!({"http_status": null, "error": "Houndbit could not reach your model server"}))["state"], "problem");
+    assert_eq!(outcome(json!({"http_status": 500, "error": "boom"}))["state"], "problem");
+    assert_eq!(outcome(json!({"http_status": 200, "error": "Model not loaded"}))["state"], "problem");
+    // Older recordings (no end_marker / downstream_closed columns filled in).
+    let old = outcome(json!({"http_status": 200, "error": null, "finish_reason": null}));
+    assert_eq!(old["state"], "interrupted");
+    assert_eq!(old["cause"], relay::CAUSE_UNKNOWN);
+    let old_cut = outcome(json!({"http_status": 200, "error": "The model server's reply was cut off: timed out reading response", "finish_reason": null}));
+    assert_eq!(old_cut["state"], "interrupted");
+    assert_eq!(old_cut["cause"], relay::CAUSE_UNKNOWN);
+    assert!(old_cut["detail"].as_str().unwrap().contains("timed out"));
+    // That older note was only saved when sending to the chat app failed, so it counts as a seen disconnect.
+    let old_app = outcome(json!({"http_status": 200, "error": "The chat app stopped the reply early (Stop button, or the app closed the connection).", "finish_reason": null}));
+    assert_eq!(old_app["by_chat_app"], true);
+    assert_eq!(outcome(json!({"http_status": 200, "error": null, "finish_reason": "stop"}))["state"], "complete");
+}
+
+#[test]
+fn tools_are_split_into_available_requested_typed_and_run() {
+    let typed = "```json\n{\"name\": \"search_knowledge_bases\", \"arguments\": {\"query\": \"paraguay population\"}}\n```";
+    let tools = json!([{"type": "function", "function": {"name": "search_knowledge_bases"}}, {"type": "function", "function": {"name": "write_note"}}]);
+    // The user's case: typed-as-text requests in the history, no tool_calls, no tool results.
+    let mut c = saved_call(json!([
+        {"role": "user", "content": "tell me what is the population of paragua?"},
+        {"role": "assistant", "content": typed},
+        {"role": "user", "content": "create a file named testaj102.txt"},
+        {"role": "assistant", "content": "```json\n{\"name\": \"write_note\", \"arguments\": {\"title\": \"testaj102.txt\"}}\n```"},
+        {"role": "user", "content": "think about this"}]), "", Value::Null);
+    c["request_redacted"]["tools"] = tools.clone();
+    relay::annotate_call(&mut c);
+    assert_eq!(c["tools_available"], json!(["search_knowledge_bases", "write_note"]));
+    assert_eq!(c["tools_requested"], json!([]));
+    let typed_names: Vec<&str> = c["tools_typed_as_text"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(typed_names, ["search_knowledge_bases", "write_note"]);
+    assert_eq!(c["tools_executed"], json!([]), "typed-as-text requests are never counted as run");
+
+    // Real structured calls: one with a matching tool result (run), one without (not run),
+    // plus a tool result whose id matches nothing (not evidence).
+    let mut c = saved_call(json!([
+        {"role": "user", "content": "Look up x and y"},
+        {"role": "assistant", "content": null, "tool_calls": [
+            {"id": "call_a", "type": "function", "function": {"name": "search_knowledge_bases", "arguments": "{}"}},
+            {"id": "call_b", "type": "function", "function": {"name": "write_note", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_a", "content": "found it"},
+        {"role": "tool", "tool_call_id": "call_zzz", "content": "stray"},
+        {"role": "user", "content": "thanks"}]), "", json!([{"id": "call_c", "name": "write_note", "arguments": "{}"}]));
+    c["request_redacted"]["tools"] = tools;
+    relay::annotate_call(&mut c);
+    let req = c["tools_requested"].as_array().unwrap();
+    assert_eq!(req.len(), 3);
+    assert_eq!(req[2]["where"], "this reply");
+    let run = c["tools_executed"].as_array().unwrap();
+    assert_eq!(run.len(), 1);
+    assert_eq!(run[0]["id"], "call_a");
+    assert_eq!(run[0]["name"], "search_knowledge_bases");
+    assert_eq!(c["tool_results_unmatched"], 1);
+    assert_eq!(c["tools_typed_as_text"], json!([]));
+
+    // Across a conversation: the reply's call_c counts as run once a later request sends its result.
+    let later = saved_call(json!([
+        {"role": "user", "content": "Look up x and y"},
+        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_c", "type": "function", "function": {"name": "write_note", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_c", "content": "saved"}]), "Done.", Value::Null);
+    let mut calls = vec![c, later];
+    relay::annotate_conversation(&mut calls);
+    assert!(calls[0]["tools_executed"].as_array().unwrap().iter().any(|t| t["id"] == "call_c" && t["where"] == "result sent with a later message"));
+
+    // Responses API: function_call + function_call_output with the same call_id.
+    let mut r = json!({"api": "responses", "request_redacted": {"input": [
+        {"role": "user", "content": "go"},
+        {"type": "function_call", "call_id": "fc_1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "fc_1", "output": "ok"}]}, "reply_redacted": "fine", "tool_calls": null});
+    relay::annotate_call(&mut r);
+    assert_eq!(r["tools_executed"][0]["name"], "lookup");
+}
+
+#[test]
+fn shortened_text_is_flagged() {
+    let db = Db::open_in_memory().unwrap();
+    let long_thinking = "a".repeat(100_050);
+    let long_message = "b".repeat(20_010);
+    let req = json!({"model": "m", "stream": true, "messages": [{"role": "user", "content": long_message}]}).to_string();
+    let body = sse(&[delta(&long_thinking), json!({"choices": [{"delta": {"content": "short reply"}, "finish_reason": "stop"}]})], true);
+    relay::record(&db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: body.as_bytes(),
+        content_type: Some("text/event-stream".into()), status: Some(200), started: 1, bytes_received: Some(body.len() as i64), ..Default::default() }).unwrap();
+    let mut row = rows(&db).remove(0);
+    relay::annotate_call(&mut row);
+    let parts = row["shortened"].as_array().unwrap();
+    assert!(parts.contains(&json!({"part": "thinking", "limit": 100_000, "unit": "characters"})), "{parts:?}");
+    assert!(parts.contains(&json!({"part": "full request", "limit": 20_000, "unit": "characters"})), "{parts:?}");
+    assert!(!parts.iter().any(|p| p["part"] == "reply"));
+    assert!(row["reasoning_redacted"].as_str().unwrap().ends_with("[... 50 more characters not kept]"));
+    // Nothing shortened: nothing flagged, even if the text mentions the words.
+    let plain = record_stream(&sse(&[json!({"choices": [{"delta": {"content": "I kept [... a few more characters not kept] of it"}, "finish_reason": "stop"}]})], true), false);
+    assert_eq!(plain["shortened"], json!([]));
+    // Bigger than the recorder keeps (bytes_received > bytes kept): flagged, and the end marker is
+    // still found in the tail.
+    let db = Db::open_in_memory().unwrap();
+    let head = sse(&[delta("start")], false);
+    let tail = format!("partial line\n{}", sse(&[json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})], true));
+    relay::record(&db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: head.as_bytes(), tail: tail.as_bytes(),
+        content_type: Some("text/event-stream".into()), status: Some(200), started: 1, bytes_received: Some(20 << 20), ..Default::default() }).unwrap();
+    let mut row = rows(&db).remove(0);
+    relay::annotate_call(&mut row);
+    assert_eq!(row["capture_cut"], 1);
+    assert_eq!(row["outcome"]["state"], "complete");
+    assert!(row["shortened"].as_array().unwrap().iter().any(|p| p["unit"] == "MB" && p["limit"] == 16));
+}
+
+/// A model server that streams a few pieces with pauses, stays quiet, then closes without the
+/// end-of-reply marker. `pieces` events, `gap_ms` between them, `quiet_ms` before closing.
+fn cut_server(pieces: usize, gap_ms: u64, quiet_ms: u64) -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() { break; }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") { len = v.trim().parse().unwrap(); }
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n");
+            for i in 0..pieces {
+                if write!(s, "data: {}\n\n", delta(&format!("step {i} "))).and_then(|_| s.flush()).is_err() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(gap_ms));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(quiet_ms));
+        }
+    });
+    port
+}
+
+#[test]
+fn relay_records_timing_and_an_unfinished_stream() {
+    let _g = RELAY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let up = cut_server(3, 200, 1_200);
+    let db = Db::open_in_memory().unwrap();
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let port = tokio_rt.block_on(relay::start(db.clone(), RelayConfig { enabled: true, port: 0, upstream: format!("http://127.0.0.1:{up}") })).unwrap();
+    let got = ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .send_json(json!({"model": "m", "stream": true, "messages": [{"role": "user", "content": "primes"}]})).unwrap().into_string().unwrap();
+    assert!(got.contains("step 2"), "the chat app got the whole stream: {got}");
+    let r = wait_rows(&db, 1);
+    assert_eq!(r.len(), 1);
+    let mut row = r[0].clone();
+    let (start, first, last, fin) = (row["started_at"].as_i64().unwrap(), row["first_chunk_at"].as_i64().unwrap(), row["last_chunk_at"].as_i64().unwrap(), row["finished_at"].as_i64().unwrap());
+    assert!(start <= first && first <= last && last <= fin);
+    assert!(last - first >= 300, "pieces arrived over about 400 ms: first {first}, last {last}");
+    assert!(fin - last >= 1_000, "about 1.2 s of quiet before the close is measured: last {last}, closed {fin}");
+    assert!(row["chunk_count"].as_i64().unwrap() >= 2);
+    assert_eq!(row["downstream_closed"], 0);
+    assert_eq!(row["end_marker"], 0);
+    relay::annotate_call(&mut row);
+    assert_eq!(row["outcome"]["cause"], relay::CAUSE_UNKNOWN);
+    relay::stop();
+}
+
+#[test]
+fn relay_notices_when_the_chat_app_hangs_up() {
+    let _g = RELAY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let up = cut_server(40, 100, 0);
+    let db = Db::open_in_memory().unwrap();
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let port = tokio_rt.block_on(relay::start(db.clone(), RelayConfig { enabled: true, port: 0, upstream: format!("http://127.0.0.1:{up}") })).unwrap();
+    {
+        let body = json!({"model": "m", "stream": true, "messages": [{"role": "user", "content": "primes"}]}).to_string();
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(s, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut first = [0u8; 256];
+        let _ = s.read(&mut first);
+        // Hang up after the first bit, like pressing Stop.
+    }
+    let mut row = Value::Null;
+    for _ in 0..100 {
+        if let Some(r) = rows(&db).into_iter().next() { row = r; break; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!row.is_null(), "call recorded");
+    assert_eq!(row["downstream_closed"], 1, "{row}");
+    assert!(row["chunk_count"].as_i64().unwrap() < 40, "the recorder stopped reading once the chat app was gone");
+    relay::annotate_call(&mut row);
+    assert_eq!(row["outcome"]["by_chat_app"], true);
+    relay::stop();
 }

@@ -35,6 +35,10 @@ const MAX_REQUEST: usize = 64 << 20;
 const KEEP_LIMIT: usize = 16 << 20;
 const TEXT_CAP: usize = 100_000;
 const DEEP_STRING_CAP: usize = 20_000;
+/// Bytes of the end of a reply kept to look for the end-of-reply marker after `KEEP_LIMIT`.
+const TAIL_KEEP: usize = 64 * 1024;
+/// The note `cap()` adds to text it shortened.
+const CAP_NOTE: &str = " more characters not kept]";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayConfig {
@@ -339,7 +343,7 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
             let msg = format!("Houndbit could not reach your model server at {}. Check that LM Studio's server (or Ollama) is running. ({t})", r.upstream);
             let _ = head_tx.send(Err(msg.clone()));
             if let Some(api) = job.api {
-                let call = Call { api, path: &job.path, client: job.client.clone(), request: &job.body, response: &[], content_type: None, status: None, error: Some(msg), started };
+                let call = Call { api, path: &job.path, client: job.client.clone(), request: &job.body, error: Some(msg), started, finished: now_ms(), ..Default::default() };
                 if let Err(e) = record(&r.db, &call) {
                     eprintln!("chat recorder could not save a call: {e}");
                 }
@@ -352,30 +356,69 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
     let _ = head_tx.send(Ok((status, ct.clone())));
     let mut reader = resp.into_reader();
     let mut kept: Vec<u8> = Vec::new();
+    // The last bytes received, so the end-of-reply marker is still seen when `kept` is full.
+    let mut tail: Vec<u8> = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
-    let mut problem: Option<String> = None;
+    let (mut first_chunk, mut last_chunk, mut chunks, mut bytes) = (None, None, 0i64, 0i64);
+    let mut downstream_closed = false;
+    let mut stream_error: Option<String> = None;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if job.api.is_some() && kept.len() < KEEP_LIMIT {
-                    kept.extend_from_slice(&buf[..n]);
+                let t = now_ms();
+                first_chunk.get_or_insert(t);
+                last_chunk = Some(t);
+                chunks += 1;
+                bytes += n as i64;
+                if job.api.is_some() {
+                    if kept.len() < KEEP_LIMIT {
+                        kept.extend_from_slice(&buf[..n]);
+                    }
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > TAIL_KEEP {
+                        tail.drain(..tail.len() - TAIL_KEEP);
+                    }
                 }
                 if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
-                    problem = Some("The chat app stopped the reply early (Stop button, or the app closed the connection).".into());
+                    // The chat app's side of the connection is gone (Stop button, closed tab, timeout).
+                    downstream_closed = true;
                     break;
                 }
             }
             Err(e) => {
-                problem = Some(format!("The model server's reply was cut off: {e}"));
+                stream_error = Some(format!("The connection to the model server broke off: {e}"));
                 let _ = chunk_tx.blocking_send(Err(e));
                 break;
             }
         }
     }
+    // The chat app may have gone while the model server was quiet; nothing was sent after that,
+    // so the failed send above never happened. A closed channel here shows it too.
+    if chunk_tx.is_closed() {
+        downstream_closed = true;
+    }
     drop(chunk_tx);
     if let Some(api) = job.api {
-        let call = Call { api, path: &job.path, client: job.client, request: &job.body, response: &kept, content_type: ct, status: Some(status), error: problem, started };
+        let call = Call {
+            api,
+            path: &job.path,
+            client: job.client,
+            request: &job.body,
+            response: &kept,
+            tail: &tail,
+            content_type: ct,
+            status: Some(status),
+            started,
+            finished: now_ms(),
+            first_chunk_at: first_chunk,
+            last_chunk_at: last_chunk,
+            chunk_count: Some(chunks),
+            bytes_received: Some(bytes),
+            downstream_closed,
+            stream_error,
+            ..Default::default()
+        };
         if let Err(e) = record(&r.db, &call) {
             eprintln!("chat recorder could not save a call: {e}");
         }
@@ -383,16 +426,31 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
 }
 
 /// One finished call, as seen by the relay.
+#[derive(Default)]
 pub struct Call<'a> {
     pub api: &'static str,
     pub path: &'a str,
     pub client: Option<String>,
     pub request: &'a [u8],
+    /// The reply bytes kept for recording (at most `KEEP_LIMIT`).
     pub response: &'a [u8],
+    /// The last bytes received (at most `TAIL_KEEP`); only used when `response` was cut short.
+    pub tail: &'a [u8],
     pub content_type: Option<String>,
     pub status: Option<u16>,
+    /// A real error: the model server could not be reached (status None) or answered with one.
     pub error: Option<String>,
     pub started: i64,
+    /// When the connection to the model server closed (0 = when recorded).
+    pub finished: i64,
+    pub first_chunk_at: Option<i64>,
+    pub last_chunk_at: Option<i64>,
+    pub chunk_count: Option<i64>,
+    pub bytes_received: Option<i64>,
+    /// The chat app closed its connection before the reply ended (seen by the relay).
+    pub downstream_closed: bool,
+    /// Reading the reply from the model server failed partway.
+    pub stream_error: Option<String>,
 }
 
 /// What the reply contained, assembled from a plain JSON reply or a stream.
@@ -407,6 +465,9 @@ pub struct Parsed {
     pub usage: Value,
     pub streamed: bool,
     pub upstream_error: Option<String>,
+    /// The model server said the reply was finished: `data: [DONE]`, a finish_reason, Ollama
+    /// `done: true`, or a final Responses API event. HTTP 200 alone is not enough.
+    pub end_marker: bool,
 }
 
 impl Parsed {
@@ -579,7 +640,11 @@ pub fn parse_response(api: &str, content_type: Option<&str>, body: &[u8]) -> Par
         for line in text.lines() {
             if let Some(d) = line.trim().strip_prefix("data:") {
                 let d = d.trim();
-                if d.is_empty() || d == "[DONE]" {
+                if d == "[DONE]" {
+                    p.end_marker = true;
+                    continue;
+                }
+                if d.is_empty() {
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(d) {
@@ -599,7 +664,15 @@ pub fn parse_response(api: &str, content_type: Option<&str>, body: &[u8]) -> Par
         }
     }
     p.split_think_tags();
+    p.end_marker |= p.finish_reason.is_some();
     p
+}
+
+/// True when the end of a reply (bytes from the middle of a stream onwards) holds the
+/// end-of-reply marker. The first, probably partial, line is skipped.
+fn tail_has_end_marker(api: &str, content_type: Option<&str>, tail: &[u8]) -> bool {
+    let start = tail.iter().position(|b| *b == b'\n').map(|i| i + 1).unwrap_or(0);
+    parse_response(api, content_type, &tail[start..]).end_marker
 }
 
 fn text_of(v: &Value) -> String {
@@ -687,6 +760,8 @@ pub fn build_row(c: &Call) -> Value {
     } else {
         redact_deep(&Value::Array(p.tool_calls.iter().map(|(id, n, a)| json!({"id": id, "name": n, "arguments": cap(a, DEEP_STRING_CAP)})).collect()))
     };
+    let capture_cut = c.bytes_received.is_some_and(|b| b as usize > c.response.len());
+    let end_marker = p.end_marker || (capture_cut && tail_has_end_marker(c.api, c.content_type.as_deref(), c.tail));
     let mut error = c.error.clone().or(p.upstream_error.clone());
     if error.is_none() && c.status.map(|s| s >= 400).unwrap_or(false) {
         error = Some(cap(&String::from_utf8_lossy(c.response), 300));
@@ -716,7 +791,15 @@ pub fn build_row(c: &Call) -> Value {
         "request_sha256": sha256_hex(c.request),
         "response_sha256": if c.status.is_some() { Some(sha256_hex(c.response)) } else { None },
         "started_at": c.started,
-        "finished_at": now_ms(),
+        "finished_at": if c.finished > 0 { c.finished } else { now_ms() },
+        "end_marker": c.status.map(|_| end_marker),
+        "downstream_closed": c.status.map(|_| c.downstream_closed),
+        "stream_error": c.stream_error.as_deref().map(redact_text),
+        "first_chunk_at": c.first_chunk_at,
+        "last_chunk_at": c.last_chunk_at,
+        "chunk_count": c.chunk_count,
+        "bytes_received": c.bytes_received,
+        "capture_cut": c.status.map(|_| capture_cut),
     })
 }
 
@@ -740,22 +823,34 @@ fn is_tool_request_obj(v: &Value) -> bool {
     v.get("name").and_then(Value::as_str).is_some_and(|n| !n.trim().is_empty()) && v.get("arguments").is_some()
 }
 
-/// True when `text` contains a JSON object with "name" and "arguments" keys, bare or inside a
+/// Tool names from JSON objects in `text` with "name" and "arguments" keys, bare or inside a
 /// ```json fence: the model typed a tool request as text instead of making a real tool call.
-pub fn looks_like_typed_tool_call(text: &str) -> bool {
+pub fn typed_tool_requests(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
     if !text.contains("\"name\"") || !text.contains("\"arguments\"") {
-        return false;
+        return out;
     }
-    // Try parsing a JSON value at each '{' (also finds objects nested in arrays or wrappers).
-    // Capped so a huge reply full of braces stays cheap.
+    // Try parsing a JSON value at each '{' (also finds objects nested in arrays or wrappers),
+    // skipping past each one found. Capped so a huge reply full of braces stays cheap.
+    let mut next = 0;
     for (i, _) in text.match_indices('{').take(200) {
-        if let Some(Ok(v)) = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>().next() {
+        if i < next {
+            continue;
+        }
+        let mut it = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        if let Some(Ok(v)) = it.next() {
             if is_tool_request_obj(&v) {
-                return true;
+                out.push(v["name"].as_str().unwrap_or_default().to_string());
+                next = i + it.byte_offset();
             }
         }
     }
-    false
+    out
+}
+
+/// True when `text` holds a tool request typed as text (see `typed_tool_requests`).
+pub fn looks_like_typed_tool_call(text: &str) -> bool {
+    !typed_tool_requests(text).is_empty()
 }
 
 /// The message items of a request, in order (chat messages or Responses API input items).
@@ -768,20 +863,23 @@ fn is_real_tool_item(v: &Value) -> bool {
     v["role"].as_str() == Some("tool") || matches!(v["type"].as_str(), Some("function_call") | Some("function_call_output"))
 }
 
-/// How many earlier assistant turns in the request typed a tool request as text. A turn counts
-/// only when it has no `tool_calls` entry and isn't followed by a tool result (a real tool call).
-pub fn typed_tool_calls_in_request(api: &str, req: &Value) -> usize {
+/// Earlier assistant turns in the request that typed a tool request as text, with the tool names
+/// typed in each. A turn counts only when it has no `tool_calls` entry and isn't followed by a
+/// tool result (a real tool call).
+fn typed_turns_in_request(api: &str, req: &Value) -> Vec<Vec<String>> {
     let items = request_items(api, req);
     items
         .iter()
         .enumerate()
-        .filter(|(i, m)| {
-            m["role"].as_str() == Some("assistant")
-                && looks_like_typed_tool_call(&text_of(&m["content"]))
-                && !m["tool_calls"].as_array().is_some_and(|a| !a.is_empty())
-                && !items.get(i + 1).is_some_and(is_real_tool_item)
-        })
-        .count()
+        .filter(|(i, m)| m["role"].as_str() == Some("assistant") && !m["tool_calls"].as_array().is_some_and(|a| !a.is_empty()) && !items.get(i + 1).is_some_and(is_real_tool_item))
+        .map(|(_, m)| typed_tool_requests(&text_of(&m["content"])))
+        .filter(|names| !names.is_empty())
+        .collect()
+}
+
+/// How many earlier assistant turns in the request typed a tool request as text.
+pub fn typed_tool_calls_in_request(api: &str, req: &Value) -> usize {
+    typed_turns_in_request(api, req).len()
 }
 
 /// (reply typed a tool request as text with no real call, earlier assistant turns that did) for
@@ -808,8 +906,7 @@ pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
         (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
         (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
         SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
-        SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools,
-        SUM(CASE WHEN c.error IS NOT NULL THEN 1 ELSE 0 END) AS errors
+        SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools
         FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;
     // Cheap pre-filter in SQL: a typed tool request always contains the word "arguments".
     let candidates = store::rows(&conn, "SELECT conversation_id, api, request_redacted, reply_redacted, tool_calls FROM relay_calls
@@ -822,9 +919,23 @@ pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
             *counts.entry(c["conversation_id"].as_str().unwrap_or_default().to_string()).or_default() += 1;
         }
     }
+    // Problems (real errors) and interrupted replies, by the same rule as the conversation view.
+    let mut outcomes: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    for c in store::rows(&conn, "SELECT conversation_id, http_status, error, end_marker, finish_reason, downstream_closed FROM relay_calls", &[])? {
+        let e = outcomes.entry(c["conversation_id"].as_str().unwrap_or_default().to_string()).or_default();
+        match call_outcome(&c)["state"].as_str() {
+            Some("problem") => e.0 += 1,
+            Some("interrupted") => e.1 += 1,
+            _ => {}
+        }
+    }
     for r in &mut rows {
-        let n = counts.get(r["conversation_id"].as_str().unwrap_or_default()).copied().unwrap_or(0);
-        r["typed_tool_calls"] = json!(n);
+        let id = r["conversation_id"].as_str().unwrap_or_default().to_string();
+        r["typed_tool_calls"] = json!(counts.get(&id).copied().unwrap_or(0));
+        let (problems, interrupted) = outcomes.get(&id).copied().unwrap_or_default();
+        r["problems"] = json!(problems);
+        r["errors"] = json!(problems);
+        r["interrupted"] = json!(interrupted);
     }
     Ok(rows)
 }
@@ -855,4 +966,164 @@ pub fn annotate_call(call: &mut Value) {
     call["typed_tool_call_in_reply"] = json!(in_reply);
     call["typed_tool_calls_in_history"] = json!(in_history);
     call["typed_tool_call"] = json!(in_reply || in_history > 0);
+    call["outcome"] = call_outcome(call);
+    call["shortened"] = Value::Array(shortened_parts(call));
+    let tools = tool_split(call);
+    for (k, v) in tools.as_object().into_iter().flatten() {
+        call[k.as_str()] = v.clone();
+    }
+}
+
+/// `annotate_call` for every call of one conversation (oldest first), then marks tool calls a reply
+/// asked for as run when a later request carries a tool result with the same id.
+pub fn annotate_conversation(calls: &mut [Value]) {
+    calls.iter_mut().for_each(annotate_call);
+    let run_ids: std::collections::HashSet<String> =
+        calls.iter().flat_map(|c| c["tools_executed"].as_array().cloned().unwrap_or_default()).filter_map(|t| t["id"].as_str().map(String::from)).collect();
+    for c in calls.iter_mut() {
+        let have: Vec<String> = c["tools_executed"].as_array().into_iter().flatten().filter_map(|t| t["id"].as_str().map(String::from)).collect();
+        let extra: Vec<Value> = c["tools_requested"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["where"] == "this reply")
+            .filter(|t| t["id"].as_str().is_some_and(|id| run_ids.contains(id) && !have.iter().any(|h| h == id)))
+            .map(|t| json!({"id": t["id"], "name": t["name"], "where": "result sent with a later message"}))
+            .collect();
+        if let Some(a) = c["tools_executed"].as_array_mut() {
+            a.extend(extra);
+        }
+    }
+}
+
+/// The exact wording for a reply that ended without the end-of-reply marker and with no sign of why.
+pub const CAUSE_UNKNOWN: &str = "Stream ended before completion; cause unknown.";
+/// Notes saved in `error` by recordings made before the v008 columns existed. They describe an
+/// unfinished reply, not a proxy or model server error.
+const OLD_CHAT_APP_STOPPED: &str = "The chat app stopped the reply early";
+const OLD_CUT_OFF: &str = "The model server's reply was cut off";
+
+fn flag(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => n.as_i64().map(|x| x != 0),
+        _ => None,
+    }
+}
+
+/// How one call ended: `{state, label, cause, detail}`.
+/// - `problem`: the model server couldn't be reached, answered with an HTTP error (400 or more),
+///   or sent an error message;
+/// - `complete`: the model server marked the reply finished (see `Parsed::end_marker`);
+/// - `interrupted`: anything else, including HTTP 200 without the end marker. The chat app is
+///   named as the cause only when the recorder saw it close its connection.
+pub fn call_outcome(call: &Value) -> Value {
+    let error = call["error"].as_str().unwrap_or("");
+    let old_app = error.starts_with(OLD_CHAT_APP_STOPPED);
+    let old_cut = error.starts_with(OLD_CUT_OFF);
+    let status = call["http_status"].as_i64();
+    let problem = |detail: &str| json!({"state": "problem", "label": "Problem", "cause": detail, "detail": Value::Null});
+    match status {
+        None => return problem(if error.is_empty() { "No answer from the model server." } else { error }),
+        Some(s) if s >= 400 => return problem(if error.is_empty() { "The model server answered with an error." } else { error }),
+        _ if !error.is_empty() && !old_app && !old_cut => return problem(error),
+        _ => {}
+    }
+    // Older recordings have no end_marker column value: a finish_reason is the marker there.
+    let end = flag(&call["end_marker"]).unwrap_or(!call["finish_reason"].is_null());
+    if end {
+        return json!({"state": "complete", "label": "Finished", "cause": Value::Null, "detail": Value::Null});
+    }
+    // An older recording's "chat app stopped" note was only written when sending to the chat app failed.
+    let downstream = flag(&call["downstream_closed"]).unwrap_or(old_app);
+    let detail = call["stream_error"].as_str().map(String::from).or_else(|| old_cut.then(|| error.to_string()));
+    let cause = if downstream {
+        "Your chat app closed its connection before the reply finished (for example the Stop button, a closed tab, or the app giving up)."
+    } else {
+        CAUSE_UNKNOWN
+    };
+    json!({"state": "interrupted", "label": "Interrupted", "cause": cause, "by_chat_app": downstream, "detail": detail})
+}
+
+/// True when `s` carries the note `cap()` adds: "[... N more characters not kept]".
+fn has_cap_note(s: &str) -> bool {
+    s.match_indices("[... ").any(|(i, _)| {
+        let rest = &s[i + 5..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with(CAP_NOTE)
+    })
+}
+
+/// Which saved parts were shortened, each `{part, limit, unit}`.
+pub fn shortened_parts(call: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (col, part) in [("reasoning_redacted", "thinking"), ("reply_redacted", "reply"), ("last_user_redacted", "your message")] {
+        if call[col].as_str().is_some_and(has_cap_note) {
+            out.push(json!({"part": part, "limit": TEXT_CAP, "unit": "characters"}));
+        }
+    }
+    let req = &call["request_redacted"];
+    if !req.is_null() && has_cap_note(&if let Some(s) = req.as_str() { s.to_string() } else { req.to_string() }) {
+        out.push(json!({"part": "full request", "limit": DEEP_STRING_CAP, "unit": "characters"}));
+    }
+    if call["tool_calls"].as_array().into_iter().flatten().any(|t| t["arguments"].as_str().is_some_and(has_cap_note)) {
+        out.push(json!({"part": "tool call details", "limit": DEEP_STRING_CAP, "unit": "characters"}));
+    }
+    if flag(&call["capture_cut"]) == Some(true) {
+        out.push(json!({"part": "reply as received", "limit": KEEP_LIMIT >> 20, "unit": "MB"}));
+    }
+    out
+}
+
+/// Available, requested (real structured calls), typed-as-text and executed tools for one call.
+/// "Executed" needs evidence: a tool result in the request whose id matches a tool call's id.
+pub fn tool_split(call: &Value) -> Value {
+    let api = call["api"].as_str().unwrap_or("");
+    let req = &call["request_redacted"];
+    let available: Vec<String> = req["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["function"]["name"].as_str().or_else(|| t["name"].as_str()).map(String::from))
+        .collect();
+    let items = request_items(api, req);
+    let mut requested = Vec::new();
+    for it in &items {
+        if it["role"].as_str() == Some("assistant") {
+            for tc in it["tool_calls"].as_array().into_iter().flatten() {
+                requested.push(json!({"id": tc["id"], "name": tc["function"]["name"].as_str().or_else(|| tc["name"].as_str()), "where": "earlier reply"}));
+            }
+        }
+        if it["type"].as_str() == Some("function_call") {
+            requested.push(json!({"id": it["call_id"], "name": it["name"], "where": "earlier reply"}));
+        }
+    }
+    let reply_calls = call["tool_calls"].as_array().cloned().unwrap_or_default();
+    for tc in &reply_calls {
+        requested.push(json!({"id": tc["id"], "name": tc["name"], "where": "this reply"}));
+    }
+    let mut typed = Vec::new();
+    for names in typed_turns_in_request(api, req) {
+        typed.extend(names.into_iter().map(|n| json!({"name": n, "where": "earlier reply"})));
+    }
+    if reply_calls.is_empty() {
+        typed.extend(typed_tool_requests(call["reply_redacted"].as_str().unwrap_or("")).into_iter().map(|n| json!({"name": n, "where": "this reply"})));
+    }
+    let mut executed = Vec::new();
+    let mut unmatched = 0;
+    for it in &items {
+        let result_id = if it["role"].as_str() == Some("tool") {
+            Some(it["tool_call_id"].as_str())
+        } else if it["type"].as_str() == Some("function_call_output") {
+            Some(it["call_id"].as_str())
+        } else {
+            None
+        };
+        let Some(id) = result_id else { continue };
+        match id.and_then(|id| requested.iter().find(|r| r["where"] == "earlier reply" && r["id"].as_str() == Some(id))) {
+            Some(r) => executed.push(json!({"id": r["id"], "name": r["name"], "where": "earlier reply"})),
+            None => unmatched += 1,
+        }
+    }
+    json!({"tools_available": available, "tools_requested": requested, "tools_typed_as_text": typed, "tools_executed": executed, "tool_results_unmatched": unmatched})
 }
