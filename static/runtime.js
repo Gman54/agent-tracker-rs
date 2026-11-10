@@ -678,7 +678,7 @@ async function renderChats(body) {
       <thead><tr><th>Conversation</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
       <tbody>${conversations.map(c => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
-          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.problems ? `<div class="small">${pill('red', `${c.problems} problem(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
+          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.problems ? `<div class="small">${pill('red', `${c.problems} error(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
           <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
           <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
           <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>
@@ -699,12 +699,15 @@ function relayEarlier(c) {
   </details>`;
 }
 
+// Shown once per message. Earlier replies are named as earlier, so they aren't mistaken for this one.
 function relayTypedWarning(c) {
   if (!c.typed_tool_call) return '';
-  const where = [];
-  if (c.typed_tool_call_in_reply) where.push('in this reply');
-  if (c.typed_tool_calls_in_history) where.push(c.typed_tool_calls_in_history === 1 ? 'in 1 earlier reply' : `in ${c.typed_tool_calls_in_history} earlier replies`);
-  return `<div class="note note-warn mt-xs">The model wrote a tool request as plain text (${esc(where.join(' and '))}). That is not a real tool request, and there is no sign any tool ran. This model or its LM Studio settings may not support tool calls.</div>`;
+  const n = c.typed_tool_calls_in_history || 0;
+  const earlier = n === 1 ? '1 earlier reply in this chat' : `${n} earlier replies in this chat`;
+  const what = c.typed_tool_call_in_reply
+    ? `This reply${n ? ` (and ${earlier})` : ''} wrote a tool request as plain text.`
+    : `This reply didn't, but ${earlier} wrote a tool request as plain text.`;
+  return `<div class="note note-warn mt-xs">${esc(what)} Plain text isn't a real tool request, and there is no sign those tools ran. Possible reasons: the model ignored the tool format, or LM Studio didn't turn its output into tool calls for this model.</div>`;
 }
 
 // How the reply ended. "Finished" needs the model server's end-of-reply marker; HTTP 200 alone isn't enough.
@@ -716,7 +719,10 @@ function relayOutcomePill(c) {
 function relayOutcomeNote(c) {
   const o = c.outcome;
   if (!o || o.state === 'complete') return '';
-  if (o.state === 'problem') return `<div class="note note-warn mt-xs">${esc(o.cause)}</div>`;
+  if (o.state === 'problem') {
+    const head = o.source === 'model_server' ? (o.kind === 'context_full' ? 'The chat was too long for the model.' : 'Error from the model server.') : 'No answer.';
+    return `<div class="note note-warn mt-xs"><b>${esc(head)}</b> ${esc(o.cause)}${o.detail ? `<div class="small mt-xs">What the model server said: <span class="mono">${esc(o.detail)}</span></div>` : ''}</div>`;
+  }
   return `<div class="note note-warn mt-xs"><b>Interrupted.</b> ${esc(o.cause)}${o.detail ? `<div class="small mt-xs">What the recorder saw: ${esc(o.detail)}</div>` : ''}</div>`;
 }
 
@@ -727,11 +733,15 @@ function relayTiming(c) {
   if (c.http_status == null) return '';
   if (c.chunk_count == null) return '<p class="small muted mt-xs">Detailed timing wasn\'t recorded for this older message.</p>';
   if (!c.chunk_count) return '<p class="small muted mt-xs">Nothing arrived from the model server before the connection closed.</p>';
+  if (relayErrorOnly(c)) return `<p class="small muted mt-xs">${esc(`The model server sent its error after ${secs(c.first_chunk_at - c.started_at)} (${c.chunk_count} piece(s), no reply text).`)}</p>`;
   const line = `Model server first sent something after ${secs(c.first_chunk_at - c.started_at)} · last sent something at ${secs(c.last_chunk_at - c.started_at)} · ${c.chunk_count} piece(s) received`;
   const idle = (c.finished_at || 0) - c.last_chunk_at;
   return `<p class="small muted mt-xs">${esc(line)}</p>${idle >= RELAY_IDLE_NOTE_MS
     ? `<div class="note note-plain mt-xs">Time from last piece to close: ${esc(secs(idle))}. Nothing new arrived during that time, so it was waiting, not writing.</div>` : ''}`;
 }
+
+// A model server error with no thinking or reply text: what arrived was the error itself.
+const relayErrorOnly = c => c.outcome?.source === 'model_server' && !c.reply_redacted && !c.reasoning_redacted && !c.tool_calls;
 
 // Saved text that was cut to keep recordings a sensible size.
 function relayShortened(c) {
@@ -747,12 +757,15 @@ function relayTools(c) {
   const av = c.tools_available || [], rq = c.tools_requested || [], ty = c.tools_typed_as_text || [], ex = c.tools_executed || [];
   if (!av.length && !rq.length && !ty.length && !ex.length) return '';
   const names = list => list.map(t => `${t.name || '?'} (${t.where})`).join(', ');
+  const plain = list => list.map(t => t.name || '?').join(', ');
+  const tyNow = ty.filter(t => t.where === 'this reply'), tyBefore = ty.filter(t => t.where !== 'this reply');
   const offered = !av.length ? '<span class="muted">None offered</span>'
     : av.length <= 6 ? esc(av.join(', ')) : `<details><summary>${esc(av.length)} tools</summary>${esc(av.join(', '))}</details>`;
   const rows = [
     ['Available to the model', offered],
     ['Requested (real tool calls)', rq.length ? esc(names(rq)) : '<span class="muted">None</span>'],
-    ['Typed as text', ty.length ? `${esc(names(ty))} <span class="muted">— typed as text, not a real tool request</span>` : '<span class="muted">None</span>'],
+    ['Typed as text in this reply', tyNow.length ? `${esc(plain(tyNow))} <span class="muted">— not a real tool request</span>` : '<span class="muted">None</span>'],
+    ...(tyBefore.length ? [['Typed as text in earlier replies', `${esc(plain(tyBefore))} <span class="muted">— from the chat history, not this reply</span>`]] : []),
     ['Ran', ex.length ? `${esc(names(ex))} <span class="muted">— a tool result with a matching id was sent back</span>` : 'No evidence any tool ran'],
   ];
   const odd = c.tool_results_unmatched ? `<p class="small muted">${esc(c.tool_results_unmatched)} tool result message(s) in the history don't match a tool call id, so they aren't counted as evidence.</p>` : '';
@@ -770,16 +783,17 @@ async function renderConversation(id) {
       ${relayEarlier(c)}
       ${(c.latest_user || c.last_user_redacted) ? `<h4 class="mt-xs">You asked</h4><pre class="ctx-body">${esc(c.latest_user || c.last_user_redacted)}</pre>` : ''}
       ${(c.after_user_messages || []).map(m => `<h4 class="mt-xs">${esc(relayRole(m.role))}</h4><pre class="ctx-body">${esc(m.text || '(empty)')}</pre>`).join('')}
-      ${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
-      <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}
+      ${relayErrorOnly(c) ? '<h4 class="mt-xs">Reply</h4><p class="small muted">None. The model server stopped with an error before any thinking or reply text arrived.</p>' : `${c.reasoning_redacted ? `<details class="mt-xs" open><summary class="small"><b>Model's thinking</b> <span class="muted">(${esc(RELAY_REASONING[c.reasoning_source] || 'sent by the model server')}; may be incomplete)</span></summary><pre class="ctx-body">${esc(c.reasoning_redacted)}</pre></details>` : '<p class="small muted mt-xs">No thinking text was sent for this reply.</p>'}
+      <h4 class="mt-xs">Reply</h4>${c.reply_redacted ? `<pre class="ctx-body">${esc(c.reply_redacted)}</pre>` : '<p class="small muted">No reply text.</p>'}`}
       ${c.tool_calls ? `<h4 class="mt-xs">Tool calls the model asked for</h4>${c.tool_calls.map(t => `<div class="small"><b>${esc(t.name || '?')}</b><pre class="diff">${esc(pretty(t.arguments))}</pre></div>`).join('')}<p class="small muted">The recorder only sees the request. See "Ran" under Tools for any sign it ran.</p>` : ''}
+      ${relayOutcomeNote(c)}
       ${relayTools(c)}
       ${relayTypedWarning(c)}
-      ${relayOutcomeNote(c)}
       ${relayShortened(c)}
       <details class="history"><summary>Details</summary>
         ${kv([['Sent by', esc(c.client || 'Unknown app')], ['Kind of call', esc(c.api)], ['Messages in the request', esc(c.message_count ?? '—')], ['Finished because', esc(c.finish_reason || '—')],
           ['Tokens', esc(c.usage ? `${c.usage.prompt_tokens ?? c.usage.input_tokens ?? '?'} in, ${c.usage.completion_tokens ?? c.usage.output_tokens ?? '?'} out` : 'Not reported')], ['Server status', esc(c.http_status != null ? `${c.http_status} (the server answered; this alone doesn't mean the reply finished)` : 'No answer')],
+          ...(c.request_size ? [['Request size', esc(`${Number(c.request_size.chars).toLocaleString('en-US')} characters, roughly ${Number(c.request_size.est_tokens_low).toLocaleString('en-US')}-${Number(c.request_size.est_tokens_high).toLocaleString('en-US')} tokens (estimate)${c.request_size.tools_count ? `; ${c.request_size.tools_count} tool descriptions are ${Number(c.request_size.tools_chars).toLocaleString('en-US')} characters of that` : ''}`)]] : []),
           ['End-of-reply marker', esc(c.end_marker == null ? 'Not recorded (older message)' : c.end_marker ? 'Received' : 'Not received')],
           ['Request hash', `<span class="mono">${esc(short('sha_' + c.request_sha256))}</span>`]])}
         <h4 class="mt-xs">Full request (redacted)</h4><pre class="diff">${esc(pretty(c.request_redacted))}</pre>

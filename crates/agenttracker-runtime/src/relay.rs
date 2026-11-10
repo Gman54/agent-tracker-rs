@@ -967,6 +967,7 @@ pub fn annotate_call(call: &mut Value) {
     call["typed_tool_calls_in_history"] = json!(in_history);
     call["typed_tool_call"] = json!(in_reply || in_history > 0);
     call["outcome"] = call_outcome(call);
+    call["request_size"] = request_size(call);
     call["shortened"] = Value::Array(shortened_parts(call));
     let tools = tool_split(call);
     for (k, v) in tools.as_object().into_iter().flatten() {
@@ -1022,11 +1023,11 @@ pub fn call_outcome(call: &Value) -> Value {
     let old_app = error.starts_with(OLD_CHAT_APP_STOPPED);
     let old_cut = error.starts_with(OLD_CUT_OFF);
     let status = call["http_status"].as_i64();
-    let problem = |detail: &str| json!({"state": "problem", "label": "Problem", "cause": detail, "detail": Value::Null});
     match status {
-        None => return problem(if error.is_empty() { "No answer from the model server." } else { error }),
-        Some(s) if s >= 400 => return problem(if error.is_empty() { "The model server answered with an error." } else { error }),
-        _ if !error.is_empty() && !old_app && !old_cut => return problem(error),
+        None => return json!({"state": "problem", "label": "No answer", "source": "no_answer", "kind": Value::Null,
+            "cause": if error.is_empty() { "No answer from the model server." } else { error }, "detail": Value::Null}),
+        Some(s) if s >= 400 => return server_error(call, if error.is_empty() { "The model server answered with an error." } else { error }),
+        _ if !error.is_empty() && !old_app && !old_cut => return server_error(call, error),
         _ => {}
     }
     // Older recordings have no end_marker column value: a finish_reason is the marker there.
@@ -1043,6 +1044,65 @@ pub fn call_outcome(call: &Value) -> Value {
         CAUSE_UNKNOWN
     };
     json!({"state": "interrupted", "label": "Interrupted", "cause": cause, "by_chat_app": downstream, "detail": detail})
+}
+
+/// Error text from model servers that means the request didn't fit the loaded context window
+/// (LM Studio, llama.cpp, Ollama and OpenAI-style wordings).
+pub fn is_context_full_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    ["context size has been exceeded", "context length", "context window", "maximum context", "exceeds the context", "n_ctx", "too many tokens", "context_length_exceeded", "prompt is too long"]
+        .iter()
+        .any(|p| e.contains(p))
+}
+
+/// 12345 -> "12,345".
+fn thousands(n: u64) -> String {
+    let d = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// An error the model server itself sent (HTTP 400 or more, or an error message in the reply).
+/// The server's own words go in `detail`; `cause` is a plain explanation where one is known.
+fn server_error(call: &Value, error: &str) -> Value {
+    if is_context_full_error(error) {
+        let size = request_size(call);
+        let (lo, hi) = (size["est_tokens_low"].as_u64().unwrap_or(0), size["est_tokens_high"].as_u64().unwrap_or(0));
+        let n = size["tools_count"].as_u64().unwrap_or(0);
+        let mut cause = format!(
+            "The request didn't fit in the model's context window (how much text the loaded model can hold at once). This request was roughly {}-{} tokens (rough estimate from its size).", thousands(lo), thousands(hi)
+        );
+        if n > 0 {
+            let (tl, th) = (size["tools_tokens_low"].as_u64().unwrap_or(0), size["tools_tokens_high"].as_u64().unwrap_or(0));
+            cause.push_str(&format!(" The {n} tool descriptions your chat app sent were about {}-{} of those.", thousands(tl), thousands(th)));
+        }
+        cause.push_str(" To fix it: raise Context Length in LM Studio's settings for this model and load it again, or turn off tools you don't need in your chat app. Thinking models also need room left over for their thinking and reply.");
+        return json!({"state": "problem", "label": "Model server error", "source": "model_server", "kind": "context_full", "cause": cause, "detail": error});
+    }
+    json!({"state": "problem", "label": "Model server error", "source": "model_server", "kind": Value::Null, "cause": "The model server sent back an error instead of a reply.", "detail": error})
+}
+
+/// Size of the saved request, split into tool descriptions and messages, with a rough token
+/// range (3 to 4 characters per token). It's an estimate: the real count depends on the model.
+pub fn request_size(call: &Value) -> Value {
+    let api = call["api"].as_str().unwrap_or("");
+    let req = &call["request_redacted"];
+    let compact = |v: &Value| if v.is_null() { 0 } else { v.to_string().chars().count() as u64 };
+    let tools = &req["tools"];
+    let tools_chars = compact(tools);
+    let messages_chars = compact(&Value::Array(request_items(api, req)));
+    let total = compact(req);
+    let est = |c: u64| (c / 4, c.div_ceil(3));
+    let (lo, hi) = est(total);
+    let (tl, th) = est(tools_chars);
+    json!({"chars": total, "tools_count": tools.as_array().map(|a| a.len()).unwrap_or(0), "tools_chars": tools_chars, "messages_chars": messages_chars,
+        "est_tokens_low": lo, "est_tokens_high": hi, "tools_tokens_low": tl, "tools_tokens_high": th})
 }
 
 /// True when `s` carries the note `cap()` adds: "[... N more characters not kept]".

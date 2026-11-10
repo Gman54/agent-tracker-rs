@@ -631,3 +631,34 @@ fn relay_notices_when_the_chat_app_hangs_up() {
     assert_eq!(row["outcome"]["by_chat_app"], true);
     relay::stop();
 }
+
+#[test]
+fn context_full_error_from_lm_studio_is_explained_with_request_size() {
+    let db = Db::open_in_memory().unwrap();
+    let tool = json!({"type": "function", "function": {"name": "search_knowledge_bases", "description": "Search the user's accessible knowledge bases by name and description.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}});
+    let req = json!({"model": "qwen/qwen3.8-27b", "stream": true, "messages": [{"role": "user", "content": "what is the first prime number after 100?"}], "tools": vec![tool; 38]}).to_string();
+    let resp = "data: {\"error\":{\"message\":\"Engine protocol predict stream returned an error: {\\\"code\\\":500,\\\"message\\\":\\\"Context size has been exceeded.\\\",\\\"type\\\":\\\"server_error\\\"}\"}}\n\n";
+    relay::record(&db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: resp.as_bytes(),
+        content_type: Some("text/event-stream".into()), status: Some(200), started: 1, first_chunk_at: Some(89_801), last_chunk_at: Some(89_802), chunk_count: Some(2), ..Default::default() }).unwrap();
+    let mut row = rows(&db).remove(0);
+    relay::annotate_call(&mut row);
+    let o = &row["outcome"];
+    assert_eq!(o["state"], "problem");
+    assert_eq!(o["label"], "Model server error");
+    assert_eq!(o["source"], "model_server");
+    assert_eq!(o["kind"], "context_full");
+    assert!(o["detail"].as_str().unwrap().contains("Context size has been exceeded"));
+    let cause = o["cause"].as_str().unwrap();
+    assert!(cause.contains("context window") && cause.contains("38 tool descriptions") && cause.contains("rough estimate"), "{cause}");
+    let size = &row["request_size"];
+    assert_eq!(size["tools_count"], 38);
+    assert!(size["tools_chars"].as_u64().unwrap() > 20 * size["messages_chars"].as_u64().unwrap());
+    assert!(size["est_tokens_low"].as_u64().unwrap() < size["est_tokens_high"].as_u64().unwrap());
+    // Other server errors keep the server's words but don't guess a cause.
+    let other = relay::call_outcome(&json!({"http_status": 200, "error": "Model not loaded"}));
+    assert_eq!(other["label"], "Model server error");
+    assert!(other["kind"].is_null());
+    assert_eq!(relay::call_outcome(&json!({"http_status": null, "error": "could not connect"}))["label"], "No answer");
+    assert!(!relay::is_context_full_error("Model not loaded"));
+    assert!(relay::is_context_full_error("This model's maximum context length is 8192 tokens"));
+}
