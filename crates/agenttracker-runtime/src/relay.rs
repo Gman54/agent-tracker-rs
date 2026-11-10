@@ -745,6 +745,16 @@ pub fn conversation_id(msgs: &[(String, String)]) -> String {
     format!("conv_{}", &sha256_hex(key.as_bytes())[..24])
 }
 
+/// One user message as a one-line heading: spaces squeezed, cut at 80 characters with "...".
+/// None when the message is empty.
+pub fn short_question(text: &str) -> Option<String> {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return None;
+    }
+    Some(if one_line.chars().count() > 80 { format!("{}...", one_line.chars().take(80).collect::<String>()) } else { one_line })
+}
+
 /// Builds the `relay_calls` row for one call (redacted).
 pub fn build_row(c: &Call) -> Value {
     use tracker_common::redaction::{redact_deep, redact_text};
@@ -752,8 +762,7 @@ pub fn build_row(c: &Call) -> Value {
     let msgs = request_messages(c.api, &req);
     let first_user = msgs.iter().find(|(r, _)| r == "user").map(|(_, t)| t.clone()).unwrap_or_default();
     let last_user = msgs.iter().rev().find(|(r, _)| r == "user").map(|(_, t)| t.clone()).unwrap_or_default();
-    let one_line: String = first_user.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = if one_line.is_empty() { "(no user message)".to_string() } else { redact_text(&if one_line.chars().count() > 80 { format!("{}...", one_line.chars().take(80).collect::<String>()) } else { one_line.clone() }) };
+    let title = redact_text(&short_question(&first_user).unwrap_or_else(|| "(no user message)".to_string()));
     let p = parse_response(c.api, c.content_type.as_deref(), c.response);
     let tool_calls = if p.tool_calls.is_empty() {
         Value::Null
@@ -905,6 +914,7 @@ pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
         (SELECT x.title FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at LIMIT 1) AS title,
         (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
         (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
+        (SELECT x.last_user_redacted FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS latest_user_full,
         SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
         SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools
         FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;
@@ -936,12 +946,20 @@ pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
         r["problems"] = json!(problems);
         r["errors"] = json!(problems);
         r["interrupted"] = json!(interrupted);
+        // The newest question, already redacted when saved; cut like the title for the list.
+        let latest = r["latest_user_full"].as_str().and_then(short_question);
+        r["latest_question"] = json!(latest);
+        r["latest_differs"] = json!(latest.as_deref().is_some_and(|q| Some(q) != r["title"].as_str()));
+        if let Some(m) = r.as_object_mut() {
+            m.remove("latest_user_full");
+        }
     }
     Ok(rows)
 }
 
 /// Adds read-time fields to one `relay_calls` row for the conversation view:
 /// - `latest_user`: the newest user message in the request;
+/// - `latest_question`: the same as a one-line heading, and `latest_differs_from_title`;
 /// - `earlier_messages`: the messages before it that the chat app re-sent ({role, text});
 /// - `after_user_messages`: anything after it in the same request (for example tool results);
 /// - `typed_tool_call_in_reply`: the reply typed a tool request as text and made no real call;
@@ -960,6 +978,11 @@ pub fn annotate_call(call: &mut Value) {
         None => (msgs.iter().map(item).collect(), Vec::new()),
     };
     let (in_reply, in_history) = typed_tool_call_flags(call);
+    // Heading for this message: its own newest question (cut like the title). Computed on read, so
+    // older recordings get it too. `title` stays the chat's first question.
+    let latest_question = latest_user.as_deref().and_then(short_question);
+    call["latest_differs_from_title"] = json!(latest_question.as_deref().is_some_and(|q| Some(q) != call["title"].as_str()));
+    call["latest_question"] = json!(latest_question);
     call["latest_user"] = json!(latest_user);
     call["earlier_messages"] = Value::Array(earlier);
     call["after_user_messages"] = Value::Array(after);
@@ -1071,6 +1094,15 @@ fn thousands(n: u64) -> String {
 /// An error the model server itself sent (HTTP 400 or more, or an error message in the reply).
 /// The server's own words go in `detail`; `cause` is a plain explanation where one is known.
 fn server_error(call: &Value, error: &str) -> Value {
+    // Checked first: a load failure can mention the context length in its advice.
+    if is_model_load_error(error) {
+        let mut cause = "The model server couldn't load this model: it is too big for this computer with the current settings.".to_string();
+        if let Some(mem) = needed_memory(error) {
+            cause.push_str(&format!(" It said the model needs about {mem} of memory."));
+        }
+        cause.push_str(" To fix it: pick a smaller model, or a smaller version of it (a lower quantization, such as Q4 instead of Q8), or lower the Context Length for this model in LM Studio. LM Studio can also turn off its loading limits, but that could make your PC freeze.");
+        return json!({"state": "problem", "label": "Model server error", "source": "model_server", "kind": "model_load_failed", "cause": cause, "detail": error});
+    }
     if is_context_full_error(error) {
         let size = request_size(call);
         let (lo, hi) = (size["est_tokens_low"].as_u64().unwrap_or(0), size["est_tokens_high"].as_u64().unwrap_or(0));
@@ -1086,6 +1118,35 @@ fn server_error(call: &Value, error: &str) -> Value {
         return json!({"state": "problem", "label": "Model server error", "source": "model_server", "kind": "context_full", "cause": cause, "detail": error});
     }
     json!({"state": "problem", "label": "Model server error", "source": "model_server", "kind": Value::Null, "cause": "The model server sent back an error instead of a reply.", "detail": error})
+}
+
+/// Error text meaning the model server couldn't load the model (LM Studio's loading guardrails,
+/// out of memory while loading).
+pub fn is_model_load_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    ["failed to load model", "model loading was stopped", "insufficient system resources", "error loading model", "failed to load the model", "not enough memory to load"]
+        .iter()
+        .any(|p| e.contains(p))
+}
+
+/// "approximately 117.94 GB" in an error -> "117.94 GB".
+fn needed_memory(e: &str) -> Option<String> {
+    let lower = e.to_ascii_lowercase();
+    for key in ["approximately ", "about ", "requires "] {
+        for (i, _) in lower.match_indices(key) {
+            let rest = &e[i + key.len()..];
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
+            if num.is_empty() || !num.chars().next().unwrap().is_ascii_digit() {
+                continue;
+            }
+            let after = rest[num.len()..].trim_start();
+            let unit: String = after.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+            if ["GB", "GiB", "MB", "MiB", "TB"].iter().any(|u| u.eq_ignore_ascii_case(&unit)) {
+                return Some(format!("{} {}", num.trim_end_matches(['.', ',']), unit));
+            }
+        }
+    }
+    None
 }
 
 /// Size of the saved request, split into tool descriptions and messages, with a rough token

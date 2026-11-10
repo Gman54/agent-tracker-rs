@@ -662,3 +662,64 @@ fn context_full_error_from_lm_studio_is_explained_with_request_size() {
     assert!(!relay::is_context_full_error("Model not loaded"));
     assert!(relay::is_context_full_error("This model's maximum context length is 8192 tokens"));
 }
+
+// ---- headings and model load errors --------------------------------------------------------------
+
+#[test]
+fn each_message_is_headed_by_its_own_latest_question() {
+    let db = Db::open_in_memory().unwrap();
+    let first = json!({"role": "user", "content": "tell me what is the population of paragua?"});
+    record_call(&db, json!([first]), "About 6.9 million.");
+    let long = format!("what is pi to 100th decimal point?   {}", "please ".repeat(20));
+    record_call(&db, json!([first, {"role": "assistant", "content": "About 6.9 million."}, {"role": "user", "content": long}]), "3.14159...");
+
+    let mut calls = store::rows(&db.conn(), "SELECT * FROM relay_calls ORDER BY rowid", &[]).unwrap();
+    relay::annotate_conversation(&mut calls);
+    // First message: its question is the chat's first question, so no "started with" line.
+    assert_eq!(calls[0]["title"], "tell me what is the population of paragua?");
+    assert_eq!(calls[0]["latest_question"], "tell me what is the population of paragua?");
+    assert_eq!(calls[0]["latest_differs_from_title"], false);
+    // Second message: headed by its own question, cut to 80 characters like the title.
+    let q = calls[1]["latest_question"].as_str().unwrap();
+    assert!(q.starts_with("what is pi to 100th decimal point? please"), "{q}");
+    assert!(q.ends_with("...") && q.chars().count() == 83, "{q}");
+    assert_eq!(calls[1]["title"], "tell me what is the population of paragua?");
+    assert_eq!(calls[1]["latest_differs_from_title"], true);
+
+    // List: newest question next to the first one.
+    let list = relay::list_conversations(&db).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["title"], "tell me what is the population of paragua?");
+    assert_eq!(list[0]["latest_question"], json!(q));
+    assert_eq!(list[0]["latest_differs"], true);
+    assert!(list[0].get("latest_user_full").is_none());
+
+    // An older saved row with no request JSON still gets a heading from last_user_redacted.
+    let mut old = json!({"api": "chat_completions", "title": "hi", "request_redacted": null, "last_user_redacted": "and   now?", "reply_redacted": null, "tool_calls": null, "http_status": 200});
+    relay::annotate_call(&mut old);
+    assert_eq!(old["latest_question"], "and now?");
+}
+
+#[test]
+fn model_load_failure_is_explained() {
+    let err = "Failed to load model \"qwen3.8-flash-next\". Error: Model loading was stopped due to insufficient system resources. Under the current settings, this model requires approximately 117.94 GB of memory, and continuing to load it would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.";
+    assert!(relay::is_model_load_error(err));
+    assert!(!relay::is_model_load_error("Context size has been exceeded."));
+    let o = relay::call_outcome(&json!({"api": "chat_completions", "http_status": 400, "error": err, "request_redacted": {"messages": []}}));
+    assert_eq!(o["state"], "problem");
+    assert_eq!(o["label"], "Model server error");
+    assert_eq!(o["kind"], "model_load_failed");
+    assert_eq!(o["detail"], err);
+    let cause = o["cause"].as_str().unwrap();
+    assert!(cause.contains("too big"), "{cause}");
+    assert!(cause.contains("about 117.94 GB of memory"), "{cause}");
+    assert!(cause.contains("smaller model") && cause.contains("quantization") && cause.contains("Context Length"), "{cause}");
+    assert!(cause.contains("freeze"), "{cause}");
+    // Without a memory figure, no number is made up.
+    let o = relay::call_outcome(&json!({"api": "chat_completions", "http_status": 500, "error": "Error loading model: out of memory", "request_redacted": {}}));
+    assert_eq!(o["kind"], "model_load_failed");
+    assert!(!o["cause"].as_str().unwrap().contains("GB"));
+    // Context-full errors keep their own explanation.
+    let o = relay::call_outcome(&json!({"api": "chat_completions", "http_status": 500, "error": "Context size has been exceeded.", "request_redacted": {"messages": []}}));
+    assert_eq!(o["kind"], "context_full");
+}

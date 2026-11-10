@@ -667,7 +667,7 @@ function relayTypedBadge(n) {
 
 async function renderChats(body) {
   const [{ conversations }, rs] = await Promise.all([api('GET', '/api/ui/runtime/relay/conversations'), api('GET', '/api/ui/runtime/relay')]);
-  const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the Houndbit chat recorder. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
+  const head = `<div class="note note-plain mb-sm">Chats your chat app sent through the Houndbit chat recorder, newest first. Each chat is kept together under its first question, and the newest question is shown on top. ${rs.status.running ? `Recording now at <code>${esc(rs.address)}</code>.` : 'The recorder is off.'} <a href="#connections/relay">Recorder settings</a></div>`;
   if (!conversations.length) {
     body.innerHTML = head + `<div class="card">${emptyState('clipboard', 'No chats recorded yet', 'Turn on the chat recorder in Connections, paste its address into your chat app, and send a message.',
       '<button class="btn btn-primary" data-act="go" data-screen="connections" data-param="relay">Set up the chat recorder</button>')}</div>`;
@@ -675,10 +675,10 @@ async function renderChats(body) {
   }
   body.innerHTML = head + `
     <div class="card table-wrap"><table class="table">
-      <thead><tr><th>Conversation</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
+      <thead><tr><th>Latest question</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
       <tbody>${conversations.map(c => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
-          <td><div class="task-row-title">${esc(c.title || '(untitled)')}</div>${c.problems ? `<div class="small">${pill('red', `${c.problems} error(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
+          <td><div class="task-row-title">${esc(c.latest_question || c.title || '(untitled)')}</div>${c.latest_differs ? `<div class="small muted relay-started">Started with: ${esc(c.title)}</div>` : ''}${c.problems ? `<div class="small">${pill('red', `${c.problems} error(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
           <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
           <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
           <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>
@@ -716,11 +716,12 @@ function relayOutcomePill(c) {
   const o = c.outcome;
   return o ? pill(RELAY_OUTCOME_PILL[o.state] || 'amber', o.label) : '';
 }
+const RELAY_ERROR_HEADS = { context_full: 'The chat was too long for the model.', model_load_failed: 'The model could not be loaded.' };
 function relayOutcomeNote(c) {
   const o = c.outcome;
   if (!o || o.state === 'complete') return '';
   if (o.state === 'problem') {
-    const head = o.source === 'model_server' ? (o.kind === 'context_full' ? 'The chat was too long for the model.' : 'Error from the model server.') : 'No answer.';
+    const head = o.source === 'model_server' ? (RELAY_ERROR_HEADS[o.kind] || 'Error from the model server.') : 'No answer.';
     return `<div class="note note-warn mt-xs"><b>${esc(head)}</b> ${esc(o.cause)}${o.detail ? `<div class="small mt-xs">What the model server said: <span class="mono">${esc(o.detail)}</span></div>` : ''}</div>`;
   }
   return `<div class="note note-warn mt-xs"><b>Interrupted.</b> ${esc(o.cause)}${o.detail ? `<div class="small mt-xs">What the recorder saw: ${esc(o.detail)}</div>` : ''}</div>`;
@@ -775,9 +776,12 @@ function relayTools(c) {
 async function renderConversation(id) {
   const r = await api('GET', `/api/ui/runtime/relay/conversations/${encodeURIComponent(id)}`);
   const calls = r.calls;
-  const first = calls[0];
+  const first = calls[0], newest = calls[calls.length - 1];
+  const pageTitle = newest.latest_question || first.title || 'Chat';
   const turn = (c, i) => `<div class="card mt">
-      <div class="row row-tight"><b>Message ${i + 1}</b> ${modelCell(c.model)} <span class="small muted">${esc(when(c.started_at))}${c.finished_at ? ` · ${esc(((c.finished_at - c.started_at) / 1000).toFixed(1))} s` : ''}${c.streamed ? ' · streamed' : ''}</span>
+      <h3 class="relay-q">${esc(c.latest_question || c.title || `Message ${i + 1}`)}</h3>
+      ${c.latest_differs_from_title && c.title ? `<div class="small muted relay-started">Chat started with: ${esc(c.title)}</div>` : ''}
+      <div class="row row-tight mt-xs"><b>Message ${i + 1}</b> ${modelCell(c.model)} <span class="small muted">${esc(when(c.started_at))}${c.finished_at ? ` · ${esc(((c.finished_at - c.started_at) / 1000).toFixed(1))} s` : ''}${c.streamed ? ' · streamed' : ''}</span>
         ${relayOutcomePill(c)}</div>
       ${relayTiming(c)}
       ${relayEarlier(c)}
@@ -802,10 +806,11 @@ async function renderConversation(id) {
   screenEl.innerHTML = `
     <div class="page-head">
       <button class="btn-link" data-act="relayOpenChats">All chat recordings</button>
-      <h1>${esc(first.title || 'Chat')}</h1>
-      <p class="small muted">Recorded by the chat recorder. Messages are grouped by their first message, so two chats that start the same way may appear together.</p>
+      <h1>${esc(pageTitle)}</h1>
+      ${first.title && first.title !== pageTitle ? `<p class="small muted relay-started">Chat started with: ${esc(first.title)}</p>` : ''}
+      <p class="small muted">Your chat app sends the whole chat again with every new question, so Houndbit keeps the questions from one chat together under its first question. Each message below is headed by the question asked in it. Starting a new chat in your chat app gives a new entry. (Two chats that start with exactly the same question may end up together.)</p>
     </div>
-    ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model wrote a tool request as plain text instead of making a real tool call. Those are not real tool requests, and there is no sign those tools ran. This model or its LM Studio settings may not support tool calls. Look for the notes below.</div>` : ''}
+    ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model typed a tool request as plain text instead of making a real tool call. Typed requests aren't real tool requests, and there is no sign any of those tools ran. See the note on each message below.</div>` : ''}
     ${calls.map(turn).join('')}
     <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete" data-conv="${esc(id)}">Delete this conversation</button></div>`;
 }

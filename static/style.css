@@ -698,3 +698,5 @@ details.conv[open] > summary.conv-who { margin-bottom: 6px; }
 /* Chat recorder card */
 .relay-steps { margin: 6px 0 10px; padding-left: 20px; line-height: 1.6; }
 .relay-addr { font-size: 15px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2, #f3f1ec); user-select: all; }
+.relay-q { margin: 0; font-size: 1.02rem; line-height: 1.35; word-break: break-word; }
+.relay-started { margin: 2px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
