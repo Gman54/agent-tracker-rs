@@ -723,3 +723,66 @@ fn model_load_failure_is_explained() {
     let o = relay::call_outcome(&json!({"api": "chat_completions", "http_status": 500, "error": "Context size has been exceeded.", "request_redacted": {"messages": []}}));
     assert_eq!(o["kind"], "context_full");
 }
+
+// ---- naming chat recordings -----------------------------------------------------------------------
+
+#[test]
+fn chat_recordings_can_be_renamed_and_go_back_to_the_automatic_name() {
+    let db = Db::open_in_memory().unwrap();
+    let first = json!({"role": "user", "content": "tell me what is the population of paragua?"});
+    record_call(&db, json!([first]), "About 6.9 million.");
+    let conv = rows(&db)[0]["conversation_id"].as_str().unwrap().to_string();
+    assert_eq!(relay::conversation_name(&db, &conv).unwrap(), None);
+    assert!(relay::list_conversations(&db).unwrap()[0]["custom_name"].is_null());
+
+    // Set: spaces squeezed, shows in the list and in the detail lookup.
+    assert_eq!(relay::set_conversation_name(&db, &conv, "  Paraguay   questions ").unwrap().as_deref(), Some("Paraguay questions"));
+    assert_eq!(relay::list_conversations(&db).unwrap()[0]["custom_name"], "Paraguay questions");
+    assert_eq!(relay::conversation_name(&db, &conv).unwrap().as_deref(), Some("Paraguay questions"));
+
+    // A new message in the same chat keeps the name; the automatic heading still moves on.
+    record_call(&db, json!([first, {"role": "assistant", "content": "About 6.9 million."}, {"role": "user", "content": "and Uruguay?"}]), "About 3.4 million.");
+    let list = relay::list_conversations(&db).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["calls"], 2);
+    assert_eq!(list[0]["custom_name"], "Paraguay questions");
+    assert_eq!(list[0]["latest_question"], "and Uruguay?");
+    assert_eq!(list[0]["title"], "tell me what is the population of paragua?");
+
+    // Renaming again replaces it; clearing (empty or spaces) goes back to the automatic name.
+    assert_eq!(relay::set_conversation_name(&db, &conv, "South America").unwrap().as_deref(), Some("South America"));
+    assert_eq!(relay::set_conversation_name(&db, &conv, "   ").unwrap(), None);
+    assert!(relay::list_conversations(&db).unwrap()[0]["custom_name"].is_null());
+    assert_eq!(relay::conversation_name(&db, &conv).unwrap(), None);
+    // Clearing when there is no name is fine too.
+    assert_eq!(relay::set_conversation_name(&db, &conv, "").unwrap(), None);
+
+    // Too long: cut at 120 characters.
+    let long = "x".repeat(300);
+    let saved = relay::set_conversation_name(&db, &conv, &long).unwrap().unwrap();
+    assert_eq!(saved.chars().count(), relay::NAME_CAP);
+    assert_eq!(relay::NAME_CAP, 120);
+    assert_eq!(relay::list_conversations(&db).unwrap()[0]["custom_name"].as_str().unwrap().chars().count(), 120);
+
+    // A chat that doesn't exist can't be named.
+    assert!(relay::set_conversation_name(&db, "conv_nope", "Hi").is_err());
+}
+
+#[test]
+fn chat_names_survive_reopening_the_database() {
+    let dir = std::env::temp_dir().join(format!("hb-names-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.db");
+    let conv = {
+        let db = Db::open(&path).unwrap();
+        record_call(&db, json!([{"role": "user", "content": "hello"}]), "Hi!");
+        let conv = rows(&db)[0]["conversation_id"].as_str().unwrap().to_string();
+        relay::set_conversation_name(&db, &conv, "My test chat").unwrap();
+        conv
+    };
+    let db = Db::open(&path).unwrap();
+    assert_eq!(relay::conversation_name(&db, &conv).unwrap().as_deref(), Some("My test chat"));
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}

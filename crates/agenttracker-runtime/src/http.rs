@@ -15,7 +15,7 @@ use agenttracker_core::server::AppState;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -47,6 +47,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/relay/test", post(relay_test))
         .route("/api/ui/runtime/relay/conversations", get(relay_conversations))
         .route("/api/ui/runtime/relay/conversations/:id", get(relay_conversation))
+        .route("/api/ui/runtime/relay/conversations/:id/name", put(relay_rename))
         .route("/api/ui/runtime/relay/delete", post(relay_delete))
 }
 
@@ -443,9 +444,22 @@ async fn relay_conversation(State(st): St, UrlPath(id): UrlPath<String>) -> Resp
         }
         relay::annotate_conversation(&mut calls);
         let typed = calls.iter().filter(|c| c["typed_tool_call"].as_bool() == Some(true)).count();
-        Ok(json!({"conversation_id": id, "calls": calls, "typed_tool_call_count": typed}))
+        drop(conn);
+        let custom_name = relay::conversation_name(&st.engine.db, &id)?;
+        Ok(json!({"conversation_id": id, "custom_name": custom_name, "calls": calls, "typed_tool_call_count": typed}))
     })
     .await
+}
+
+#[derive(Deserialize, Default)]
+struct RelayRenameIn {
+    #[serde(default)]
+    name: String,
+}
+
+/// Sets a chat recording's own name; an empty name goes back to the automatic one.
+async fn relay_rename(State(st): St, UrlPath(id): UrlPath<String>, Json(body): Json<RelayRenameIn>) -> Response {
+    blocking(move || Ok(json!({"conversation_id": id, "custom_name": relay::set_conversation_name(&st.engine.db, &id, &body.name)?}))).await
 }
 
 #[derive(Deserialize, Default)]
@@ -461,6 +475,11 @@ async fn relay_delete(State(st): St, body: Option<Json<RelayDeleteIn>>) -> Respo
         let n = match &conv {
             Some(c) => conn.execute("DELETE FROM relay_calls WHERE conversation_id=?1", [c])?,
             None => conn.execute("DELETE FROM relay_calls", [])?,
+        };
+        // A deleted chat's name goes too.
+        match &conv {
+            Some(c) => conn.execute("DELETE FROM relay_conversation_names WHERE conversation_id=?1", [c])?,
+            None => conn.execute("DELETE FROM relay_conversation_names", [])?,
         };
         Ok(json!({"deleted": n}))
     })

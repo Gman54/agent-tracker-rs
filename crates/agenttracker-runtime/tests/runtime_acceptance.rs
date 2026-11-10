@@ -928,3 +928,77 @@ fn retry_spec_for_an_ordinary_task_keeps_folder_rules_and_documents() {
     assert_eq!(spec.documents[0].path, "notes/cleanup_tips.md");
     assert_eq!(spec.parent_session_id.as_deref(), Some(old.as_str()));
 }
+
+/// Renaming a chat recording through the HTTP routes: the name shows in the list and the
+/// conversation, survives a new message, clears back to automatic, and an unknown chat gets 404.
+#[test]
+fn chat_recording_rename_over_http() {
+    use agenttracker_core::collector::Collector;
+    use agenttracker_core::engine::Engine;
+    use agenttracker_core::server::AppState;
+    use agenttracker_runtime::relay;
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let db = Db::open(&data.path().join("agenttracker.db")).unwrap();
+    let save = |db: &Db, msgs: Value| {
+        let req = json!({"model": "m", "messages": msgs}).to_string();
+        let resp = json!({"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}).to_string();
+        relay::record(db, &relay::Call { api: "chat_completions", path: "/v1/chat/completions", request: req.as_bytes(), response: resp.as_bytes(),
+            content_type: Some("application/json".into()), status: Some(200), started: agenttracker_core::now_ms(), ..Default::default() }).unwrap();
+    };
+    let ask = json!({"role": "user", "content": "what is a prime number?"});
+    save(&db, json!([ask]));
+    let conv: String = db.conn().query_row("SELECT conversation_id FROM relay_calls", [], |r| r.get(0)).unwrap();
+
+    let collector = Collector::new(&db);
+    let engine = Engine::new(db.clone(), vec![data.path().join("agenttracker.db"), home.clone()]);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = AppState::new(engine, collector, port, None, "test-secret".into(), None, data.path().to_path_buf(), home);
+    let app = agenttracker_runtime::http::routes().with_state(state);
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async move {
+            axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), app).await.unwrap();
+        });
+    });
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+    let base = format!("http://127.0.0.1:{port}/api/ui/runtime/relay/conversations");
+    let get = |path: &str| -> Value { agent.get(&format!("{base}{path}")).call().unwrap().into_json().unwrap() };
+    let rename = |id: &str, name: &str| agent.put(&format!("{base}/{id}/name")).send_json(json!({"name": name}));
+
+    let r: Value = rename(&conv, "  Prime   chat ").unwrap().into_json().unwrap();
+    assert_eq!(r["custom_name"], "Prime chat");
+    assert_eq!(get("")["conversations"][0]["custom_name"], "Prime chat");
+    assert_eq!(get(&format!("/{conv}"))["custom_name"], "Prime chat");
+
+    // A new message in the same chat keeps the name.
+    save(&db, json!([ask, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "and after 100?"}]));
+    let detail = get(&format!("/{conv}"));
+    assert_eq!(detail["calls"].as_array().unwrap().len(), 2);
+    assert_eq!(detail["custom_name"], "Prime chat");
+    assert_eq!(get("")["conversations"][0]["latest_question"], "and after 100?");
+
+    // Too long: cut at 120 characters.
+    let r: Value = rename(&conv, &"n".repeat(500)).unwrap().into_json().unwrap();
+    assert_eq!(r["custom_name"].as_str().unwrap().chars().count(), 120);
+
+    // Empty clears it.
+    let r: Value = rename(&conv, "").unwrap().into_json().unwrap();
+    assert!(r["custom_name"].is_null());
+    assert!(get(&format!("/{conv}"))["custom_name"].is_null());
+    assert!(get("")["conversations"][0]["custom_name"].is_null());
+
+    // Unknown chat.
+    match rename("conv_nope", "x") {
+        Err(ureq::Error::Status(404, _)) => {}
+        other => panic!("expected 404, got {other:?}"),
+    }
+
+    // Deleting the chat removes its name too.
+    rename(&conv, "Gone soon").unwrap();
+    agent.post(&format!("http://127.0.0.1:{port}/api/ui/runtime/relay/delete")).send_json(json!({"conversation_id": conv})).unwrap();
+    let left: i64 = db.conn().query_row("SELECT COUNT(*) FROM relay_conversation_names", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}

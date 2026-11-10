@@ -745,6 +745,39 @@ pub fn conversation_id(msgs: &[(String, String)]) -> String {
     format!("conv_{}", &sha256_hex(key.as_bytes())[..24])
 }
 
+/// Longest name someone can give a chat recording (same as task names).
+pub const NAME_CAP: usize = 120;
+
+/// The name someone gave this chat recording, if any.
+pub fn conversation_name(db: &Db, conversation_id: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(db.conn().query_row("SELECT name FROM relay_conversation_names WHERE conversation_id=?1", [conversation_id], |r| r.get(0)).optional()?)
+}
+
+/// Gives a chat recording its own name, or clears it (empty or only spaces) to go back to the
+/// automatic name. Spaces are squeezed, the name is cut at `NAME_CAP` characters and anything that
+/// looks like a secret is blanked, like automatic titles. Returns the saved name (None = cleared).
+pub fn set_conversation_name(db: &Db, conversation_id: &str, name: &str) -> Result<Option<String>> {
+    let conn = db.conn();
+    let known: i64 = conn.query_row("SELECT COUNT(*) FROM relay_calls WHERE conversation_id=?1", [conversation_id], |r| r.get(0))?;
+    if known == 0 {
+        return Err(crate::RtError::NotFound(conversation_id.to_string()));
+    }
+    let squeezed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if squeezed.is_empty() {
+        conn.execute("DELETE FROM relay_conversation_names WHERE conversation_id=?1", [conversation_id])?;
+        return Ok(None);
+    }
+    let capped: String = squeezed.chars().take(NAME_CAP).collect();
+    let saved = tracker_common::redaction::redact_text(&capped);
+    conn.execute(
+        "INSERT INTO relay_conversation_names (conversation_id, name, renamed_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(conversation_id) DO UPDATE SET name=excluded.name, renamed_at=excluded.renamed_at",
+        rusqlite::params![conversation_id, saved, now_ms()],
+    )?;
+    Ok(Some(saved))
+}
+
 /// One user message as a one-line heading: spaces squeezed, cut at 80 characters with "...".
 /// None when the message is empty.
 pub fn short_question(text: &str) -> Option<String> {
@@ -915,6 +948,7 @@ pub fn list_conversations(db: &Db) -> Result<Vec<Value>> {
         (SELECT x.model FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS model,
         (SELECT x.client FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS client,
         (SELECT x.last_user_redacted FROM relay_calls x WHERE x.conversation_id=c.conversation_id ORDER BY x.started_at DESC LIMIT 1) AS latest_user_full,
+        (SELECT n.name FROM relay_conversation_names n WHERE n.conversation_id=c.conversation_id) AS custom_name,
         SUM(CASE WHEN c.reasoning_redacted IS NOT NULL THEN 1 ELSE 0 END) AS with_thinking,
         SUM(CASE WHEN c.tool_calls IS NOT NULL THEN 1 ELSE 0 END) AS with_tools
         FROM relay_calls c GROUP BY c.conversation_id ORDER BY last_at DESC LIMIT 300", &[])?;

@@ -675,10 +675,10 @@ async function renderChats(body) {
   }
   body.innerHTML = head + `
     <div class="card table-wrap"><table class="table">
-      <thead><tr><th>Latest question</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
+      <thead><tr><th>Chat</th><th class="col-model">Model</th><th>Messages</th><th>Thinking</th><th>Tool calls</th><th>Last message</th></tr></thead>
       <tbody>${conversations.map(c => `
         <tr class="clickable" data-act="go" data-screen="runtime" data-param="${esc(c.conversation_id)}">
-          <td><div class="task-row-title">${esc(c.latest_question || c.title || '(untitled)')}</div>${c.latest_differs ? `<div class="small muted relay-started">Started with: ${esc(c.title)}</div>` : ''}${c.problems ? `<div class="small">${pill('red', `${c.problems} error(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
+          <td><div class="task-row-title">${esc(c.custom_name || c.latest_question || c.title || '(untitled)')}</div>${c.custom_name && (c.latest_question || c.title) ? `<div class="small muted relay-started">Latest question: ${esc(c.latest_question || c.title)}</div>` : ''}${c.latest_differs ? `<div class="small muted relay-started">Started with: ${esc(c.title)}</div>` : ''}${c.problems ? `<div class="small">${pill('red', `${c.problems} error(s)`)}</div>` : ''}${c.interrupted ? `<div class="small mt-xs">${pill('amber', `${c.interrupted} interrupted`)}</div>` : ''}${relayTypedBadge(c.typed_tool_calls)}</td>
           <td class="col-model">${modelCell(c.model)}</td><td>${esc(c.calls)}</td>
           <td>${c.with_thinking ? pill('blue', `${c.with_thinking}`) : '<span class="muted">none</span>'}</td>
           <td>${c.with_tools ? esc(c.with_tools) : '<span class="muted">none</span>'}</td>
@@ -777,7 +777,8 @@ async function renderConversation(id) {
   const r = await api('GET', `/api/ui/runtime/relay/conversations/${encodeURIComponent(id)}`);
   const calls = r.calls;
   const first = calls[0], newest = calls[calls.length - 1];
-  const pageTitle = newest.latest_question || first.title || 'Chat';
+  const autoTitle = newest.latest_question || first.title || 'Chat';
+  const pageTitle = r.custom_name || autoTitle;
   const turn = (c, i) => `<div class="card mt">
       <h3 class="relay-q">${esc(c.latest_question || c.title || `Message ${i + 1}`)}</h3>
       ${c.latest_differs_from_title && c.title ? `<div class="small muted relay-started">Chat started with: ${esc(c.title)}</div>` : ''}
@@ -806,14 +807,54 @@ async function renderConversation(id) {
   screenEl.innerHTML = `
     <div class="page-head">
       <button class="btn-link" data-act="relayOpenChats">All chat recordings</button>
-      <h1>${esc(pageTitle)}</h1>
-      ${first.title && first.title !== pageTitle ? `<p class="small muted relay-started">Chat started with: ${esc(first.title)}</p>` : ''}
+      <div class="title-block">
+        <div class="title-line"><h1>${esc(pageTitle)}</h1>
+          <button class="btn btn-link btn-small" data-act="relayRename" data-keep-enabled="1">Rename</button></div>
+        <div class="rename hidden" id="relay-ren"><span class="input-row">
+          <input type="text" id="relay-ren-in" data-conv="${esc(id)}" value="${esc(pageTitle)}" maxlength="120" aria-label="New name for this chat">
+          <button class="btn btn-primary btn-small" data-act="relayRenameSave" data-conv="${esc(id)}">Save</button>
+          <button class="btn btn-secondary btn-small" data-act="relayRenameCancel" data-keep-enabled="1">Cancel</button></span>
+          ${r.custom_name ? `<div class="mt-xs"><button class="btn-link small" data-act="relayRenameClear" data-conv="${esc(id)}">Use automatic name</button> <span class="small muted">(${esc(autoTitle)})</span></div>` : ''}
+          <p class="small muted mt-xs">Press Enter to save or Escape to cancel. New messages in this chat keep this name.</p></div>
+      </div>
+      ${r.custom_name ? `<p class="small muted relay-started">Latest question: ${esc(autoTitle)}</p>` : ''}
+      ${first.title && first.title !== autoTitle ? `<p class="small muted relay-started">Chat started with: ${esc(first.title)}</p>` : ''}
       <p class="small muted">Your chat app sends the whole chat again with every new question, so Houndbit keeps the questions from one chat together under its first question. Each message below is headed by the question asked in it. Starting a new chat in your chat app gives a new entry. (Two chats that start with exactly the same question may end up together.)</p>
     </div>
     ${r.typed_tool_call_count ? `<div class="note note-warn">In ${esc(r.typed_tool_call_count)} of these messages the model typed a tool request as plain text instead of making a real tool call. Typed requests aren't real tool requests, and there is no sign any of those tools ran. See the note on each message below.</div>` : ''}
     ${calls.map(turn).join('')}
     <div class="row row-end mt"><button class="btn btn-danger btn-small" data-act="relayDelete" data-conv="${esc(id)}">Delete this conversation</button></div>`;
 }
+// Renaming a chat recording. An empty name (or "Use automatic name") goes back to the automatic one.
+actions.relayRename = () => {
+  const box = $('#relay-ren');
+  box.classList.toggle('hidden');
+  if (!box.classList.contains('hidden')) { const i = $('#relay-ren-in'); i.focus(); i.select(); }
+};
+actions.relayRenameCancel = () => {
+  const box = $('#relay-ren'), i = $('#relay-ren-in');
+  if (i) i.value = i.defaultValue;
+  if (box) box.classList.add('hidden');
+};
+async function relaySaveName(conv, name) {
+  try {
+    const r = await api('PUT', `/api/ui/runtime/relay/conversations/${encodeURIComponent(conv)}/name`, { name });
+    showToast(r.custom_name ? 'Renamed.' : 'Back to the automatic name.', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+    return;
+  }
+  await renderConversation(conv);
+}
+actions.relayRenameSave = d => relaySaveName(d.conv, $('#relay-ren-in').value);
+actions.relayRenameClear = d => relaySaveName(d.conv, '');
+document.addEventListener('keydown', ev => {
+  const el = ev.target;
+  if (!el || el.id !== 'relay-ren-in') return;
+  if (ev.key === 'Enter') { ev.preventDefault(); relaySaveName(el.dataset.conv, el.value); }
+  else if (ev.key === 'Escape') { ev.preventDefault(); actions.relayRenameCancel(); }
+});
+
 actions.relayDelete = async d => {
   if (!confirm(d.conv ? 'Delete this recorded conversation?' : 'Delete every recorded chat?')) return;
   const r = await api('POST', '/api/ui/runtime/relay/delete', d.conv ? { conversation_id: d.conv } : {});
