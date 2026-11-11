@@ -224,6 +224,15 @@ impl Engine {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The calling app's own active folder grants, so it can start a session without anyone
+    /// copying an id across by hand. Other apps' grants are never listed.
+    pub fn grants_for_app(&self, app_id: &str) -> Result<Vec<Value>> {
+        let c = self.conn();
+        let mut s = c.prepare("SELECT id, folder FROM resource_grants WHERE app_id=?1 AND revoked_at IS NULL ORDER BY created_at")?;
+        let rows = s.query_map([app_id], |r| Ok(json!({"grant_id": r.get::<_, String>(0)?, "folder": r.get::<_, String>(1)?})))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn current_policy(&self, profile: &str) -> Result<(i64, Policy)> {
         let c = self.conn();
         current_policy(&c, profile)

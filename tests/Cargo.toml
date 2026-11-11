@@ -15,3 +15,8 @@ tempfile = { workspace = true }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.4", features = ["util"] }
+
+[dev-dependencies]
+# Only used by tests/protect_plugin.rs, which checks Houndbit and Protect side by side.
+protect-engine = { path = "../crates/protect-engine" }
+uuid = { workspace = true }

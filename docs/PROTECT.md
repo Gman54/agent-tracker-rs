@@ -40,6 +40,46 @@ protect-engine approvals                      # see what is waiting
 protect-engine approvals approve <id>
 ```
 
+## Plugging in: Houndbit and other programs
+
+Protect has one door, and every app uses it the same way: Houndbit, your own scripts, or
+someone else's tool. No app gets a private shortcut.
+
+1. **Pair once.** The app sends its name and a public key. You accept it (for now with
+   `protect-engine pairings accept <id>`). The app keeps its key in its own folder, so it stays
+   paired after a restart.
+2. **Sign in.** Each time it connects, the app proves it holds that key.
+3. **Find its folder.** `v1.grants.list` shows the app the folders you gave it, and only those.
+4. **Ask and read back.** It starts a session, asks to do something, and reads the record.
+
+What the message format looks like: a 4-byte length (big-endian), then JSON-RPC 2.0 text. The
+sign-in message is `houndbit-protect-auth-v1`, the engine id and the nonce, one per line, signed
+with Ed25519. Key files are the 32-byte secret in base64, the same in every language.
+
+Ready-made pieces:
+
+- **Rust (Houndbit itself):** `protect_engine::client` with `Client`, `sign_in` and
+  `load_or_create_key`.
+- **Python:** `examples/protect-clients/python/protect_client.py` (needs `pip install cryptography`).
+- **Node.js:** `examples/protect-clients/node/protect_client.mjs` (no packages needed).
+- **Check it all at once (Linux/macOS):** `examples/protect-clients/try_it.sh`.
+
+Running alongside other software: Protect doesn't open a network port, so it can't clash with
+Houndbit's port or anyone else's. It keeps its own database, separate from Houndbit's. Only one
+engine runs per Windows user; a second copy refuses to start. If Protect isn't running, apps get
+a plain "couldn't connect" error, never a silent yes, and Houndbit carries on with its own checks.
+
+What was checked (on Linux; Windows below):
+- `tests/tests/protect_plugin.rs`: Houndbit pairs as an ordinary app, keeps its key across a
+  restart, finds its folder, asks to read a file and reads the record back. It runs a normal
+  Houndbit check at the same time. Neither database contains the other's tables. With Protect
+  stopped, connecting fails and Houndbit's own check still passes.
+- `try_it.sh` ran the real `protect-engine` program with the Python and Node.js examples. Both
+  paired, signed in, found their folder and got "allowed, nothing was run". Running again with
+  the saved key signed in without pairing again.
+- Not checked yet: the Python and Node.js examples on Windows named pipes. The code paths for
+  Windows are there but have not been run.
+
 ## Honest limits
 
 - No sandbox or worker exists yet, so nothing is blocked "for real". Only decisions are made.
@@ -63,8 +103,8 @@ protect-engine approvals approve <id>
 |---|---|---|
 | A | Engine, pairing, records, standalone window | Engine done and tested. **Window not built** (command line only). JSON schemas not written yet. |
 | B | Restricted worker that actually does the file work | Not started. Needs testing on a real Windows PC. |
-| C | Python and TypeScript kits plus a sample app | Not started. |
-| D | Houndbit talking to Protect through the same public door | Not started. |
+| C | Python and TypeScript kits plus a sample app | Small Python and Node.js examples work on Linux. Not full kits yet, and not run on Windows. |
+| D | Houndbit talking to Protect through the same public door | The door and the Rust client are ready and tested side by side with Houndbit. **Houndbit's app doesn't call Protect yet** (no button or setting). |
 | E | MCP gateway and Claude Code gate hook | Not started. Needs a live check on your PC. |
 | F | Payments, license, signed installer | Not started. Needs your choice of payment service, a code-signing certificate and a server. |
 | G | More hosts and launchers | Not started. |

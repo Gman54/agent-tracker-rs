@@ -207,7 +207,10 @@ async fn apps_cannot_see_each_others_sessions() {
     // Nor use another app's folder grant.
     assert_eq!(code(b.call("v1.sessions.request", json!({"resource_grant_id": grant_a})).await), Code::ScopeDenied);
     assert!(b.call("v1.sessions.list", json!({})).await.unwrap()["sessions"].as_array().unwrap().is_empty());
-    let _ = grant_b;
+    // Each app sees only its own folder grant.
+    let gb = b.call("v1.grants.list", json!({})).await.unwrap();
+    assert_eq!(gb["grants"].as_array().unwrap().len(), 1);
+    assert_eq!(gb["grants"][0]["grant_id"].as_str(), Some(grant_b.as_str()));
     // An observer-only app can read its own sessions but can't start any.
     let (mut o, grant_o) = paired(&h, "com.example.watch", Some(vec!["observer".into()])).await;
     assert_eq!(code(o.call("v1.sessions.request", json!({"resource_grant_id": grant_o})).await), Code::ScopeDenied);

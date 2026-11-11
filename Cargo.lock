@@ -39,12 +39,14 @@ version = "0.1.0"
 dependencies = [
  "agenttracker-core",
  "axum",
+ "protect-engine",
  "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",
  "tower 0.4.13",
  "tracker-common",
+ "uuid",
 ]
 
 [[package]]

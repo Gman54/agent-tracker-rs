@@ -48,7 +48,7 @@ pub fn hello(engine: &Engine) -> Value {
     json!({
         "engine_id": engine.engine_id, "engine_version": ENGINE_VERSION,
         "protocol_version": format!("{PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"),
-        "supported_features": ["pairing", "sessions", "actions", "approvals", "events"],
+        "supported_features": ["pairing", "grants", "sessions", "actions", "approvals", "events"],
         "backend_support": {"windows": "decisions_only", "macos": "unsupported", "linux": "decisions_only_for_tests"},
         "effective_limits": {"max_frame_bytes": framing::MAX_FRAME, "max_events_page": 200, "requests_per_minute": RATE_PER_MIN},
         "connector_registry_revision": 0, "api_docs_version": API_DOCS_VERSION
@@ -104,6 +104,10 @@ pub fn dispatch(engine: &Engine, st: &mut ConnState, method: &str, p: &Value) ->
         }
         "v1.health" => Ok(json!({"engine": "running", "records": "ok", "execution": "unavailable"})),
         "v1.capabilities.get" => Ok(capabilities()),
+        "v1.grants.list" => {
+            need_any(&scopes)?;
+            Ok(json!({"grants": engine.grants_for_app(&app)?}))
+        }
         "v1.sessions.request" => {
             need(&scopes, "requester")?;
             engine.sessions_request(&app, p.get("profile").and_then(Value::as_str).unwrap_or(policy::DEFAULT_PROFILE), p_str(p, "resource_grant_id")?)

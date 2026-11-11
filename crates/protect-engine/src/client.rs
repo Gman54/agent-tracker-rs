@@ -36,6 +36,34 @@ pub fn public_key_b64(k: &SigningKey) -> String {
     base64::engine::general_purpose::STANDARD.encode(k.verifying_key().to_bytes())
 }
 
+/// Loads the app's pairing key from `path`, or makes a new one and saves it there. The file
+/// holds the 32-byte secret as base64 and lives in the app's own data folder, so the app keeps
+/// its pairing across restarts. A file that exists but can't be read is an error: silently
+/// making a new key would quietly break the pairing.
+pub fn load_or_create_key(path: &std::path::Path) -> std::io::Result<SigningKey> {
+    let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {m}", path.display()));
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD.decode(text.trim()).map_err(|_| bad("not base64"))?.try_into().map_err(|_| bad("not a 32-byte key"))?;
+            Ok(SigningKey::from_bytes(&bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let k = generate_key();
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(path, base64::engine::general_purpose::STANDARD.encode(k.to_bytes()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(k)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 impl Client {
     pub async fn connect(endpoint: &str) -> std::io::Result<Self> {
         Ok(Self { s: open(endpoint).await?, next: 1 })
