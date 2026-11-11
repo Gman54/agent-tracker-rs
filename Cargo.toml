@@ -5,6 +5,7 @@ members = [
     "crates/agenttracker-core",
     "crates/agenttracker-hook",
     "crates/agenttracker-runtime",
+    "crates/protect-engine",
     "src-tauri",
     "tests",
 ]

@@ -1,0 +1,31 @@
+[package]
+name = "protect-engine"
+description = "Houndbit Protect engine (Milestone A): pairing, policy decisions, sessions, approvals and an append-only event log behind a local JSON-RPC API. Independent of Houndbit's code and database."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "protect_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "protect-engine"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
