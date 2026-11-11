@@ -427,7 +427,13 @@ fn said_vs_happened_html(s: &Value) -> String {
 
 /// JSON export: the run, the frozen task definition it was checked against, and agent events.
 pub fn export_json(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> Value {
+    export_json_with(task, run, events, conversation, &Value::Null)
+}
+
+/// As [`export_json`], plus the timeline from [`crate::quick_list::timeline`].
+pub fn export_json_with(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value, timeline: &Value) -> Value {
     json!({
+        "timeline": timeline,
         "format": "agenttracker-report/1",
         "generated_at": crate::now_ms(),
         "app_version": crate::VERSION,
@@ -495,7 +501,37 @@ pub fn display_title(task: &TaskDefinition) -> String {
     if t.is_empty() { task.title.clone() } else { t }
 }
 
+/// The "When things happened" card: request, quick name list, full snapshot, first action.
+pub fn timeline_html(t: &Value) -> String {
+    let rows = match t.get("rows").and_then(Value::as_array) {
+        Some(r) if !r.is_empty() => r,
+        _ => return String::new(),
+    };
+    let body: String = rows
+        .iter()
+        .map(|r| {
+            let at = r.get("at").and_then(Value::as_i64).map(friendly_time_secs).unwrap_or_else(|| "Not known".into());
+            let text = r.get("text").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| format!(" <span class=\"m\">{}</span>", esc(s))).unwrap_or_default();
+            format!("<tr><th>{}</th><td>{}{}</td></tr>", esc(r.get("label").and_then(Value::as_str).unwrap_or("")), esc(&at), text)
+        })
+        .collect();
+    let note = t.get("note").and_then(Value::as_str).map(|n| format!("<p class=\"note\"><b>{}</b></p>", esc(n))).unwrap_or_default();
+    format!("<div class=\"card\"><h2>When things happened</h2><table class=\"glance\">{body}</table>{note}</div>")
+}
+
+/// Like [`friendly_time`] but with seconds, for the timeline where seconds matter.
+pub fn friendly_time_secs(ms: i64) -> String {
+    let base = friendly_time(ms);
+    let secs = ms.div_euclid(1000).rem_euclid(60);
+    base.replacen(" UTC", &format!(":{secs:02} UTC"), 1)
+}
+
 pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value) -> String {
+    export_html_with(task, run, events, conversation, &Value::Null)
+}
+
+/// As [`export_html`], plus the "When things happened" card.
+pub fn export_html_with(task: &TaskDefinition, run: &VerificationRun, events: &[AgentEvent], conversation: &Value, timeline: &Value) -> String {
     let (cls, icon, head) = verdict_text(run);
     let required: std::collections::HashMap<&str, bool> = task.checks.iter().map(|c| (c.id.as_str(), c.is_required)).collect();
     let card = |r: &CheckResult| {
@@ -524,6 +560,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
 <div class="card"><h2>What you asked</h2><p><b>{title}</b></p><p>{instr}</p><ul>{folders}</ul><p class="m">Task definition version {ver} &middot; checked {when}</p></div>
 <div class="card"><h2>What the agent said</h2><ul>{ev}</ul></div>
 <div class="card"><h2>What we saw</h2>{req}{opt}</div>
+{times}
 {conv}
 <p class="m">Houndbit observes and reports; it doesn't block agents or undo changes. A pass means the configured checks passed &mdash; not that the work is correct in every way.</p>
 </body></html>"#,
@@ -535,6 +572,7 @@ pub fn export_html(task: &TaskDefinition, run: &VerificationRun, events: &[Agent
         req = req_html,
         opt = opt_html,
         conv = conversation_html(conversation),
+        times = timeline_html(timeline),
         svh = said_vs_happened_html(&said_vs_happened(task, run, events, conversation)),
     )
 }
@@ -601,7 +639,7 @@ mod tests {
     use super::*;
     use crate::task::Lifecycle;
 
-    fn task(connector: &str) -> TaskDefinition {
+    pub(super) fn task(connector: &str) -> TaskDefinition {
         TaskDefinition {
             id: "t".into(),
             title: "Please create summary files for every report in the folder and keep the originals safe".into(),
@@ -617,7 +655,7 @@ mod tests {
             origin: "auto".into(),
         }
     }
-    fn run(results: Vec<CheckResult>, v: Option<CheckStatus>) -> VerificationRun {
+    pub(super) fn run(results: Vec<CheckResult>, v: Option<CheckStatus>) -> VerificationRun {
         VerificationRun { id: "r".into(), task_id: "t".into(), definition_version: 1, started_at: 0, finished_at: Some(1), overall_verdict: v, results }
     }
     fn result(status: CheckStatus, summary: &str) -> CheckResult {
@@ -718,6 +756,24 @@ mod tests {
 #[cfg(test)]
 mod time_and_event_tests {
     use super::*;
+
+    #[test]
+    fn timeline_card_shows_times_and_the_early_start_note() {
+        use crate::quick_list::{timeline, QuickList, EARLY_START_NOTE};
+        let q = QuickList { received_at: 1_700_000_000_000, started_at: Some(1_700_000_000_010), finished_at: Some(1_700_000_000_400), file_count: 17904, ..Default::default() };
+        let t = timeline(Some(&q), Some((1_700_000_000_500, 1_700_000_090_000)), Some(1_700_000_005_000));
+        let html = export_html_with(&super::tests::task("claude_code"), &super::tests::run(vec![], None), &[], &Value::Null, &t);
+        assert!(html.contains("When things happened"));
+        assert!(html.contains("Your request arrived"));
+        assert!(html.contains("Quick name list taken"));
+        assert!(html.contains("17,904 files listed"));
+        assert!(html.contains("Full &quot;before&quot; snapshot finished") || html.contains("Full \"before\" snapshot finished"));
+        assert!(html.contains("The agent&#39;s first action") || html.contains("The agent's first action"));
+        assert!(html.contains(&super::esc(EARLY_START_NOTE)));
+        assert!(html.contains("2023-11-14 22:13:20 UTC"), "seconds are shown");
+        assert_eq!(export_json_with(&super::tests::task("claude_code"), &super::tests::run(vec![], None), &[], &Value::Null, &t)["timeline"]["agent_started_early"], true);
+        assert!(!export_html(&super::tests::task("claude_code"), &super::tests::run(vec![], None), &[], &Value::Null).contains("When things happened"));
+    }
 
     #[test]
     fn friendly_time_reads_like_a_date() {

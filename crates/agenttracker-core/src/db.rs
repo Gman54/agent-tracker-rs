@@ -15,6 +15,7 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     ("v007", include_str!("../../../migrations/v007_chat_relay.sql")),
     ("v008", include_str!("../../../migrations/v008_relay_stream_details.sql")),
     ("v009", include_str!("../../../migrations/v009_relay_conversation_names.sql")),
+    ("v010", include_str!("../../../migrations/v010_quick_name_lists.sql")),
 ];
 
 pub struct Migrator;
@@ -97,7 +98,7 @@ impl Db {
         tx.execute("DELETE FROM check_results WHERE run_id IN (SELECT id FROM verification_runs WHERE task_id = ?1)", [task_id])?;
         tx.execute("DELETE FROM verification_runs WHERE task_id = ?1", [task_id])?;
         let n = tx.execute("DELETE FROM events WHERE task_id = ?1", [task_id])?;
-        for t in ["task_checks", "task_folders", "task_definition_snapshots"] {
+        for t in ["task_checks", "task_folders", "task_definition_snapshots", "quick_name_lists", "task_snapshot_times"] {
             tx.execute(&format!("DELETE FROM {t} WHERE task_id = ?1"), [task_id])?;
         }
         tx.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;

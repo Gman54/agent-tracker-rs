@@ -66,6 +66,10 @@ pub struct Evidence {
     pub verifications: Vec<Manifest>,
     pub events: Vec<AgentEvent>,
     pub change_hints: Vec<ChangeHint>,
+    /// Quick name lists taken when the request arrived (automatic tasks).
+    pub quick_lists: Vec<crate::quick_list::QuickList>,
+    /// When the full "before" snapshot finished, if recorded.
+    pub baseline_finished_at: Option<i64>,
 }
 
 pub trait Verifier: Send + Sync {

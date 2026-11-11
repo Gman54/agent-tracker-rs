@@ -95,8 +95,12 @@ impl Engine {
             self.tasks.transition(task_id, Lifecycle::Draft)?;
             return Err(CoreError::Invalid("Add at least one folder before taking the \"before\" snapshot".into()));
         }
+        let started = crate::now_ms();
         match self.snapshot_all(&t, ManifestType::Baseline) {
-            Ok(_) => self.tasks.transition(task_id, Lifecycle::Ready),
+            Ok(_) => {
+                let _ = crate::quick_list::record_baseline_times(&self.db, task_id, started, crate::now_ms());
+                self.tasks.transition(task_id, Lifecycle::Ready)
+            }
             Err(e) => {
                 let _ = self.tasks.transition(task_id, Lifecycle::Error);
                 Err(e)
@@ -273,6 +277,8 @@ impl Engine {
                 events,
                 change_hints: self.hints.lock().unwrap_or_else(|p| p.into_inner()).remove(task_id).unwrap_or_default(),
                 task: Some(task.clone()),
+                quick_lists: crate::quick_list::for_task(&self.db, task_id)?,
+                baseline_finished_at: crate::quick_list::baseline_times(&self.db, task_id)?.map(|(_, f)| f),
             };
             Ok(self.run_checks(&task, &evidence, started_at))
         })();

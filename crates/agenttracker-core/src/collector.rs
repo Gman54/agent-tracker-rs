@@ -112,7 +112,7 @@ impl Collector {
     }
 
     /// Starts an automatic task for an agent job that no running task covers.
-    fn maybe_auto_start(&self, ev: &AgentEvent) {
+    fn maybe_auto_start(&self, ev: &AgentEvent, queue_id: &str) {
         let starts_job = match ev.event_type {
             EventType::TaskSubmitted => true,
             // Cursor never reports the prompt, so its first event in a folder starts the job.
@@ -133,7 +133,7 @@ impl Collector {
         if !safe_auto_folder(&wd) {
             return;
         }
-        if let Err(e) = auto_start(&engine, ev, &wd) {
+        if let Err(e) = auto_start(&engine, ev, &wd, queue_id) {
             eprintln!("automatic task couldn't start: {e}");
         }
     }
@@ -169,13 +169,36 @@ impl Collector {
     /// Accepts one raw delivery (already authenticated). Always enqueues — even while paused —
     /// so nothing is lost; processing resumes when collection is unpaused.
     pub fn accept(&self, body: &[u8]) -> Result<String> {
+        let received_at = crate::now_ms();
         let v: Value = serde_json::from_slice(body).unwrap_or_else(|e| json!({"connector": "unknown", "malformed": e.to_string()}));
         let connector = v.get("connector").and_then(Value::as_str).unwrap_or("unknown").to_string();
         // A file's "before" state only exists right now, before the agent's edit runs.
         if !self.is_paused() {
             crate::gitwork::capture::pre_snapshot(&self.db, &v);
         }
-        self.queue.enqueue(&connector, &v)
+        let id = self.queue.enqueue(&connector, &v)?;
+        if !self.is_paused() {
+            self.quick_list_on_request(&v, &id, received_at);
+        }
+        Ok(id)
+    }
+
+    /// When a prompt for an automatic task arrives, list the working folder right away (names
+    /// only, no hashing), before the slower full "before" snapshot. Never fails the delivery.
+    fn quick_list_on_request(&self, v: &Value, queue_id: &str, received_at: i64) {
+        let Ok(env) = serde_json::from_value::<HookEnvelope>(v.clone()) else { return };
+        let Some(ev) = connectors::normalize(&env) else { return };
+        if ev.event_type != EventType::TaskSubmitted {
+            return;
+        }
+        let Some(wd) = ev.working_dir.clone() else { return };
+        let Some(engine) = self.engine() else { return };
+        if !self.auto_tasks_on() || !safe_auto_folder(&wd) || matches!(self.tasks.running_task_for_dir(&wd), Ok(Some(_))) {
+            return;
+        }
+        if let Err(e) = crate::quick_list::take(&self.db, queue_id, Path::new(&wd), engine.exclude_paths.clone(), received_at, crate::quick_list::ACCEPT_WAIT_MS) {
+            eprintln!("quick name list couldn't start: {e}");
+        }
     }
 
     /// Normalizes and stores pending queue entries (no-op while paused).
@@ -205,7 +228,7 @@ impl Collector {
                 }
                 self.attribute(&mut ev)?;
                 if ev.task_id.is_none() {
-                    self.maybe_auto_start(&ev);
+                    self.maybe_auto_start(&ev, &entry.id);
                     self.attribute(&mut ev)?;
                 }
                 if self.events.insert(&ev)? {
@@ -294,7 +317,7 @@ fn auto_title(ev: &AgentEvent, wd: &str) -> String {
     format!("Agent job in {name}")
 }
 
-fn auto_start(engine: &crate::engine::Engine, ev: &AgentEvent, wd: &str) -> Result<()> {
+fn auto_start(engine: &crate::engine::Engine, ev: &AgentEvent, wd: &str, queue_id: &str) -> Result<()> {
     use crate::task::{FolderRole, NewTask, TaskFolder};
     let instruction = ev.payload_redacted.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
     let t = engine.tasks.create(NewTask {
@@ -305,6 +328,8 @@ fn auto_start(engine: &crate::engine::Engine, ev: &AgentEvent, wd: &str) -> Resu
         checks: vec![],
     })?;
     engine.tasks.set_origin(&t.id, "auto")?;
+    // The quick name list taken when this request arrived belongs to this task.
+    let _ = crate::quick_list::claim(&engine.db, queue_id, &t.id);
     engine.capture_baseline(&t.id)?;
     engine.start(&t.id)?;
     Ok(())

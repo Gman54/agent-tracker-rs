@@ -1069,6 +1069,44 @@ fn automatic_task_catches_deletion_and_outside_edit() {
     assert_eq!(run.overall_verdict, Some(CheckStatus::Failed));
 }
 
+/// Automatic tasks: a quick name list is taken when the prompt arrives and tied to the task, and
+/// the full snapshot's times are kept for the report.
+#[test]
+fn automatic_task_takes_a_quick_name_list_when_the_prompt_arrives() {
+    use agenttracker_core::quick_list;
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    std::fs::write(work.join("sub/also.txt"), "me too").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-quick", "cwd": cwd, "prompt": "Tidy up"})));
+    let t = fx.engine.tasks.list().unwrap()[0].clone();
+    // The list runs in the background; give it a moment on a slow machine.
+    let mut lists = vec![];
+    for _ in 0..50 {
+        lists = quick_list::for_task(&fx.engine.db, &t.id).unwrap();
+        if lists.first().map(|l| l.finished_at.is_some()).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(lists.len(), 1, "one quick list, tied to the task");
+    let q = &lists[0];
+    assert!(q.complete());
+    assert_eq!(q.file_count, 2);
+    assert!(q.entries.iter().any(|e| e.rel_path == "sub/also.txt"));
+    let (bs, bf) = quick_list::baseline_times(&fx.engine.db, &t.id).unwrap().expect("full snapshot times kept");
+    assert!(q.received_at <= bs && bs <= bf);
+    let tl = quick_list::timeline_for_task(&fx.engine.db, &t.id, &[]);
+    assert_eq!(tl["rows"][0]["label"], "Your request arrived");
+    assert_eq!(tl["rows"][1]["text"].as_str().unwrap().split(' ').next(), Some("2"));
+    // Deleting the task removes its list.
+    fx.engine.db.delete_task_data(&t.id).unwrap();
+    assert!(quick_list::for_task(&fx.engine.db, &t.id).unwrap().is_empty());
+}
+
 /// Automatic tasks can be turned off in Settings.
 #[test]
 fn automatic_tasks_respect_the_setting() {

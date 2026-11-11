@@ -1252,6 +1252,8 @@ async function render_results() {
     ${required.map(r => checkCard(r, run.id, task)).join('') || (run.results.length ? '<p class="muted">No required checks were set.</p>' : '<div class="card card-soft"><p><b>Verification wasn’t run.</b> This task has no checks yet. Add checks to evaluate this task, for example when you set up a new task or from Saved checks.</p></div>')}
     ${optional.length ? `<h2 class="section-title">Optional checks</h2><p class="small muted">These don’t change the overall result.</p>${optional.map(r => checkCard(r, run.id, task)).join('')}` : ''}
 
+    ${timelineCard(runData.timeline)}
+
     <h2 class="section-title">Conversation</h2>
     <div class="card" id="conversation-box"><p class="muted">Looking for Claude Code’s record of this conversation…</p></div>
 
@@ -1267,6 +1269,14 @@ async function render_results() {
 }
 
 // ---- What it said vs what really happened (one line at the top of each report) -----------------
+// "When things happened": request, quick name list, full snapshot, first action (quick_list.rs).
+function timelineCard(t) {
+  if (!t || !(t.rows || []).length) return '';
+  const rows = t.rows.map(r => `<tr><th scope="row">${esc(r.label)}</th><td>${r.at ? esc(new Date(r.at).toLocaleString()) : 'Not known'}${r.text ? ` <span class="small muted">${esc(r.text)}</span>` : ''}</td></tr>`).join('');
+  return `<h2 class="section-title">When things happened</h2>
+    <div class="card"><table class="glance">${rows}</table>${t.note ? `<p><b>${esc(t.note)}</b></p>` : ''}</div>`;
+}
+
 const SVH_TONE = { ok: 'svh-ok', bad: 'svh-bad', warn: 'svh-warn', neutral: 'svh-neutral' };
 const ITEM_KIND = { ok: 'ok', bad: 'bad', warn: 'warn', neutral: 'muted' };
 const svhItem = (title, x) => (x && x.label ? `<div class="svh-item"><span class="svh-label">${esc(title)}</span>

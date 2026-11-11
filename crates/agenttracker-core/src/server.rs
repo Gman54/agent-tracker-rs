@@ -794,7 +794,8 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
 async fn run_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
     ok(load_run(&st.engine, &id).map(|(task, run, events)| {
         let svh = crate::report::said_vs_happened(&task, &run, &events, &Value::Null);
-        json!({"task": task, "run": run, "events": events, "said_vs_happened": svh})
+        let timeline = crate::quick_list::timeline_for_task(&st.engine.db, &task.id, &events);
+        json!({"task": task, "run": run, "events": events, "said_vs_happened": svh, "timeline": timeline})
     }))
 }
 
@@ -830,9 +831,10 @@ async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath
         let (t, r, e, roots) = (task.clone(), run.clone(), events.clone(), crate::conversation::claude_roots());
         tokio::task::spawn_blocking(move || crate::conversation::for_task(&t, &r, &e, &roots)).await.unwrap_or(Value::Null)
     };
+    let timeline = crate::quick_list::timeline_for_task(&st.engine.db, &task.id, &events);
     let (body, mime, ext) = match fmt.as_str() {
-        "html" => (crate::report::export_html(&task, &run, &events, &conv), "text/html; charset=utf-8", "html"),
-        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events, &conv)).unwrap_or_default(), "application/json", "json"),
+        "html" => (crate::report::export_html_with(&task, &run, &events, &conv, &timeline), "text/html; charset=utf-8", "html"),
+        "json" => (serde_json::to_string_pretty(&crate::report::export_json_with(&task, &run, &events, &conv, &timeline)).unwrap_or_default(), "application/json", "json"),
         _ => return err(404, "Unknown export format"),
     };
     Response::builder()

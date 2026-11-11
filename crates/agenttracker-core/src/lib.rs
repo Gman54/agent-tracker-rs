@@ -10,6 +10,7 @@ pub mod event;
 pub mod fs_observer;
 pub mod gitwork;
 pub mod queue;
+pub mod quick_list;
 pub mod report;
 pub mod server;
 pub mod store;
