@@ -25,6 +25,7 @@ fn main() {
     println!("Open the UI (one-time link): http://127.0.0.1:{port}/launch?token={token}");
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async move {
         let l = tokio::net::TcpListener::from_std(listener).unwrap();
+        agenttracker_runtime::protect::autostart();
         serve_with(l, state, agenttracker_runtime::http::routes()).await.unwrap();
     });
 }

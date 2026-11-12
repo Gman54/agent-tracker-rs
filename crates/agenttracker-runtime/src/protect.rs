@@ -1,18 +1,18 @@
 //! Houndbit's side of Houndbit Protect.
 //!
-//! Houndbit talks to Protect exactly the way any other program would: over Protect's own local
-//! pipe/socket, with Houndbit's own Ed25519 pairing key kept in Houndbit's data folder. Houndbit
-//! never opens Protect's database, never calls the engine's internal methods, and gets no special
-//! treatment — the user still accepts the pairing and grants folders inside Protect. This module
-//! is a thin client wrapper so the desktop shell can show pairing status and prove the staged
-//! sandbox works from Houndbit's side.
+//! Houndbit talks to Protect the way any other program would: over Protect's own local
+//! pipe/socket, signing in with Houndbit's own Ed25519 key kept in Houndbit's data folder.
 //!
-//! It uses `protect_engine::client` (the published client helper) and `protect_engine::paths`
-//! (the documented default endpoint). It does not use any other part of the engine crate. When
-//! the client is eventually split into its own small crate, only this import changes.
+//! To keep it to one install, Houndbit also starts the Protect engine itself when it opens (see
+//! `autostart`), unless a separate Protect engine is already running for this user. While Houndbit
+//! hosts the engine, Houndbit's window doubles as the Protect controls: accept or reject pairing
+//! requests, give apps folders, and answer approvals. Houndbit's own file work still goes through
+//! the client path with its key, exactly like other apps.
 use protect_engine::client::{load_or_create_key, public_key_b64, Client};
+use protect_engine::Engine;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Houndbit's stable application id in Protect. Lower-case reverse-DNS, as Protect requires.
 pub const APP_ID: &str = "com.houndbit.app";
@@ -53,17 +53,21 @@ async fn signed_in(home: &Path) -> Result<Client, String> {
 /// key and never errors: when Protect isn't running it simply reports that.
 pub async fn status(home: &Path) -> Value {
     let ep = endpoint();
-    let mut base = json!({"endpoint": ep, "app_id": APP_ID, "display_name": DISPLAY_NAME, "running": false, "paired": false});
+    let mut base = json!({"endpoint": ep, "app_id": APP_ID, "display_name": DISPLAY_NAME, "running": false, "paired": false, "hosted": is_hosted()});
     let mut c = match Client::connect(&ep).await {
         Ok(c) => c,
         Err(_) => {
-            base["message"] = json!("Houndbit Protect isn't running. Start the Protect engine, then pair Houndbit.");
+            let why = HOST_ERROR.lock().ok().and_then(|g| g.clone());
+            base["message"] = json!(match why {
+                Some(w) => format!("Protect normally starts with Houndbit, but it couldn't start: {w}"),
+                None => "Protect isn't answering yet. It starts with Houndbit; give it a moment and check again.".to_string(),
+            });
             return base;
         }
     };
     base["running"] = json!(true);
     if !key_path(home).exists() {
-        base["message"] = json!("Protect is running. Pair Houndbit to connect it.");
+        base["message"] = json!("Protect is running. Connect Houndbit to it with one click.");
         return base;
     }
     let key = match load_or_create_key(&key_path(home)) {
@@ -81,7 +85,7 @@ pub async fn status(home: &Path) -> Value {
             base["message"] = json!("Connected to Houndbit Protect.");
         }
         Err(_) => {
-            base["message"] = json!("Protect is running but Houndbit isn't paired yet. Pair it, then accept in Protect.");
+            base["message"] = json!("Protect is running but Houndbit isn't connected to it yet.");
         }
     }
     base
@@ -157,4 +161,131 @@ pub async fn sandbox_check(home: &Path, grant_id: &str, rel: &str) -> Result<Val
         "diff": diff.pointer("/output/changes"),
         "message": "Houndbit read the snapshot and staged a change; your original files were not written."
     }))
+}
+
+// ---- Protect running inside Houndbit ------------------------------------------------------------
+//
+// Houndbit ships one installer. So that Protect works without a second program to find and start,
+// Houndbit starts the Protect engine itself, in the background, on Protect's normal endpoint. If a
+// separate Protect engine is already running for this user, Houndbit leaves it alone and just
+// connects to it like any other app. When Houndbit hosts the engine, Houndbit's window is also
+// where the user accepts pairings, gives folders and answers approvals (the "Protect window" job);
+// those admin calls below only work on the engine Houndbit itself started.
+
+static HOSTED: OnceLock<Arc<Engine>> = OnceLock::new();
+static HOST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_host_error(m: Option<String>) {
+    if let Ok(mut g) = HOST_ERROR.lock() {
+        *g = m;
+    }
+}
+
+/// True when the engine Houndbit started is the one answering on the endpoint.
+pub fn is_hosted() -> bool {
+    HOSTED.get().is_some()
+}
+
+/// Starts Protect inside Houndbit with the default records folder and endpoint, unless
+/// `HOUNDBIT_PROTECT_ENDPOINT` points somewhere else (advanced setups, tests). Must be called from
+/// inside a Tokio runtime. Never blocks and never panics.
+pub fn autostart() {
+    if std::env::var("HOUNDBIT_PROTECT_ENDPOINT").map(|v| !v.is_empty()).unwrap_or(false) {
+        return;
+    }
+    let dir = protect_engine::paths::default_data_dir();
+    let ep = protect_engine::paths::default_endpoint(&dir);
+    tokio::spawn(host(dir, ep));
+}
+
+/// Opens Protect's records in `dir` and serves on `ep`, unless something already answers there.
+/// Returns when the engine stops (normally never).
+pub async fn host(dir: PathBuf, ep: String) {
+    if Client::connect(&ep).await.is_ok() {
+        return; // a separate Protect engine is already running; connect to it as a normal app
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        set_host_error(Some(format!("Couldn't create Protect's records folder {}: {e}", dir.display())));
+        return;
+    }
+    let engine = match Engine::open(&dir) {
+        Ok(e) => Arc::new(e),
+        Err(e) => {
+            set_host_error(Some(format!("Couldn't open Protect's records in {}: {}", dir.display(), e.message)));
+            return;
+        }
+    };
+    if HOSTED.set(engine.clone()).is_err() {
+        return; // already hosting in this process
+    }
+    set_host_error(None);
+    if let Err(e) = protect_engine::transport::serve(engine, &ep).await {
+        set_host_error(Some(format!("Protect stopped: {e}")));
+    }
+}
+
+fn hosted() -> Result<&'static Arc<Engine>, String> {
+    HOSTED.get().ok_or_else(|| "These controls only work when Protect runs inside Houndbit. A separate Protect engine is running, so use its own commands.".to_string())
+}
+
+fn emsg(e: protect_engine::ProtectError) -> String {
+    e.message
+}
+
+/// Everything the Protect controls show: requests waiting, paired apps, folders, approvals.
+pub fn admin_overview() -> Value {
+    let Ok(e) = hosted() else {
+        return json!({"hosted": false});
+    };
+    let pairings: Vec<Value> = e.admin_pairings().unwrap_or_default().into_iter().filter(|p| p["state"] == "pending").collect();
+    let apps: Vec<Value> = e.admin_apps().unwrap_or_default().into_iter().filter(|a| a["revoked_at"].is_null()).collect();
+    let grants: Vec<Value> = e.admin_grants().unwrap_or_default().into_iter().filter(|g| g["revoked_at"].is_null()).collect();
+    let approvals: Vec<Value> = e
+        .approvals_list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut a| {
+            if let Some(o) = a.as_object_mut() {
+                o.remove("nonce");
+            }
+            a
+        })
+        .collect();
+    json!({"hosted": true, "pairings": pairings, "apps": apps, "grants": grants, "approvals": approvals})
+}
+
+pub fn admin_pairing(pairing_id: &str, accept: bool) -> Result<Value, String> {
+    hosted()?.admin_pairing_resolve(pairing_id, accept, None).map_err(emsg)
+}
+
+pub fn admin_add_folder(app_id: &str, folder: &str) -> Result<Value, String> {
+    hosted()?.admin_grant_add(app_id, folder.trim()).map_err(emsg)
+}
+
+pub fn admin_remove_app(app_id: &str) -> Result<Value, String> {
+    hosted()?.admin_revoke_app(app_id).map_err(emsg)
+}
+
+pub fn admin_approval(approval_id: &str, approve: bool) -> Result<Value, String> {
+    let e = hosted()?;
+    let nonce = e
+        .approvals_list()
+        .map_err(emsg)?
+        .into_iter()
+        .find(|x| x["approval_id"] == approval_id)
+        .and_then(|x| x["nonce"].as_str().map(str::to_string))
+        .ok_or("That request is no longer waiting (it may have expired or been answered).")?;
+    e.approvals_resolve(approval_id, &nonce, approve).map_err(emsg)
+}
+
+/// One click from Houndbit's own window: ask Protect to pair Houndbit and, when Houndbit is
+/// hosting Protect, accept that request straight away (the user clicking the button is the OK).
+pub async fn connect_houndbit(home: &Path) -> Result<Value, String> {
+    let r = pair(home).await?;
+    if !is_hosted() {
+        return Ok(r);
+    }
+    let id = r["pairing_id"].as_str().ok_or("Protect didn't return a pairing id")?.to_string();
+    admin_pairing(&id, true)?;
+    Ok(json!({"pairing_id": id, "state": "accepted", "message": "Houndbit is connected to Protect."}))
 }

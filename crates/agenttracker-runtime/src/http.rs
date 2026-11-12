@@ -53,6 +53,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/pair", post(protect_pair))
         .route("/api/ui/runtime/protect/grants", get(protect_grants))
         .route("/api/ui/runtime/protect/sandbox-check", post(protect_sandbox_check))
+        .route("/api/ui/runtime/protect/connect", post(protect_connect))
+        .route("/api/ui/runtime/protect/admin", get(protect_admin))
+        .route("/api/ui/runtime/protect/admin/pairing", post(protect_admin_pairing))
+        .route("/api/ui/runtime/protect/admin/folder", post(protect_admin_folder))
+        .route("/api/ui/runtime/protect/admin/remove-app", post(protect_admin_remove_app))
+        .route("/api/ui/runtime/protect/admin/approval", post(protect_admin_approval))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -530,4 +536,61 @@ async fn protect_sandbox_check(State(st): St, Json(body): Json<SandboxCheckIn>) 
         Ok(v) => j(200, v),
         Err(m) => j(502, json!({"error": m})),
     }
+}
+
+// Protect controls. These only act on the Protect engine Houndbit itself started.
+
+fn protect_result(r: Result<Value, String>) -> Response {
+    match r {
+        Ok(v) => j(200, v),
+        Err(m) => j(400, json!({"error": m})),
+    }
+}
+
+async fn protect_connect(State(st): St) -> Response {
+    let home = st.agenttracker_home.clone();
+    match crate::protect::connect_houndbit(&home).await {
+        Ok(v) => j(200, v),
+        Err(m) => j(502, json!({"error": m})),
+    }
+}
+
+async fn protect_admin() -> Response {
+    j(200, crate::protect::admin_overview())
+}
+
+#[derive(Deserialize)]
+struct ProtectDecisionIn {
+    id: String,
+    accept: bool,
+}
+
+async fn protect_admin_pairing(Json(b): Json<ProtectDecisionIn>) -> Response {
+    protect_result(crate::protect::admin_pairing(&b.id, b.accept))
+}
+
+async fn protect_admin_approval(Json(b): Json<ProtectDecisionIn>) -> Response {
+    protect_result(crate::protect::admin_approval(&b.id, b.accept))
+}
+
+#[derive(Deserialize)]
+struct ProtectFolderIn {
+    app_id: String,
+    folder: String,
+}
+
+async fn protect_admin_folder(Json(b): Json<ProtectFolderIn>) -> Response {
+    if b.folder.trim().is_empty() {
+        return j(400, json!({"error": "Type the folder's full path first, for example C:\\Users\\you\\Projects\\demo."}));
+    }
+    protect_result(crate::protect::admin_add_folder(&b.app_id, &b.folder))
+}
+
+#[derive(Deserialize)]
+struct ProtectAppIn {
+    app_id: String,
+}
+
+async fn protect_admin_remove_app(Json(b): Json<ProtectAppIn>) -> Response {
+    protect_result(crate::protect::admin_remove_app(&b.app_id))
 }

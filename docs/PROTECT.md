@@ -46,7 +46,7 @@ mode is on. Gate and isolate are reported as **unavailable**.
 ## Trying it (command line for now; there's no window yet)
 
 ```
-protect-engine serve                          # start the engine
+protect-engine serve                          # optional: Houndbit starts Protect for you
 protect-engine pairings                       # see who wants to pair
 protect-engine pairings accept <id>           # accept one
 protect-engine folders add <app> <folder>     # let an app use a folder
@@ -103,14 +103,26 @@ uses. No private shortcut.
 - **Connector.** `crates/agenttracker-runtime/src/protect.rs` holds Houndbit's own key, pairs,
   signs in, lists its folders, and runs a sandbox check (read a file, write a staged copy, list,
   diff) to confirm the real file is never touched.
-- **In the app.** The runtime serves `GET /api/ui/runtime/protect/status`, `POST .../pair`,
-  `GET .../grants` and `POST .../sandbox-check`, and there is a **Houndbit Protect** panel
-  (`static/protect.js`) showing whether the engine is running and paired, a pair button, the folder
-  list, and a per-folder sandbox check.
-- **What was checked (on Linux):** `crates/agenttracker-runtime/tests/protect_connector.rs` starts
-  the engine, has Houndbit pair, accepts the pairing, adds a folder, lists grants, runs the sandbox
-  check and confirms the original file is unchanged. The whole workspace compiles. The panel itself
-  was **not** clicked through in a live window here; only the endpoints and connector were tested.
+- **Protect starts with Houndbit.** When Houndbit opens, it starts the Protect engine itself in the
+  background on Protect's normal endpoint (`protect::autostart`). One install, nothing extra to run.
+  If a separate `protect-engine serve` is already running for this user, Houndbit leaves it alone
+  and connects to it like any other app. When Houndbit quits, its built-in Protect stops too.
+- **In the app.** The sidebar has a **Protect** page (`static/protect.js`): shows Protect is on,
+  a one-click **Connect Houndbit** button, a box to add folders, a **Try it** sandbox check per
+  folder, a "Waiting for your OK" list (other apps asking to connect, actions needing approval) with
+  Allow / Say no, and a list of other connected apps with Add folder / Disconnect. Endpoints:
+  `GET .../protect/status`, `POST .../protect/connect`, `GET .../protect/grants`,
+  `POST .../protect/sandbox-check`, and `GET .../protect/admin` plus
+  `POST .../protect/admin/{pairing,folder,remove-app,approval}`.
+- **The Protect controls only act on Houndbit's built-in engine.** Clicking Connect Houndbit is the
+  user's OK, so Houndbit's own pairing is accepted straight away. Houndbit's file work still goes
+  through the normal signed-in client path with its own key, like any other app.
+- **What was checked (on Linux):** `tests/protect_connector.rs` (separate engine: pair, accept,
+  folder, sandbox, original unchanged) and `tests/protect_hosted.rs` (built-in engine: starts,
+  one-click connect, another app's request shows up and can be refused, add folder, sandbox,
+  original unchanged, disconnect). The Protect page was also clicked through in a browser using the
+  headless preview (`cargo run -p agenttracker-runtime --example ui_preview`): Connect, Add folder,
+  Try it, and the real file was unchanged afterwards. Not yet clicked through in the Windows app.
 
 ## Honest limits
 
@@ -142,7 +154,7 @@ uses. No private shortcut.
 | A | Engine, pairing, records, standalone window | Engine done and tested. **Window not built** (command line only). JSON schemas not written yet. |
 | B | Restricted worker that actually does the file work | Done for the four file actions and tested on Linux (snapshot + writing area, originals never touched). A confined file worker, **not** OS isolation; no Windows isolation backend yet. Not run on Windows named pipes. |
 | C | Python and TypeScript kits plus a sample app | Small Python and Node.js examples work on Linux. Not full kits yet, and not run on Windows. |
-| D | Houndbit talking to Protect through the same public door | Done and tested on Linux: connector, HTTP endpoints and a panel in the app. The panel was **not** clicked through in a live window here. |
+| D | Houndbit talking to Protect through the same public door | Done and tested on Linux. Protect now starts inside Houndbit; the Protect page was clicked through in the headless preview, not yet in the Windows app. |
 | E | MCP gateway and Claude Code gate hook | Not started. Needs a live check on your PC. |
 | F | Payments, license, signed installer | Not started. Needs your choice of payment service, a code-signing certificate and a server. |
 | G | More hosts and launchers | Not started. |

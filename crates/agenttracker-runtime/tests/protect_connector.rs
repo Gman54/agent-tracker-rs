@@ -46,7 +46,7 @@ async fn houndbit_connector_pairs_and_runs_the_sandbox() {
     let off = protect::status(home.path()).await;
     assert_eq!(off["running"], false);
     assert_eq!(off["paired"], false);
-    assert!(off["message"].as_str().unwrap().contains("isn't running"));
+    assert!(off["message"].as_str().unwrap().contains("isn't answering"));
     assert!(protect::pair(home.path()).await.is_err());
 
     // Now start a real Protect engine and point the connector at it.

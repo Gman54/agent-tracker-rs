@@ -152,6 +152,8 @@ fn main() {
         tokio_rt.block_on(async move {
             let l = tokio::net::TcpListener::from_std(listener).expect("listener");
             agenttracker_runtime::relay::autostart(rt.state.engine.db.clone());
+            // Houndbit Protect: starts with Houndbit (unless a separate engine is already running).
+            agenttracker_runtime::protect::autostart();
             if let Err(e) = serve_with(l, rt.state, agenttracker_runtime::http::routes()).await {
                 eprintln!("server stopped: {e}");
             }
@@ -179,6 +181,8 @@ fn main() {
                 let l = tokio::net::TcpListener::from_std(listener).expect("listener");
                 // Chat recorder: starts only if the user turned it on in Connections.
                 agenttracker_runtime::relay::autostart(server_state.engine.db.clone());
+                // Houndbit Protect: starts with Houndbit (unless a separate engine is already running).
+                agenttracker_runtime::protect::autostart();
                 if let Err(e) = serve_with(l, server_state, agenttracker_runtime::http::routes()).await {
                     eprintln!("server stopped: {e}");
                 }
