@@ -12,6 +12,20 @@ use agenttracker_runtime::protect;
 use protect_engine::{transport, Engine};
 use std::sync::Arc;
 
+/// A local endpoint for the engine: a per-run named pipe on Windows, a socket file on Unix.
+/// `tag` keeps the "absent" endpoint and the real one from ever colliding.
+fn endpoint(dir: &std::path::Path, tag: &str) -> String {
+    if cfg!(windows) {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!(r"\\.\pipe\houndbit-protect-conn-{tag}-{}-{n}", std::process::id())
+    } else {
+        dir.join(format!("{tag}.sock")).to_string_lossy().into_owned()
+    }
+}
+
 async fn wait_until_up(ep: &str) {
     for _ in 0..100 {
         if protect_engine::client::Client::connect(ep).await.is_ok() {
@@ -27,7 +41,7 @@ async fn houndbit_connector_pairs_and_runs_the_sandbox() {
     let home = tempfile::tempdir().unwrap();
 
     // Protect is off: status is calm, and pairing is a plain error, never a silent success.
-    let absent = home.path().join("absent.sock").to_string_lossy().into_owned();
+    let absent = endpoint(home.path(), "absent");
     std::env::set_var("HOUNDBIT_PROTECT_ENDPOINT", &absent);
     let off = protect::status(home.path()).await;
     assert_eq!(off["running"], false);
@@ -37,7 +51,7 @@ async fn houndbit_connector_pairs_and_runs_the_sandbox() {
 
     // Now start a real Protect engine and point the connector at it.
     let protect_dir = tempfile::tempdir().unwrap();
-    let ep = protect_dir.path().join("engine.sock").to_string_lossy().into_owned();
+    let ep = endpoint(protect_dir.path(), "engine");
     std::env::set_var("HOUNDBIT_PROTECT_ENDPOINT", &ep);
     let engine = Arc::new(Engine::open(protect_dir.path()).unwrap());
     let ep2 = ep.clone();
