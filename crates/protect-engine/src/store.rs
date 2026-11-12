@@ -36,6 +36,16 @@ CREATE TABLE events(
 CREATE INDEX events_session ON events(session_id, seq);
 CREATE TABLE auth_failures(app_id TEXT NOT NULL, ts INTEGER NOT NULL);
 "#,
+), (
+    2,
+    r#"
+-- The staged file worker records what it actually ran.
+ALTER TABLE actions ADD COLUMN executed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE actions ADD COLUMN output TEXT;
+-- Where the session's snapshot/staging folders live, and the snapshot it took.
+ALTER TABLE sessions ADD COLUMN snapshot_files INTEGER;
+ALTER TABLE sessions ADD COLUMN snapshot_bytes INTEGER;
+"#,
 )];
 
 pub fn open(dir: &Path) -> rusqlite::Result<Connection> {

@@ -1,5 +1,6 @@
 //! End-to-end protocol tests through the real local transport (named pipe on Windows, Unix
-//! socket elsewhere). These test decisions and records only: nothing executes in Milestone A.
+//! socket elsewhere). These cover decisions, records, and the staged file worker that runs the
+//! four typed file operations against a read-only snapshot and a writable staging folder.
 use protect_engine::client::{generate_key, public_key_b64, Client};
 use protect_engine::policy::{Decision, DEFAULT_PROFILE};
 use protect_engine::{transport, Code, Engine};
@@ -123,16 +124,19 @@ async fn a_challenge_works_only_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn decisions_are_recorded_and_nothing_runs() {
+async fn decisions_are_recorded_and_allowed_work_runs() {
     let h = start().await;
+    // A real file in the granted folder, written before the session's snapshot is taken.
+    std::fs::write(h.folder.path().join("notes.txt"), "hello there").unwrap();
     let (mut c, grant) = paired(&h, "com.example.app", None).await;
     let s = running_session(&mut c, &grant).await;
     let ok = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "k1", "operation_id": "files.read", "arguments": {"path": "notes.txt"}})).await.unwrap();
     assert_eq!(ok["decision"], "allow");
-    assert_eq!(ok["state"], "failed", "allowed, but there is no execution backend yet");
-    assert_eq!(ok["error_code"], "ENGINE_UNAVAILABLE");
-    assert_eq!(ok["executed"], false);
-    assert!(ok["reason"].as_str().unwrap().contains("Nothing was run"));
+    assert_eq!(ok["state"], "succeeded", "allowed and run by the staged file worker");
+    assert_eq!(ok["executed"], true);
+    assert!(ok["error_code"].is_null());
+    // The worker read the snapshot copy and returned the real content.
+    assert_eq!(ok["output"]["text"], "hello there");
     let no = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "k2", "operation_id": "files.read", "arguments": {"path": ".git/config"}})).await.unwrap();
     assert_eq!((no["decision"].as_str(), no["state"].as_str()), (Some("deny"), Some("denied")));
     // Unknown operations and bad paths are refused outright, not mapped to something allowed.
@@ -145,7 +149,47 @@ async fn decisions_are_recorded_and_nothing_runs() {
     assert_eq!(types, ["session.ready", "session.running", "action.proposed"]);
     let p2 = c.call("v1.events.read", json!({"session_id": s, "cursor": p1["next_cursor"], "limit": 200})).await.unwrap();
     let types2: Vec<&str> = p2["events"].as_array().unwrap().iter().map(|e| e["type"].as_str().unwrap()).collect();
-    assert_eq!(types2, ["action.decided", "action.not_executed", "action.proposed", "action.decided"]);
+    assert_eq!(types2, ["action.decided", "action.authorized", "action.executed", "action.proposed", "action.decided"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sandbox_stages_writes_and_never_touches_originals() {
+    let h = start().await;
+    // Two real files in the granted folder, captured by the snapshot at session request.
+    std::fs::write(h.folder.path().join("keep.txt"), "original-keep").unwrap();
+    std::fs::write(h.folder.path().join("edit.txt"), "original-edit").unwrap();
+    let (mut c, grant) = paired(&h, "com.example.box", None).await;
+    let s = running_session(&mut c, &grant).await;
+
+    // Reading goes through the snapshot copy.
+    let r = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "r1", "operation_id": "files.read", "arguments": {"path": "edit.txt"}})).await.unwrap();
+    assert_eq!((r["state"].as_str(), r["executed"].as_bool()), (Some("succeeded"), Some(true)));
+    assert_eq!(r["output"]["text"], "original-edit");
+
+    // Writing stages a change; the original on disk is left exactly as it was.
+    let w = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "w1", "operation_id": "files.write_staged", "arguments": {"path": "edit.txt", "text": "staged-edit"}})).await.unwrap();
+    assert_eq!((w["state"].as_str(), w["executed"].as_bool()), (Some("succeeded"), Some(true)));
+    assert_eq!(w["output"]["wrote_original"], false);
+    assert_eq!(std::fs::read_to_string(h.folder.path().join("edit.txt")).unwrap(), "original-edit", "the real file is untouched");
+
+    // A later read now sees the staged version layered over the snapshot.
+    let r2 = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "r2", "operation_id": "files.read", "arguments": {"path": "edit.txt"}})).await.unwrap();
+    assert_eq!(r2["output"]["text"], "staged-edit");
+
+    // A brand-new staged file never exists in the granted folder.
+    c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "w2", "operation_id": "files.write_staged", "arguments": {"path": "new.txt", "text": "brand new"}})).await.unwrap();
+    assert!(!h.folder.path().join("new.txt").exists(), "staged-only file must not appear in the original folder");
+
+    // diff reports exactly the staged changes, sorted by path.
+    let d = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "d1", "operation_id": "files.diff", "arguments": {}})).await.unwrap();
+    let changes = d["output"]["changes"].as_array().unwrap();
+    let kinds: Vec<(&str, &str)> = changes.iter().map(|ch| (ch["path"].as_str().unwrap(), ch["kind"].as_str().unwrap())).collect();
+    assert_eq!(kinds, [("edit.txt", "modified"), ("new.txt", "added")]);
+
+    // list merges originals with staged files.
+    let l = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "l1", "operation_id": "files.list", "arguments": {}})).await.unwrap();
+    let files: Vec<&str> = l["output"]["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert!(files.contains(&"keep.txt") && files.contains(&"edit.txt") && files.contains(&"new.txt"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -181,7 +225,9 @@ async fn approvals_are_single_use_and_only_for_approvers() {
     h.admin.approvals_resolve(aid, nonce, true).unwrap();
     assert_eq!(h.admin.approvals_resolve(aid, nonce, true).unwrap_err().code, Code::InvalidState, "replay refused");
     let after = c.call("v1.actions.get", json!({"action_id": a["id"]})).await.unwrap();
-    assert_eq!((after["state"].as_str(), after["executed"].as_bool()), (Some("failed"), Some(false)), "approved, but nothing runs yet");
+    assert_eq!((after["state"].as_str(), after["executed"].as_bool()), (Some("succeeded"), Some(true)), "approved, then run by the staged file worker");
+    assert_eq!(after["output"]["staged"], true, "the write landed in staging, not the original");
+    assert_eq!(after["output"]["wrote_original"], false);
     // Pausing the session cancels anything still waiting.
     let b = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "w2", "operation_id": "files.write_staged", "arguments": {"path": "b.txt", "text": "x"}})).await.unwrap();
     c.call("v1.sessions.pause", json!({"session_id": s})).await.unwrap();

@@ -49,6 +49,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/relay/conversations/:id", get(relay_conversation))
         .route("/api/ui/runtime/relay/conversations/:id/name", put(relay_rename))
         .route("/api/ui/runtime/relay/delete", post(relay_delete))
+        .route("/api/ui/runtime/protect/status", get(protect_status))
+        .route("/api/ui/runtime/protect/pair", post(protect_pair))
+        .route("/api/ui/runtime/protect/grants", get(protect_grants))
+        .route("/api/ui/runtime/protect/sandbox-check", post(protect_sandbox_check))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -484,4 +488,46 @@ async fn relay_delete(State(st): St, body: Option<Json<RelayDeleteIn>>) -> Respo
         Ok(json!({"deleted": n}))
     })
     .await
+}
+
+// ---------------------------------------------------------------- Houndbit Protect (optional add-on)
+// Houndbit talks to Protect as an ordinary paired app over Protect's own local endpoint. These
+// handlers never open Protect's database; they use the published client only.
+
+#[derive(Deserialize)]
+struct SandboxCheckIn {
+    grant_id: String,
+    path: String,
+}
+
+async fn protect_status(State(st): St) -> Response {
+    let home = st.agenttracker_home.clone();
+    j(200, crate::protect::status(&home).await)
+}
+
+async fn protect_pair(State(st): St) -> Response {
+    let home = st.agenttracker_home.clone();
+    match crate::protect::pair(&home).await {
+        Ok(v) => j(200, v),
+        Err(m) => j(502, json!({"error": m})),
+    }
+}
+
+async fn protect_grants(State(st): St) -> Response {
+    let home = st.agenttracker_home.clone();
+    match crate::protect::grants(&home).await {
+        Ok(v) => j(200, v),
+        Err(m) => j(502, json!({"error": m})),
+    }
+}
+
+async fn protect_sandbox_check(State(st): St, Json(body): Json<SandboxCheckIn>) -> Response {
+    let home = st.agenttracker_home.clone();
+    if body.grant_id.is_empty() || body.path.is_empty() {
+        return j(400, json!({"error": "A granted folder and a file path inside it are both needed."}));
+    }
+    match crate::protect::sandbox_check(&home, &body.grant_id, &body.path).await {
+        Ok(v) => j(200, v),
+        Err(m) => j(502, json!({"error": m})),
+    }
 }

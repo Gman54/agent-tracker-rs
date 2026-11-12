@@ -280,6 +280,7 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "app.js" => (include_bytes!("../../../static/app.js"), "text/javascript; charset=utf-8"),
         "style.css" => (include_bytes!("../../../static/style.css"), "text/css; charset=utf-8"),
         "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
+        "protect.js" => (include_bytes!("../../../static/protect.js"), "text/javascript; charset=utf-8"),
         "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
         "houndbit-logo.png" => (include_bytes!("../../../static/houndbit-logo.png"), "image/png"),

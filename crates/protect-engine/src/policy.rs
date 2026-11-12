@@ -39,6 +39,29 @@ pub struct Policy {
     pub max_file_bytes: u64,
     pub max_session_minutes: u64,
     pub approval_minutes: u64,
+    /// Staging and snapshot caps for the file worker. Defaulted so policies saved before the
+    /// worker existed still load.
+    #[serde(default = "d_staged_files")]
+    pub max_staged_files: u64,
+    #[serde(default = "d_staging_bytes")]
+    pub max_staging_bytes: u64,
+    #[serde(default = "d_snapshot_files")]
+    pub max_snapshot_files: u64,
+    #[serde(default = "d_snapshot_bytes")]
+    pub max_snapshot_bytes: u64,
+}
+
+fn d_staged_files() -> u64 {
+    100
+}
+fn d_staging_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+fn d_snapshot_files() -> u64 {
+    5000
+}
+fn d_snapshot_bytes() -> u64 {
+    500 * 1024 * 1024
 }
 
 impl Policy {
@@ -52,6 +75,10 @@ impl Policy {
             max_file_bytes: 10 * 1024 * 1024,
             max_session_minutes: 30,
             approval_minutes: 15,
+            max_staged_files: d_staged_files(),
+            max_staging_bytes: d_staging_bytes(),
+            max_snapshot_files: d_snapshot_files(),
+            max_snapshot_bytes: d_snapshot_bytes(),
         }
     }
 

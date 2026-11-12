@@ -19,6 +19,7 @@
 //! - [`investigate`] — experimental "Test this influence" replays (decision stage only).
 //! - [`replay_vault`] — optional encrypted replay-capture store.
 //! - [`relay`] — the chat recorder: a local pass-through between a chat app and LM Studio / Ollama.
+//! - [`protect`] — Houndbit's thin client for Houndbit Protect (pair, status, staged-sandbox check).
 //! - [`http`] — axum routes mounted under `/api/ui/runtime/*` by the desktop shell.
 pub mod checks;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod demo;
 pub mod http;
 pub mod ids;
 pub mod investigate;
+pub mod protect;
 pub mod proposal;
 pub mod provider;
 pub mod relay;

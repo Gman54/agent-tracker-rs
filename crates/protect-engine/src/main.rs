@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const HELP: &str = "Houndbit Protect engine (Milestone A: decides and records, runs nothing)
+const HELP: &str = "Houndbit Protect engine (decides, records, and runs allowed file actions in a staged sandbox)
 
 Usage:
   protect-engine serve
@@ -47,7 +47,7 @@ fn main() {
         ["serve"] => {
             println!("Houndbit Protect engine {} is listening on {endpoint}", protect_engine::ENGINE_VERSION);
             println!("Records: {}", data_dir.display());
-            println!("Note: this build decides and records actions but runs nothing.");
+            println!("Note: allowed file actions run in a staged sandbox (snapshot in, staging out); your originals are never written.");
             let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&e.to_string()));
             if let Err(e) = rt.block_on(transport::serve(Arc::new(engine), &endpoint)) {
                 fail(&format!("The engine stopped: {e}"));

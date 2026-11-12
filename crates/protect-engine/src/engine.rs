@@ -16,12 +16,13 @@ pub const REQUESTABLE_SCOPES: &[&str] = &["observer", "requester"];
 pub const ALL_SCOPES: &[&str] = &["observer", "requester", "approver", "administrator"];
 pub const PAIRING_RATE: (i64, i64) = (5, 10 * 60 * 1000);
 pub const AUTH_FAIL_RATE: (i64, i64) = (5, 5 * 60 * 1000);
-/// Shown on every action that would have run: nothing executes in Milestone A.
-pub const NOT_RUN: &str = "Nothing was run: this build has no execution backend yet (Milestone A).";
+
 
 pub struct Engine {
     db: Mutex<Connection>,
     pub engine_id: String,
+    /// Where the engine keeps its records and each session's snapshot/staging folders.
+    data_dir: std::path::PathBuf,
 }
 
 fn b64() -> base64::engine::GeneralPurpose {
@@ -67,7 +68,7 @@ impl Engine {
                 params![p.profile, serde_json::to_string(&p).unwrap_or_default(), p.hash(), now_ms()],
             )?;
         }
-        Ok(Self { db: Mutex::new(c), engine_id })
+        Ok(Self { db: Mutex::new(c), engine_id, data_dir: dir.to_path_buf() })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -264,13 +265,18 @@ impl Engine {
         if !Path::new(&folder).is_dir() {
             return Err(err(Code::StaleResource, "The granted folder no longer exists."));
         }
+        let policy = policy_at(&c, profile, rev)?;
         let id = new_id("ses");
         let now = now_ms();
+        // Take the one-time read-only snapshot before the session is usable. The worker only
+        // ever reads this copy, so the user's real files can't be written or deleted later.
+        let ws = crate::worker::Workspace::new(&self.data_dir, &id);
+        let stats = ws.prepare(Path::new(&folder), &policy)?;
         c.execute(
-            "INSERT INTO sessions(id, app_id, profile, policy_revision, grant_id, state, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,'ready',?6,?6)",
-            params![id, app_id, profile, rev, grant_id, now],
+            "INSERT INTO sessions(id, app_id, profile, policy_revision, grant_id, state, created_at, updated_at, snapshot_files, snapshot_bytes) VALUES (?1,?2,?3,?4,?5,'ready',?6,?6,?7,?8)",
+            params![id, app_id, profile, rev, grant_id, now, stats.files as i64, stats.bytes as i64],
         )?;
-        event(&c, Some(&id), None, "session.ready", "engine", Some(rev), json!({"profile": profile, "grant_id": grant_id}))?;
+        event(&c, Some(&id), None, "session.ready", "engine", Some(rev), json!({"profile": profile, "grant_id": grant_id, "snapshot_files": stats.files, "snapshot_bytes": stats.bytes, "skipped": stats.skipped}))?;
         drop(c);
         self.sessions_get(app_id, &id)
     }
@@ -345,7 +351,8 @@ impl Engine {
         let (state, error_code, final_reason) = match decision {
             Decision::Deny => ("denied", Some(Code::PolicyDenied.as_str()), reason.clone()),
             Decision::RequireApproval => ("awaiting_approval", None, reason.clone()),
-            Decision::Allow => ("failed", Some(Code::EngineUnavailable.as_str()), format!("{reason} {NOT_RUN}")),
+            // Allowed and not needing approval: authorized now, run by the worker right after commit.
+            Decision::Allow => ("authorized", None, reason.clone()),
         };
         tx.execute(
             "INSERT INTO actions(id, session_id, app_id, idempotency_key, operation_id, args_hash, args, decision, state, reason, error_code, policy_revision, created_at, updated_at)
@@ -363,11 +370,58 @@ impl Engine {
                     params![new_id("apr"), id, session_id, args_hash, rev, nonce, now + p.approval_minutes as i64 * 60_000],
                 )?;
             }
-            Decision::Allow => event(&tx, Some(&session_id.to_string()), Some(&id), "action.not_executed", "engine", Some(rev), json!({"reason": NOT_RUN}))?,
+            Decision::Allow => event(&tx, Some(session_id), Some(&id), "action.authorized", "engine", Some(rev), json!({"operation_id": op}))?,
             Decision::Deny => {}
         }
         tx.commit()?;
+        drop(c);
+        // The worker runs outside the record transaction. A failure there marks the action
+        // failed; it never turns into a silent "allowed and done".
+        if decision == Decision::Allow {
+            self.execute_action(&id);
+        }
+        let c = self.conn();
         action_view(&c, app_id, &id)
+    }
+
+    /// Loads an authorized action and runs it through the staged file worker, then records what
+    /// happened. Called after the authorizing transaction has committed.
+    fn execute_action(&self, action_id: &str) {
+        let loaded: Option<(String, String, String, String, i64)> = {
+            let c = self.conn();
+            c.query_row(
+                "SELECT a.session_id, a.operation_id, a.args, s.profile, a.policy_revision FROM actions a JOIN sessions s ON s.id=a.session_id WHERE a.id=?1",
+                [action_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .unwrap_or(None)
+        };
+        let Some((session_id, op, args_text, profile, rev)) = loaded else { return };
+        let args: Value = serde_json::from_str(&args_text).unwrap_or(json!({}));
+        let policy = {
+            let c = self.conn();
+            policy_at(&c, &profile, rev)
+        };
+        let policy = match policy {
+            Ok(p) => p,
+            Err(e) => return self.finish_action(action_id, &session_id, "failed", Some(e.code), &e.message, None, rev, false),
+        };
+        let ws = crate::worker::Workspace::new(&self.data_dir, &session_id);
+        match ws.run(&op, &args, &policy) {
+            Ok(out) => self.finish_action(action_id, &session_id, "succeeded", None, "Done.", Some(out), rev, true),
+            Err(e) => self.finish_action(action_id, &session_id, "failed", Some(e.code), &e.message, None, rev, false),
+        }
+    }
+
+    fn finish_action(&self, action_id: &str, session_id: &str, state: &str, code: Option<Code>, reason: &str, output: Option<Value>, rev: i64, executed: bool) {
+        let c = self.conn();
+        let _ = c.execute(
+            "UPDATE actions SET state=?1, error_code=?2, reason=?3, output=?4, executed=?5, updated_at=?6 WHERE id=?7",
+            params![state, code.map(|c| c.as_str()), reason, output.as_ref().map(|v| v.to_string()), executed as i64, now_ms(), action_id],
+        );
+        let ty = if executed { "action.executed" } else { "action.failed" };
+        let _ = event(&c, Some(session_id), Some(action_id), ty, "engine", Some(rev), json!({"state": state, "reason": reason}));
     }
 
     pub fn actions_get(&self, app_id: &str, id: &str) -> Result<Value> {
@@ -421,17 +475,19 @@ impl Engine {
             return Err(err(Code::StaleResource, format!("This approval is {why}; nothing was run.")));
         }
         let (ap_state, act_state, code, reason) = if approve {
-            ("approved", "failed", Some(Code::EngineUnavailable.as_str()), format!("Approved by you. {NOT_RUN}"))
+            // Approved: authorized now, run by the worker right after this commits.
+            ("approved", "authorized", None::<String>, "Approved by you.".to_string())
         } else {
             ("denied", "denied", Some(Code::PolicyDenied.as_str()), "You declined this action.".to_string())
         };
         tx.execute("UPDATE approvals SET state=?1, resolved_at=?2 WHERE id=?3", params![ap_state, now, approval_id])?;
         tx.execute("UPDATE actions SET state=?1, error_code=?2, reason=?3, updated_at=?4 WHERE id=?5", params![act_state, code, reason, now, action_id])?;
         event(&tx, Some(&session_id), Some(&action_id), &format!("approval.{ap_state}"), "user", Some(rev), json!({"approval_id": approval_id}))?;
-        if approve {
-            event(&tx, Some(&session_id), Some(&action_id), "action.not_executed", "engine", Some(rev), json!({"reason": NOT_RUN}))?;
-        }
         tx.commit()?;
+        drop(c);
+        if approve {
+            self.execute_action(&action_id);
+        }
         Ok(json!({"approval_id": approval_id, "state": ap_state, "action_id": action_id}))
     }
 
@@ -483,11 +539,14 @@ fn owned_session_state(c: &Connection, app_id: &str, id: &str) -> Result<String>
 
 fn session_view(c: &Connection, app_id: &str, id: &str) -> Result<Value> {
     let v = c
-        .query_row("SELECT id, profile, policy_revision, grant_id, state, created_at, started_at, action_count FROM sessions WHERE id=?1 AND app_id=?2", params![id, app_id], |r| {
+        .query_row("SELECT id, profile, policy_revision, grant_id, state, created_at, started_at, action_count, snapshot_files, snapshot_bytes FROM sessions WHERE id=?1 AND app_id=?2", params![id, app_id], |r| {
             Ok(json!({"id": r.get::<_, String>(0)?, "profile": r.get::<_, String>(1)?, "policy_revision": r.get::<_, i64>(2)?, "resource_grant_id": r.get::<_, String>(3)?,
                 "state": r.get::<_, String>(4)?, "created_at": r.get::<_, i64>(5)?, "started_at": r.get::<_, Option<i64>>(6)?, "action_count": r.get::<_, i64>(7)?,
-                "coverage": {"filesystem": "not_enforced", "process": "not_enforced", "network": "not_enforced", "remote_tools": "not_enforced"},
-                "execution": "unavailable"}))
+                "snapshot_files": r.get::<_, Option<i64>>(8)?, "snapshot_bytes": r.get::<_, Option<i64>>(9)?,
+                // The file worker reads a snapshot and writes only to staging; it runs no code,
+                // so there is nothing to isolate at the OS level and your originals are never written.
+                "coverage": {"filesystem": "staged_worker", "process": "no_code_runs", "network": "no_network", "remote_tools": "not_enforced"},
+                "execution": "staged_file_worker"}))
         })
         .optional()?;
     v.ok_or_else(|| err(Code::NotFound, "No such session"))
@@ -497,13 +556,14 @@ fn action_view(c: &Connection, app_id: &str, id: &str) -> Result<Value> {
     let v = c
         .query_row(
             "SELECT a.id, a.session_id, a.operation_id, a.decision, a.state, a.reason, a.error_code, a.policy_revision, a.args_hash,
-                    (SELECT id FROM approvals WHERE action_id=a.id) FROM actions a WHERE a.id=?1 AND a.app_id=?2",
+                    a.executed, a.output, (SELECT id FROM approvals WHERE action_id=a.id) FROM actions a WHERE a.id=?1 AND a.app_id=?2",
             params![id, app_id],
             |r| {
+                let output = r.get::<_, Option<String>>(10)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or(Value::Null);
                 Ok(json!({"id": r.get::<_, String>(0)?, "session_id": r.get::<_, String>(1)?, "operation_id": r.get::<_, String>(2)?,
                     "decision": r.get::<_, String>(3)?, "state": r.get::<_, String>(4)?, "reason": r.get::<_, String>(5)?,
                     "error_code": r.get::<_, Option<String>>(6)?, "policy_revision": r.get::<_, i64>(7)?, "args_hash": r.get::<_, String>(8)?,
-                    "approval_id": r.get::<_, Option<String>>(9)?, "executed": false, "evidence_source": "engine"}))
+                    "executed": r.get::<_, i64>(9)? != 0, "output": output, "approval_id": r.get::<_, Option<String>>(11)?, "evidence_source": "engine"}))
             },
         )
         .optional()?;

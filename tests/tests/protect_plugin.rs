@@ -2,8 +2,8 @@
 //!
 //! Checks that Houndbit can use Protect the same way any other app would: through the public
 //! pipe/socket, with its own pairing key, and without either program touching the other's
-//! records. Also checks Houndbit keeps working when Protect isn't running. Protect still
-//! decides and records only: nothing here is executed by Protect.
+//! records. Also checks Houndbit keeps working when Protect isn't running. Protect decides,
+//! records, and runs the allowed action in its staged file worker against a snapshot copy.
 use agenttracker_acceptance::{claude_envelope, Fixture};
 use agenttracker_core::verifiers::CheckStatus;
 use protect_engine::client::{load_or_create_key, public_key_b64, Client};
@@ -83,10 +83,13 @@ async fn houndbit_plugs_into_protect_as_an_ordinary_app() {
     assert_eq!(grants["grants"].as_array().unwrap().len(), 1);
     let s = c.call("v1.sessions.request", json!({"resource_grant_id": grant})).await.unwrap()["id"].as_str().unwrap().to_string();
     c.call("v1.sessions.start", json!({"session_id": s})).await.unwrap();
-    let a = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "hb-1", "operation_id": "files.read", "arguments": {"path": "a.txt"}})).await.unwrap();
-    assert_eq!((a["decision"].as_str(), a["executed"].as_bool()), (Some("allow"), Some(false)), "decided, not run");
+    let a = c.call("v1.actions.submit", json!({"session_id": s, "idempotency_key": "hb-1", "operation_id": "files.read", "arguments": {"path": "input/a.txt"}})).await.unwrap();
+    assert_eq!((a["decision"].as_str(), a["executed"].as_bool()), (Some("allow"), Some(true)), "decided and run");
+    assert_eq!(a["output"]["text"], "alpha", "the worker read the snapshot copy");
+    // The real file in Houndbit's folder is read, never written, by Protect.
+    assert_eq!(std::fs::read_to_string(work.join("input/a.txt")).unwrap(), "alpha");
     let ev = c.call("v1.events.read", json!({"session_id": s})).await.unwrap();
-    assert!(ev["events"].as_array().unwrap().iter().any(|e| e["type"] == "action.not_executed"));
+    assert!(ev["events"].as_array().unwrap().iter().any(|e| e["type"] == "action.executed"));
 
     // Meanwhile Houndbit does its normal job, unaffected.
     let task = fx.copy_task(&work, &["a.txt"], None);

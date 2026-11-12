@@ -32,14 +32,15 @@ fn check_major(p: &Value) -> Result<()> {
 
 pub fn capabilities() -> Value {
     json!({
-        "modes": {"observe": "available", "gate": "unavailable", "isolate": "unavailable"},
-        "operations": policy::OPERATIONS.iter().map(|o| json!({"operation_id": o, "decision": "available", "execution": "unavailable"})).collect::<Vec<_>>(),
-        "backends": {"windows_isolation": "not_implemented", "mcp_gateway": "not_implemented", "claude_code_gate": "not_implemented"},
+        "modes": {"observe": "available", "staged_files": "available", "gate": "unavailable", "isolate": "unavailable"},
+        "operations": policy::OPERATIONS.iter().map(|o| json!({"operation_id": o, "decision": "available", "execution": "staged_file_worker"})).collect::<Vec<_>>(),
+        "backends": {"staged_file_worker": "available", "windows_os_isolation": "not_implemented", "mcp_gateway": "not_implemented", "claude_code_gate": "not_implemented"},
         "entitlement": "not_implemented",
         "limitations": [
-            "Milestone A: the engine decides and records actions but runs nothing.",
-            "No OS isolation, no worker, no MCP gateway and no host hooks yet.",
-            "Pairing and approvals are accepted through the local admin command, which any program running as you can also call."
+            "The file worker runs the four staged file operations (list, read, write-staged, diff) on a read-only snapshot. It writes only to a staging folder and never to your real files.",
+            "The worker runs no code of its own, so this is not an OS process sandbox. There is no gate for other agents' own file or shell access, no MCP gateway and no host hooks yet.",
+            "Pairing and approvals are accepted through the local admin command, which any program running as you can also call.",
+            "The Windows named pipe still uses default permissions."
         ]
     })
 }
@@ -49,7 +50,7 @@ pub fn hello(engine: &Engine) -> Value {
         "engine_id": engine.engine_id, "engine_version": ENGINE_VERSION,
         "protocol_version": format!("{PROTOCOL_MAJOR}.{PROTOCOL_MINOR}"),
         "supported_features": ["pairing", "grants", "sessions", "actions", "approvals", "events"],
-        "backend_support": {"windows": "decisions_only", "macos": "unsupported", "linux": "decisions_only_for_tests"},
+        "backend_support": {"windows": "staged_file_worker", "macos": "unsupported", "linux": "staged_file_worker"},
         "effective_limits": {"max_frame_bytes": framing::MAX_FRAME, "max_events_page": 200, "requests_per_minute": RATE_PER_MIN},
         "connector_registry_revision": 0, "api_docs_version": API_DOCS_VERSION
     })
@@ -102,7 +103,7 @@ pub fn dispatch(engine: &Engine, st: &mut ConnState, method: &str, p: &Value) ->
             check_major(p)?;
             Ok(hello(engine))
         }
-        "v1.health" => Ok(json!({"engine": "running", "records": "ok", "execution": "unavailable"})),
+        "v1.health" => Ok(json!({"engine": "running", "records": "ok", "execution": "staged_file_worker"})),
         "v1.capabilities.get" => Ok(capabilities()),
         "v1.grants.list" => {
             need_any(&scopes)?;
