@@ -59,6 +59,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/admin/folder", post(protect_admin_folder))
         .route("/api/ui/runtime/protect/admin/remove-app", post(protect_admin_remove_app))
         .route("/api/ui/runtime/protect/admin/approval", post(protect_admin_approval))
+        .route("/api/ui/runtime/protect/guard", get(guard_get))
+        .route("/api/ui/runtime/protect/guard/folder", post(guard_folder))
+        .route("/api/ui/runtime/protect/guard/remove", post(guard_remove))
+        .route("/api/ui/runtime/protect/guard/answer", post(guard_answer))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -593,4 +597,45 @@ struct ProtectAppIn {
 
 async fn protect_admin_remove_app(Json(b): Json<ProtectAppIn>) -> Response {
     protect_result(crate::protect::admin_remove_app(&b.app_id))
+}
+
+// ---- Folder guard for AI helpers ----
+
+async fn guard_get(State(st): St) -> Response {
+    j(200, crate::protect::guard_overview(&st.agenttracker_home))
+}
+
+#[derive(Deserialize)]
+struct GuardFolderIn {
+    folder: String,
+    #[serde(default)]
+    mode: String,
+}
+
+async fn guard_folder(State(st): St, Json(b): Json<GuardFolderIn>) -> Response {
+    let mode = if b.mode.is_empty() { "block" } else { b.mode.as_str() };
+    match crate::protect::guard_set_folder(&st.agenttracker_home, &b.folder, mode) {
+        Ok(v) => j(200, v),
+        Err(m) => j(400, json!({"error": m})),
+    }
+}
+
+async fn guard_remove(State(st): St, Json(b): Json<GuardFolderIn>) -> Response {
+    match crate::protect::guard_remove_folder(&st.agenttracker_home, &b.folder) {
+        Ok(v) => j(200, v),
+        Err(m) => j(400, json!({"error": m})),
+    }
+}
+
+#[derive(Deserialize)]
+struct GuardAnswerIn {
+    id: String,
+    allow: bool,
+}
+
+async fn guard_answer(State(st): St, Json(b): Json<GuardAnswerIn>) -> Response {
+    match crate::protect::guard_answer(&st.agenttracker_home, &b.id, b.allow) {
+        Ok(v) => j(200, v),
+        Err(m) => j(409, json!({"error": m})),
+    }
 }

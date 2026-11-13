@@ -115,7 +115,8 @@ impl AppState {
         if let Some(current) = self.hook_binary.clone().filter(|p| p.exists()) {
             let stale = |p: Option<PathBuf>| p.is_some_and(|p| !p.exists());
             let fixes: [(&str, bool, Box<dyn Fn() -> crate::Result<crate::connectors::InstallReport>>); 3] = [
-                ("Claude Code", stale(self.claude().installed_hook_path()), Box::new(|| self.claude().install(&current))),
+                // Also re-applied when an older install gave PreToolUse too short a timeout for the folder guard.
+                ("Claude Code", stale(self.claude().installed_hook_path()) || self.claude().guard_ready() == Some(false), Box::new(|| self.claude().install(&current))),
                 ("Cursor", stale(self.cursor().installed_hook_path()), Box::new(|| self.cursor().install(&current))),
                 ("Copilot", stale(self.copilot().installed_hook_path()), Box::new(|| self.copilot().install(&current))),
             ];

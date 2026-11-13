@@ -7,7 +7,11 @@
 //! 3. POSTs an HMAC-signed envelope to http://127.0.0.1:{port}/ingest (200 ms timeouts).
 //! 4. If the collector is unreachable, appends the (redacted) envelope to
 //!    ~/.agenttracker/fallback_queue.jsonl.
-//! 5. Always exits 0 and prints nothing to stdout, so it never blocks or alters agent work.
+//! 5. Exits 0 and prints nothing, so it never alters agent work, with one exception:
+//! 6. Folder guard (Houndbit Protect): on Claude Code `PreToolUse`, if the request would change a
+//!    folder listed in `guard.json`, it stops the tool (exit code 2 plus a reason on stderr, which
+//!    Claude Code shows to the model) or, for "ask" folders, waits for the owner's OK in Houndbit.
+//!    No answer in time means stop. See `tracker_common::guard`.
 //!
 //! On Windows this is a GUI-subsystem program so no console window flashes each time an
 //! agent runs a hook. Piped stdin/stdout from the agent still work as normal.
@@ -20,6 +24,9 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_millis(200);
 const MAX_STDIN: u64 = 4 * 1024 * 1024;
+/// How long an "ask" waits for the owner. Claude Code's timeout for this hook is set higher
+/// (see `claude_code::PRE_TOOL_TIMEOUT_SECS`) so the wait ends here, not by Claude giving up.
+const ASK_WAIT: Duration = Duration::from_secs(90);
 
 struct Args {
     connector: String,
@@ -132,5 +139,50 @@ fn main() {
     if !delivered {
         fallback(&home, &envelope);
     }
-    // Exit 0 regardless: the hook must never block the agent.
+    if args.connector == "claude_code" && envelope["payload"].get("hook_event_name").and_then(Value::as_str).unwrap_or(&args.event) == "PreToolUse" {
+        if let Some(reason) = guard_decision(&home, &envelope["payload"]) {
+            let _ = writeln!(std::io::stderr(), "{reason}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `Some(reason)` when the tool must be stopped.
+fn guard_decision(home: &std::path::Path, p: &Value) -> Option<String> {
+    use tracker_common::guard;
+    let tool = p.get("tool_name").and_then(Value::as_str).unwrap_or("unknown");
+    let input = p.get("tool_input").cloned().unwrap_or(Value::Null);
+    let cwd = p.get("cwd").and_then(Value::as_str);
+    let list = match guard::load_strict(home) {
+        Ok(l) => l,
+        Err(e) => {
+            if !guard::can_change(tool) {
+                return None;
+            }
+            let why = format!("Houndbit Protect couldn't read its list of guarded folders ({e}), so it stopped this to be safe. Open Houndbit > Protect to fix it.");
+            guard::log(home, guard::log_entry(tool, "", "", "blocked", &why));
+            return Some(why);
+        }
+    };
+    let guard::Verdict::Guarded { folder, mode, target } = guard::check(&list, tool, &input, cwd) else { return None };
+    if mode == "ask" {
+        let id = format!("{}-{}", tracker_common::now_ms(), std::process::id());
+        let req = serde_json::json!({"id": id, "ts": tracker_common::now_ms(), "app": "Claude Code", "tool": tool, "target": target, "folder": folder, "cwd": cwd});
+        match guard::ask_and_wait(home, &id, &req, ASK_WAIT) {
+            Some(true) => {
+                guard::log(home, guard::log_entry(tool, &target, &folder, "allowed", "You said OK in Houndbit."));
+                return None;
+            }
+            Some(false) => {
+                guard::log(home, guard::log_entry(tool, &target, &folder, "blocked", "You said no in Houndbit."));
+                return Some(format!("Houndbit Protect: the owner said no to changing {folder} ({tool}: {target}). Don't try another way to change files in that folder; ask the owner instead."));
+            }
+            None => {
+                guard::log(home, guard::log_entry(tool, &target, &folder, "blocked", "No answer in time."));
+                return Some(format!("Houndbit Protect: {folder} is guarded and the owner didn't answer in time, so this was stopped ({tool}: {target}). Ask the owner to approve it in Houndbit > Protect, then try again."));
+            }
+        }
+    }
+    guard::log(home, guard::log_entry(tool, &target, &folder, "blocked", "This folder is set to always block."));
+    Some(format!("Houndbit Protect: {folder} is guarded, so AI helpers can't change it ({tool}: {target}). Don't try another way to change files in that folder; ask the owner to change the setting in Houndbit > Protect if this is wanted."))
 }

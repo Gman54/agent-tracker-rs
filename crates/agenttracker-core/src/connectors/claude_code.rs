@@ -23,6 +23,18 @@ pub const NAME: &str = "claude_code";
 /// Hook events Houndbit installs. Tool events use matcher "*".
 pub const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "SessionEnd"];
 const TOOL_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "PostToolUseFailure"];
+/// Seconds Claude Code waits for the PreToolUse hook. Longer than the hook's own wait for an
+/// "ask" answer (90 s), so the folder guard decides rather than Claude timing out and carrying on.
+pub const PRE_TOOL_TIMEOUT_SECS: u64 = 120;
+const OTHER_TIMEOUT_SECS: u64 = 5;
+
+fn timeout_for(event: &str) -> u64 {
+    if event == "PreToolUse" {
+        PRE_TOOL_TIMEOUT_SECS
+    } else {
+        OTHER_TIMEOUT_SECS
+    }
+}
 
 pub fn info() -> ConnectorInfo {
     ConnectorInfo {
@@ -47,16 +59,18 @@ impl HooksFormat for ClaudeFormat {
             if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 for h in inner.iter_mut() {
                     if h.get("command").and_then(Value::as_str).map(super::is_owned_command).unwrap_or(false) {
-                        if h["command"] == cmd {
+                        let want = timeout_for(event);
+                        if h["command"] == cmd && h.get("timeout").and_then(Value::as_u64) == Some(want) {
                             return Upsert::Unchanged;
                         }
                         h["command"] = Value::String(cmd.to_string());
+                        h["timeout"] = json!(want);
                         return Upsert::Updated;
                     }
                 }
             }
         }
-        let hook = json!({"type": "command", "command": cmd, "timeout": 5});
+        let hook = json!({"type": "command", "command": cmd, "timeout": timeout_for(event)});
         let group = if TOOL_EVENTS.contains(&event) { json!({"matcher": "*", "hooks": [hook]}) } else { json!({"hooks": [hook]}) };
         arr.push(group);
         Upsert::Added
@@ -280,6 +294,23 @@ impl ClaudeConnector {
         json_hooks::owned_events(&ClaudeFormat, &cfg).first().and_then(|(_, c)| hook_path_from_command(c))
     }
 
+    /// Whether Houndbit's PreToolUse hook is installed with the long timeout the folder guard
+    /// needs. `None` when Houndbit's Claude hooks aren't installed at all.
+    pub fn guard_ready(&self) -> Option<bool> {
+        let cfg = read_json_file(&self.settings_path).ok().flatten()?;
+        let groups = cfg.get("hooks")?.get("PreToolUse")?.as_array()?;
+        let owned: Vec<&Value> = groups
+            .iter()
+            .filter_map(|g| g.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .filter(|h| h.get("command").and_then(Value::as_str).map(super::is_owned_command).unwrap_or(false))
+            .collect();
+        if owned.is_empty() {
+            return None;
+        }
+        Some(owned.iter().all(|h| h.get("timeout").and_then(Value::as_u64).unwrap_or(0) >= PRE_TOOL_TIMEOUT_SECS))
+    }
+
     pub fn preview(&self, hook_binary_path: &Path) -> Result<super::ConfigPreview> {
         json_hooks::preview(&ClaudeFormat, NAME, &self.settings_path, HOOK_EVENTS, hook_binary_path)
     }
@@ -440,6 +471,29 @@ mod tests {
         assert!(is_desktop_bundled(&exe));
         assert!(!is_desktop_bundled(&home.join(".local/bin/claude.exe")));
         assert_eq!(bundled, vec![("Claude desktop app", appdata.join("Claude")), ("Claude desktop app", local.join("Claude"))]);
+    }
+
+    #[test]
+    fn install_gives_pre_tool_use_a_long_timeout_and_upgrades_old_installs() {
+        let t = tempfile::tempdir().unwrap();
+        let settings = t.path().join("settings.json");
+        let hook = t.path().join("agenttracker-hook.exe");
+        std::fs::write(&hook, b"").unwrap();
+        let c = ClaudeConnector::with_paths(settings.clone(), t.path().join("state"));
+        assert_eq!(c.guard_ready(), None);
+        c.install(&hook).unwrap();
+        assert_eq!(c.guard_ready(), Some(true));
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 120);
+        assert_eq!(cfg["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"], 5);
+
+        // An older install used 5 seconds everywhere; installing again fixes it.
+        let mut old = cfg.clone();
+        old["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(5);
+        std::fs::write(&settings, old.to_string()).unwrap();
+        assert_eq!(c.guard_ready(), Some(false));
+        c.install(&hook).unwrap();
+        assert_eq!(c.guard_ready(), Some(true));
     }
 
     #[test]

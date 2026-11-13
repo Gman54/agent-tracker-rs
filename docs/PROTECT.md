@@ -11,6 +11,38 @@ writing area. It is **not** operating-system isolation: it does not sandbox anot
 file or shell access, and there is no Windows isolation backend yet. Gate and isolate modes are
 still reported as unavailable.
 
+## Claude Code folder guard (first piece of part E)
+
+Before this, Protect did **not** watch Claude Code at all. A test where Claude Code wrote primes
+into `F:\Test\sigmadelta.txt` went straight through, because Claude used its own commands and
+nothing asked Protect first. The "Try it" button only tested Houndbit's own safe copy.
+
+Now there is a folder guard:
+
+- On the Protect page you add folders and pick **Always block** or **Ask me first**. The list is
+  saved to `%USERPROFILE%\.agenttracker\guard.json`.
+- Houndbit's existing Claude Code hook (`agenttracker-hook`, run on every `PreToolUse`) reads that
+  list itself, so it works even when the Houndbit window is closed. If a request would change a
+  guarded folder, the hook exits with code 2 and a plain reason, which stops the tool and tells
+  Claude why.
+- What counts as "would change": Claude's file tools (Write, Edit, MultiEdit, NotebookEdit and any
+  other non-read tool) whose paths are inside the folder; any command (Bash, PowerShell) whose text
+  names the folder, including Git Bash `/f/...` and WSL `/mnt/f/...` spellings; any command run
+  with its working folder inside the guarded folder. Read, Grep, Glob and similar stay allowed.
+- **Ask me first** writes a request that shows on the Protect page (and as a pop-up note on other
+  pages). The hook waits up to 90 seconds; no answer means stopped. Claude Code's timeout for this
+  hook is set to 120 seconds so the guard, not Claude, decides. Older installs with a 5-second
+  timeout are updated when Houndbit starts.
+- If `guard.json` exists but can't be read, every non-read tool is stopped until it's fixed.
+- Every decision is listed under "What Protect stopped or let through".
+
+Limits, plainly: this matches paths named in the request. A command can still reach a folder
+without naming it (a script stored elsewhere, a variable built at run time). That is the spec's
+point that shell string matching isn't real confinement. If the hook program itself crashes or is
+removed, Claude Code carries on. Only Claude Code is covered; whether the Claude desktop app's Code
+tab uses the same settings file has to be checked on your PC. Tested on Linux by running the real
+hook program with Claude-style requests; **not yet tried with live Claude Code on Windows.**
+
 ## What works today (parts A, B and D)
 
 The engine is `crates/protect-engine`. It is a separate program from Houndbit, keeps its own
@@ -135,9 +167,9 @@ uses. No private shortcut.
 - The command line is not a trusted screen. Any program running as you could use it to approve
   things. The real approval window has to come before gate mode is switched on.
 - Anything harmful already running as your Windows user is out of scope.
-- **Claude Code note for later:** a Claude Code hook only blocks when it exits with code 2 (or
-  replies "deny"). If it crashes or takes too long, Claude Code carries on. A gate hook therefore
-  has to keep a short timer of its own and exit 2 whenever the engine can't be reached.
+- **Claude Code:** a hook only blocks when it exits with code 2 (or replies "deny"). If it crashes
+  or takes too long, Claude Code carries on. The folder guard keeps its own 90-second timer under
+  Claude's 120-second limit and stops the change when nobody answers.
 
 ## Test results
 
@@ -155,6 +187,6 @@ uses. No private shortcut.
 | B | Restricted worker that actually does the file work | Done for the four file actions and tested on Linux (snapshot + writing area, originals never touched). A confined file worker, **not** OS isolation; no Windows isolation backend yet. Not run on Windows named pipes. |
 | C | Python and TypeScript kits plus a sample app | Small Python and Node.js examples work on Linux. Not full kits yet, and not run on Windows. |
 | D | Houndbit talking to Protect through the same public door | Done and tested on Linux. Protect now starts inside Houndbit; the Protect page was clicked through in the headless preview, not yet in the Windows app. |
-| E | MCP gateway and Claude Code gate hook | Not started. Needs a live check on your PC. |
+| E | MCP gateway and Claude Code gate hook | Folder guard for Claude Code built and tested on Linux with the real hook program; not yet tried with live Claude Code on Windows. Uses path matching, not OS isolation. MCP gateway not started. |
 | F | Payments, license, signed installer | Not started. Needs your choice of payment service, a code-signing certificate and a server. |
 | G | More hosts and launchers | Not started. |

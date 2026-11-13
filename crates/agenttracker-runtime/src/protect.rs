@@ -289,3 +289,73 @@ pub async fn connect_houndbit(home: &Path) -> Result<Value, String> {
     admin_pairing(&id, true)?;
     Ok(json!({"pairing_id": id, "state": "accepted", "message": "Houndbit is connected to Protect."}))
 }
+
+// ---- Folder guard for AI helpers (Claude Code) ----
+// The list is a small file the hook program reads by itself (see tracker_common::guard), so
+// guarding keeps working when the Houndbit window is closed.
+
+use tracker_common::guard;
+
+const ASK_SHOW_MS: i64 = 100_000;
+
+pub fn guard_overview(home: &Path) -> Value {
+    let list = guard::load(home);
+    let folders: Vec<Value> = list.folders.iter().map(|f| json!({"path": guard::display_path(&f.path), "mode": f.mode})).collect();
+    let claude = agenttracker_core::connectors::claude_code::ClaudeConnector::for_user();
+    let claude_state = match claude.guard_ready() {
+        None => "not_connected",
+        Some(false) => "needs_update",
+        Some(true) => "ready",
+    };
+    json!({
+        "folders": folders,
+        "asks": guard::pending_asks(home, ASK_SHOW_MS),
+        "log": guard::recent_log(home, 30),
+        "claude": claude_state,
+    })
+}
+
+pub fn guard_set_folder(home: &Path, folder: &str, mode: &str) -> Result<Value, String> {
+    let folder = folder.trim().trim_matches('"');
+    if folder.is_empty() {
+        return Err("Type the folder's full path first, for example F:\\Test.".into());
+    }
+    if mode != "block" && mode != "ask" {
+        return Err("Pick \"Always block\" or \"Ask me first\".".into());
+    }
+    let p = Path::new(folder);
+    if !p.is_absolute() {
+        return Err("Use the folder's full path, starting with the drive letter, for example F:\\Test.".into());
+    }
+    if !p.is_dir() {
+        return Err(format!("Couldn't find a folder at {folder}. Check the spelling."));
+    }
+    let shown = std::fs::canonicalize(p).map(|c| guard::display_path(&c.to_string_lossy())).unwrap_or_else(|_| folder.to_string());
+    let mut list = guard::load(home);
+    let key = guard::norm(&shown);
+    match list.folders.iter_mut().find(|f| guard::norm(&f.path) == key) {
+        Some(f) => f.mode = mode.to_string(),
+        None => list.folders.push(guard::GuardFolder { path: shown, mode: mode.to_string() }),
+    }
+    guard::save(home, &list).map_err(|e| format!("Couldn't save the list: {e}"))?;
+    Ok(guard_overview(home))
+}
+
+pub fn guard_remove_folder(home: &Path, folder: &str) -> Result<Value, String> {
+    let mut list = guard::load(home);
+    let key = guard::norm(folder);
+    let before = list.folders.len();
+    list.folders.retain(|f| guard::norm(&f.path) != key);
+    if list.folders.len() == before {
+        return Err("That folder isn't on the list.".into());
+    }
+    guard::save(home, &list).map_err(|e| format!("Couldn't save the list: {e}"))?;
+    Ok(guard_overview(home))
+}
+
+pub fn guard_answer(home: &Path, id: &str, allow: bool) -> Result<Value, String> {
+    if !guard::answer(home, id, allow) {
+        return Err("That request is no longer waiting (it may have timed out and been stopped).".into());
+    }
+    Ok(guard_overview(home))
+}
