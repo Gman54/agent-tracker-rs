@@ -11,6 +11,12 @@
 //! The relay binds to 127.0.0.1 only, refuses requests addressed to other host names (DNS
 //! rebinding guard) and only forwards to a model server on this computer. Recorded rows can be
 //! deleted by the user; the hash chain keeps only their hashes, not their content.
+//!
+//! Folder guard (Houndbit Protect): when the request offers the model tools and guarded folders
+//! are set, the reply is held until it is complete (so it isn't streamed live in that case). If the
+//! model asked for a tool call that would change a guarded folder, the chat app gets a short
+//! refusal instead of that tool call, and it is written to the guard log. "Ask me first" folders
+//! are stopped too: the reply can't wait for an answer in the middle. See `guard_reply`.
 use crate::ids::new_id;
 use crate::store;
 use crate::{now_ms, sha256_hex, Result, RtError};
@@ -354,6 +360,10 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
     let status = resp.status();
     let ct = resp.header("content-type").map(String::from);
     let _ = head_tx.send(Ok((status, ct.clone())));
+    // Hold the reply back only when the model was offered tools and folders are guarded.
+    let guard_home = agenttracker_core::agenttracker_home();
+    let hold = status == 200 && job.api.is_some() && offers_tools(&job.body) && guard_wanted(&guard_home);
+    let mut held: Vec<u8> = Vec::new();
     let mut reader = resp.into_reader();
     let mut kept: Vec<u8> = Vec::new();
     // The last bytes received, so the end-of-reply marker is still seen when `kept` is full.
@@ -380,6 +390,19 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
                         tail.drain(..tail.len() - TAIL_KEEP);
                     }
                 }
+                if hold && held.len() < KEEP_LIMIT {
+                    held.extend_from_slice(&buf[..n]);
+                    if held.len() < KEEP_LIMIT {
+                        continue;
+                    }
+                    // Too big to hold: let it through as it is (the guard only looks at replies it can hold).
+                    let all = std::mem::take(&mut held);
+                    if chunk_tx.blocking_send(Ok(Bytes::from(all))).is_err() {
+                        downstream_closed = true;
+                        break;
+                    }
+                    continue;
+                }
                 if chunk_tx.blocking_send(Ok(Bytes::copy_from_slice(&buf[..n]))).is_err() {
                     // The chat app's side of the connection is gone (Stop button, closed tab, timeout).
                     downstream_closed = true;
@@ -391,6 +414,13 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
                 let _ = chunk_tx.blocking_send(Err(e));
                 break;
             }
+        }
+    }
+    if hold && !held.is_empty() && !downstream_closed {
+        let api = job.api.unwrap_or("chat_completions");
+        let out = guard_reply(&guard_home, api, ct.as_deref(), &held).unwrap_or(held);
+        if chunk_tx.blocking_send(Ok(Bytes::from(out))).is_err() {
+            downstream_closed = true;
         }
     }
     // The chat app may have gone while the model server was quiet; nothing was sent after that,
@@ -421,6 +451,104 @@ fn forward(r: &Relay, job: Forward, head_tx: tokio::sync::oneshot::Sender<Head>,
         };
         if let Err(e) = record(&r.db, &call) {
             eprintln!("chat recorder could not save a call: {e}");
+        }
+    }
+}
+
+// ---- Folder guard for tool calls the model asks for ----
+
+fn offers_tools(request: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(request).ok().is_some_and(|v| v.get("tools").and_then(Value::as_array).is_some_and(|a| !a.is_empty()))
+}
+
+fn guard_wanted(home: &std::path::Path) -> bool {
+    let l = tracker_common::guard::load(home);
+    tracker_common::guard::addon_active(&l) && !l.folders.is_empty()
+}
+
+/// Checks the tool calls in a finished reply against the guarded folders. Returns the reply to
+/// send instead (a plain refusal, in the same format and streaming style) when one of them would
+/// change a guarded folder, after writing it to the guard log; `None` means send it unchanged.
+/// Chat apps name tools freely, so each one is checked as an MCP-style tool: names that start
+/// with read/list/get/search/find/view/fetch are treated as only looking.
+pub fn guard_reply(home: &std::path::Path, api: &str, content_type: Option<&str>, reply: &[u8]) -> Option<Vec<u8>> {
+    use tracker_common::guard;
+    let list = guard::load(home);
+    if !guard::addon_active(&list) || list.folders.is_empty() {
+        return None;
+    }
+    let parsed = parse_response(api, content_type, reply);
+    for (_, name, args) in &parsed.tool_calls {
+        let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({"input": args}));
+        let tool = format!("MCP:{name}");
+        let guard::Verdict::Guarded { folder, mode, target } = guard::check(&list, &tool, &input, None) else { continue };
+        let why = if mode == "ask" {
+            "This folder is set to ask first, but a chat reply can't wait for an answer, so the chat recorder stopped it."
+        } else {
+            "This folder is set to always block."
+        };
+        guard::log(home, guard::log_entry("Chat recorder", name, &target, &folder, "blocked", why));
+        let msg = format!("Houndbit Protect stopped this: the model asked to use the tool \"{name}\" on {folder}, which is a guarded folder, so the tool call was removed. Ask the owner to change the setting in Houndbit > Protect if this is wanted.");
+        return Some(refusal_reply(api, &parsed, reply, &msg));
+    }
+    None
+}
+
+/// A complete reply holding only `msg`, shaped like the original (plain JSON or a stream).
+fn refusal_reply(api: &str, parsed: &Parsed, original: &[u8], msg: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(original);
+    // Keep the id/model of the original where we can see them.
+    let first: Value = if parsed.streamed {
+        text.lines()
+            .filter_map(|l| l.trim().strip_prefix("data:").map(str::trim).or_else(|| Some(l.trim())))
+            .find_map(|d| serde_json::from_str::<Value>(d).ok())
+            .unwrap_or(Value::Null)
+    } else {
+        serde_json::from_str(text.trim()).unwrap_or(Value::Null)
+    };
+    let model = first.get("model").cloned().unwrap_or(json!("unknown"));
+    let id = first.get("id").cloned().unwrap_or(json!("houndbit-guard"));
+    let created = first.get("created").cloned().unwrap_or(json!(now_ms() / 1000));
+    match (api, parsed.streamed) {
+        ("ollama_chat" | "ollama_generate", streamed) => {
+            let mut v = json!({"model": model, "created_at": first.get("created_at").cloned().unwrap_or(json!("")), "done": true, "done_reason": "stop"});
+            if api == "ollama_chat" {
+                v["message"] = json!({"role": "assistant", "content": msg});
+            } else {
+                v["response"] = json!(msg);
+            }
+            let mut out = v.to_string();
+            if streamed {
+                out.push('\n');
+            }
+            out.into_bytes()
+        }
+        ("responses", false) => {
+            let mut v = if first.is_object() { first.clone() } else { json!({"id": id, "object": "response", "model": model}) };
+            v["status"] = json!("completed");
+            v["output"] = json!([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": msg}]}]);
+            v.to_string().into_bytes()
+        }
+        ("responses", true) => {
+            let item = json!({"type": "message", "id": "houndbit-guard", "role": "assistant", "content": [{"type": "output_text", "text": msg}]});
+            let delta = json!({"type": "response.output_text.delta", "item_id": "houndbit-guard", "output_index": 0, "content_index": 0, "delta": msg});
+            let done = json!({"type": "response.completed", "response": {"id": id, "object": "response", "model": model, "status": "completed", "output": [item]}});
+            format!("event: response.output_text.delta\ndata: {delta}\n\nevent: response.completed\ndata: {done}\n\n").into_bytes()
+        }
+        ("completions", false) => json!({"id": id, "object": "text_completion", "created": created, "model": model, "choices": [{"index": 0, "text": msg, "finish_reason": "stop"}]}).to_string().into_bytes(),
+        ("completions", true) => {
+            let c = json!({"id": id, "object": "text_completion", "created": created, "model": model, "choices": [{"index": 0, "text": msg, "finish_reason": "stop"}]});
+            format!("data: {c}\n\ndata: [DONE]\n\n").into_bytes()
+        }
+        (_, false) => {
+            let mut v = if first.is_object() { first.clone() } else { json!({"id": id, "object": "chat.completion", "created": created, "model": model}) };
+            v["choices"] = json!([{"index": 0, "message": {"role": "assistant", "content": msg}, "finish_reason": "stop"}]);
+            v.to_string().into_bytes()
+        }
+        (_, true) => {
+            let a = json!({"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": msg}, "finish_reason": null}]});
+            let b = json!({"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+            format!("data: {a}\n\ndata: {b}\n\ndata: [DONE]\n\n").into_bytes()
         }
     }
 }

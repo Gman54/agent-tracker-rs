@@ -4,7 +4,8 @@
 //! pipe/socket, signing in with Houndbit's own Ed25519 key kept in Houndbit's data folder.
 //!
 //! To keep it to one install, Houndbit also starts the Protect engine itself when it opens (see
-//! `autostart`), unless a separate Protect engine is already running for this user. While Houndbit
+//! `autostart`), unless a separate Protect engine is already running for this user. Houndbit links
+//! itself to the engine it hosts automatically (`ensure_linked`); there is no "connect" step. While Houndbit
 //! hosts the engine, Houndbit's window doubles as the Protect controls: accept or reject pairing
 //! requests, give apps folders, and answer approvals. Houndbit's own file work still goes through
 //! the client path with its key, exactly like other apps.
@@ -43,14 +44,20 @@ async fn connect() -> Result<Client, String> {
 }
 
 async fn signed_in(home: &Path) -> Result<Client, String> {
+    ensure_linked(home).await?;
     let key = load_or_create_key(&key_path(home)).map_err(|e| format!("Couldn't read Houndbit's Protect key: {e}"))?;
     let mut c = connect().await?;
     c.sign_in(APP_ID, &key).await.map_err(|e| cmsg(&e))?;
     Ok(c)
 }
 
-/// A read-only look at where things stand, safe to call from a GET. Never creates the pairing
-/// key and never errors: when Protect isn't running it simply reports that.
+/// Where things stand. Never errors: when Protect isn't running it simply reports that.
+///
+/// Houndbit links itself to Protect on its own: when Houndbit hosts the engine (the normal case)
+/// the pairing is requested and accepted right here, with no button and no question, because it
+/// is the owner's own app talking to its own built-in engine. When a separate Protect program is
+/// running instead, Houndbit sends it one pairing request and the owner accepts it there, as with
+/// any other app.
 pub async fn status(home: &Path) -> Value {
     let ep = endpoint();
     let mut base = json!({"endpoint": ep, "app_id": APP_ID, "display_name": DISPLAY_NAME, "running": false, "paired": false, "hosted": is_hosted()});
@@ -66,8 +73,14 @@ pub async fn status(home: &Path) -> Value {
         }
     };
     base["running"] = json!(true);
-    if !key_path(home).exists() {
-        base["message"] = json!("Protect is running. Connect Houndbit to it with one click.");
+    let hosted = is_hosted();
+    if hosted {
+        if let Err(e) = ensure_linked(home).await {
+            base["message"] = json!(format!("Houndbit couldn't link itself to Protect: {e}"));
+            return base;
+        }
+    } else if !key_path(home).exists() {
+        base["message"] = json!(ask_separate_protect_once(home).await);
         return base;
     }
     let key = match load_or_create_key(&key_path(home)) {
@@ -82,13 +95,53 @@ pub async fn status(home: &Path) -> Value {
         Ok(who) => {
             base["paired"] = json!(true);
             base["scopes"] = who.get("scopes").cloned().unwrap_or(Value::Null);
-            base["message"] = json!("Connected to Houndbit Protect.");
+            base["message"] = json!("Houndbit is linked to Protect automatically.");
         }
-        Err(_) => {
-            base["message"] = json!("Protect is running but Houndbit isn't connected to it yet.");
-        }
+        Err(_) if hosted => base["message"] = json!("Houndbit is still linking itself to Protect. Check again in a moment."),
+        Err(_) => base["message"] = json!(ask_separate_protect_once(home).await),
     }
     base
+}
+
+static LINKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static ASKED_SEPARATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Links Houndbit to the Protect engine it hosts, if it isn't already: requests the pairing and
+/// accepts it straight away. Does nothing when a separate Protect program is running (that one
+/// asks its owner, see `status`). Safe to call often; it only signs in when already linked.
+pub async fn ensure_linked(home: &Path) -> Result<(), String> {
+    if !is_hosted() {
+        return Ok(());
+    }
+    let _one_at_a_time = LINKING.lock().await;
+    let key = load_or_create_key(&key_path(home)).map_err(|e| format!("Couldn't create Houndbit's Protect key: {e}"))?;
+    if connect().await?.sign_in(APP_ID, &key).await.is_ok() {
+        return Ok(());
+    }
+    let r = match pair(home).await {
+        Ok(r) => r,
+        // Protect knows Houndbit by an older key (for example Houndbit's data folder was reset).
+        // It is Houndbit's own entry, so replace it.
+        Err(e) if e.contains("already paired") => {
+            admin_remove_app(APP_ID)?;
+            pair(home).await?
+        }
+        Err(e) => return Err(e),
+    };
+    let id = r["pairing_id"].as_str().ok_or("Protect didn't return a pairing id")?.to_string();
+    admin_pairing(&id, true)?;
+    Ok(())
+}
+
+/// With a separate Protect program, sends it one pairing request per run of Houndbit.
+async fn ask_separate_protect_once(home: &Path) -> String {
+    if !ASKED_SEPARATE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if let Err(e) = pair(home).await {
+            ASKED_SEPARATE.store(false, std::sync::atomic::Ordering::SeqCst);
+            return format!("A separate Protect program is running, and Houndbit couldn't ask it to link up: {e}");
+        }
+    }
+    "A separate Protect program is running. Houndbit has asked it to link up; accept the request in that program, then check again.".to_string()
 }
 
 /// Asks Protect to pair Houndbit. The user still has to accept it inside Protect; this only
@@ -278,19 +331,7 @@ pub fn admin_approval(approval_id: &str, approve: bool) -> Result<Value, String>
     e.approvals_resolve(approval_id, &nonce, approve).map_err(emsg)
 }
 
-/// One click from Houndbit's own window: ask Protect to pair Houndbit and, when Houndbit is
-/// hosting Protect, accept that request straight away (the user clicking the button is the OK).
-pub async fn connect_houndbit(home: &Path) -> Result<Value, String> {
-    let r = pair(home).await?;
-    if !is_hosted() {
-        return Ok(r);
-    }
-    let id = r["pairing_id"].as_str().ok_or("Protect didn't return a pairing id")?.to_string();
-    admin_pairing(&id, true)?;
-    Ok(json!({"pairing_id": id, "state": "accepted", "message": "Houndbit is connected to Protect."}))
-}
-
-// ---- Folder guard for AI helpers (Claude Code) ----
+// ---- Folder guard for AI helpers (Claude Code, Cursor, the chat recorder) ----
 // The list is a small file the hook program reads by itself (see tracker_common::guard), so
 // guarding keeps working when the Houndbit window is closed.
 
@@ -300,6 +341,11 @@ const ASK_SHOW_MS: i64 = 100_000;
 
 pub fn guard_overview(home: &Path) -> Value {
     let list = guard::load(home);
+    let cursor_state = match agenttracker_core::connectors::cursor::CursorConnector::for_user().guard_ready() {
+        None => "not_connected",
+        Some(false) => "needs_update",
+        Some(true) => "ready",
+    };
     let folders: Vec<Value> = list.folders.iter().map(|f| json!({"path": guard::display_path(&f.path), "mode": f.mode})).collect();
     let claude = agenttracker_core::connectors::claude_code::ClaudeConnector::for_user();
     let claude_state = match claude.guard_ready() {
@@ -312,7 +358,20 @@ pub fn guard_overview(home: &Path) -> Value {
         "asks": guard::pending_asks(home, ASK_SHOW_MS),
         "log": guard::recent_log(home, 30),
         "claude": claude_state,
+        "cursor": cursor_state,
+        "addon_enabled": guard::addon_active(&list),
     })
+}
+
+/// The Protect add-on switch (on by default while Protect is being tested). Off means the folder
+/// guard lets everything through; the hook reads the same `enabled` flag from guard.json.
+/// FUTURE LICENSE CHECK: when Protect becomes a paid add-on, refuse to switch it on here without
+/// a valid license (and check it in `tracker_common::guard::addon_active` as well).
+pub fn set_addon(home: &Path, enabled: bool) -> Result<Value, String> {
+    let mut list = guard::load(home);
+    list.enabled = enabled;
+    guard::save(home, &list).map_err(|e| format!("Couldn't save the setting: {e}"))?;
+    Ok(guard_overview(home))
 }
 
 pub fn guard_set_folder(home: &Path, folder: &str, mode: &str) -> Result<Value, String> {

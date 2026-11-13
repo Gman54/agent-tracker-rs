@@ -53,7 +53,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/pair", post(protect_pair))
         .route("/api/ui/runtime/protect/grants", get(protect_grants))
         .route("/api/ui/runtime/protect/sandbox-check", post(protect_sandbox_check))
-        .route("/api/ui/runtime/protect/connect", post(protect_connect))
         .route("/api/ui/runtime/protect/admin", get(protect_admin))
         .route("/api/ui/runtime/protect/admin/pairing", post(protect_admin_pairing))
         .route("/api/ui/runtime/protect/admin/folder", post(protect_admin_folder))
@@ -63,6 +62,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/guard/folder", post(guard_folder))
         .route("/api/ui/runtime/protect/guard/remove", post(guard_remove))
         .route("/api/ui/runtime/protect/guard/answer", post(guard_answer))
+        .route("/api/ui/runtime/protect/addon", post(protect_addon))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -551,14 +551,6 @@ fn protect_result(r: Result<Value, String>) -> Response {
     }
 }
 
-async fn protect_connect(State(st): St) -> Response {
-    let home = st.agenttracker_home.clone();
-    match crate::protect::connect_houndbit(&home).await {
-        Ok(v) => j(200, v),
-        Err(m) => j(502, json!({"error": m})),
-    }
-}
-
 async fn protect_admin() -> Response {
     j(200, crate::protect::admin_overview())
 }
@@ -637,5 +629,17 @@ async fn guard_answer(State(st): St, Json(b): Json<GuardAnswerIn>) -> Response {
     match crate::protect::guard_answer(&st.agenttracker_home, &b.id, b.allow) {
         Ok(v) => j(200, v),
         Err(m) => j(409, json!({"error": m})),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddonIn {
+    enabled: bool,
+}
+
+async fn protect_addon(State(st): St, Json(b): Json<AddonIn>) -> Response {
+    match crate::protect::set_addon(&st.agenttracker_home, b.enabled) {
+        Ok(v) => j(200, v),
+        Err(m) => j(500, json!({"error": m})),
     }
 }

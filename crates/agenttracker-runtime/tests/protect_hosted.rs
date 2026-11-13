@@ -1,4 +1,5 @@
-//! Protect running inside Houndbit: Houndbit starts the engine itself, connects with one click,
+//! Protect running inside Houndbit: Houndbit starts the engine itself, links itself to it with no
+//! button and no question,
 //! adds a folder from its own window, and runs the staged sandbox without touching the original.
 //! Its own test binary (own process), because the hosted engine is process-wide.
 use agenttracker_runtime::protect;
@@ -35,12 +36,15 @@ async fn houndbit_hosts_protect_and_runs_the_sandbox() {
     assert!(up, "hosted Protect never came up on {ep}");
     assert!(protect::is_hosted());
 
-    // One click connects Houndbit (the request is accepted because Houndbit hosts Protect).
-    let c = protect::connect_houndbit(home.path()).await.unwrap();
-    assert_eq!(c["state"], "accepted");
+    // Asking for the status was enough: Houndbit linked itself, with nothing waiting for an OK.
     let s = protect::status(home.path()).await;
-    assert_eq!(s["paired"], true);
+    assert_eq!(s["paired"], true, "{s}");
     assert_eq!(s["hosted"], true);
+    assert_eq!(s["message"], "Houndbit is linked to Protect automatically.");
+    assert_eq!(protect::admin_overview()["pairings"].as_array().unwrap().len(), 0);
+    // Calling it again doesn't pair twice.
+    protect::ensure_linked(home.path()).await.unwrap();
+    assert_eq!(protect::admin_overview()["apps"].as_array().unwrap().iter().filter(|a| a["app_id"] == protect::APP_ID).count(), 1);
 
     // Another app asks to connect; it waits for the user's OK in Houndbit's window.
     let other = protect_engine::client::load_or_create_key(&home.path().join("other.key")).unwrap();
@@ -71,9 +75,16 @@ async fn houndbit_hosts_protect_and_runs_the_sandbox() {
     assert_eq!(r["originals_untouched"], true);
     assert_eq!(std::fs::read_to_string(folder.path().join("notes.txt")).unwrap(), "the original text");
 
-    // Disconnecting removes Houndbit's access.
+    // If Houndbit's entry is removed, it links itself again on the next look, but the folders
+    // given before are gone (removing an app takes its folders away).
     protect::admin_remove_app(protect::APP_ID).unwrap();
-    assert_eq!(protect::status(home.path()).await["paired"], false);
+    assert_eq!(protect::status(home.path()).await["paired"], true);
+    assert!(protect::grants(home.path()).await.unwrap()["grants"].as_array().unwrap().is_empty());
+
+    // Houndbit's key was replaced (e.g. its data folder was reset): it replaces its own old entry.
+    let home2 = tempfile::tempdir().unwrap();
+    let s2 = protect::status(home2.path()).await;
+    assert_eq!(s2["paired"], true, "{s2}");
 
     server.abort();
     let _ = server.await;

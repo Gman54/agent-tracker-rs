@@ -9,14 +9,15 @@ RENDER.protect = async function render_protect() {
   screenEl.innerHTML = `
     <div class="page-head">
       <h1>Protect</h1>
-      <p class="lead">Keep AI helpers like Claude Code out of folders that matter to you. Add a folder below and Claude Code can still read it, but it can't change anything in it unless you say so.</p>
+      <p class="lead">Keep AI helpers like Claude Code and Cursor out of folders that matter to you. Add a folder below and they can still read it, but they can't change anything in it unless you say so.</p>
     </div>
+    <div class="card" id="addon-card"><p class="muted">Loading…</p></div>
     <div class="card" id="guard-card">
       <div class="card-head"><h2>Folders AI helpers can't change</h2></div>
       <div id="guard-claude"></div>
       <div id="guard-asks"></div>
       <div id="guard-folders"><p class="muted">Loading…</p></div>
-      <div class="row mt">
+      <div class="row mt" id="guard-add-row">
         <input class="input" id="guard-new-folder" placeholder="Full folder path, e.g. F:\\Test" style="min-width:20rem">
         <select class="input" id="guard-new-mode" style="width:auto">
           <option value="block">Always block</option>
@@ -26,7 +27,9 @@ RENDER.protect = async function render_protect() {
       </div>
       <p class="small muted mt">"Ask me first" waits up to 90 seconds for you to press Allow on this page. If you don't answer in time, the change is stopped.</p>
       <details class="mt"><summary class="small">What this does and doesn't catch</summary>
-        <p class="small muted">It works through Claude Code's hooks, so it covers Claude Code (the terminal app, and the Code tab in the Claude desktop app when it uses your normal Claude Code settings) after Houndbit is connected to it on the Connections page. It stops Claude's file tools (Write, Edit and similar) and any command that names the folder or runs inside it. Reading is still allowed. A command that reaches the folder without naming it (for example through a script stored somewhere else) can slip past, and other apps aren't covered yet.</p>
+        <p class="small muted">It works through each app's own hooks, after Houndbit is connected to that app on the Connections page. It covers Claude Code (the terminal app, and the Code tab in the Claude desktop app when it uses your normal Claude Code settings) and Cursor's AI agent. It stops file tools (Write, Edit, Delete and similar) and any command that names the folder, runs inside it, or runs a small script that is stored there or names it. Reading is still allowed.</p>
+        <p class="small muted">The chat recorder also checks tool requests from chat apps that go through it. It can't stop and wait for you halfway through a reply, so there "Ask me first" folders are blocked too.</p>
+        <p class="small muted">What can still slip past: a command that builds the folder name while it runs, a program that isn't a script, a big script, or a script that fetches another one. In Cursor, "Ask me first" asks here in Houndbit, not in Cursor's own window. Cursor support hasn't been tried with a live Cursor yet.</p>
       </details>
     </div>
     <div class="card" id="guard-log-card">
@@ -34,7 +37,7 @@ RENDER.protect = async function render_protect() {
       <div id="guard-log"><p class="muted">Nothing yet.</p></div>
     </div>
     <h2 class="mt">Houndbit's safe copy</h2>
-    <p class="muted small">This part is for Houndbit's own file work, not for Claude. Houndbit works in a safe copy of a folder and its changes are set aside for you to look at.</p>
+    <p class="muted small">This part is for Houndbit's own file work, not for Claude or Cursor. Houndbit works in a safe copy of a folder and its changes are set aside for you to look at.</p>
     <div id="protect-body"><div class="card"><p class="muted">Checking on Protect…</p></div></div>`;
   await Promise.all([refreshGuard(), refreshProtect()]);
 };
@@ -55,13 +58,40 @@ async function refreshGuard() {
     if (f) f.innerHTML = `<p class="small" style="color:var(--danger)">${esc(e.message)}</p>`;
     return null;
   }
+  const on = g.addon_enabled !== false;
+  const addon = document.getElementById('addon-card');
+  if (addon) {
+    addon.innerHTML = `
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <p><b>Protect add-on: ${on ? 'on for testing' : 'off'}</b></p>
+          <p class="small muted">${on
+            ? 'Protect is switched on for testing, free for now. Later it may become a paid add-on.'
+            : 'Protect add-on is off. Guarded folders are not checked, so AI helpers can change them.'}</p>
+        </div>
+        <label class="row" style="gap:.5rem;cursor:pointer">
+          <input type="checkbox" id="addon-toggle"${on ? ' checked' : ''}>
+          <span>${on ? 'On' : 'Off'}</span>
+        </label>
+      </div>`;
+    const t = document.getElementById('addon-toggle');
+    if (t) t.addEventListener('change', () => guardPost('/api/ui/runtime/protect/addon', { enabled: t.checked }, t.checked ? 'Protect add-on is on.' : 'Protect add-on is off.'));
+  }
+  const card = document.getElementById('guard-card');
+  if (card) {
+    card.style.opacity = on ? '' : '0.55';
+    card.querySelectorAll('#guard-add-row input, #guard-add-row select, #guard-add-row button').forEach(el => { el.disabled = !on; });
+  }
   const claude = document.getElementById('guard-claude');
   if (claude) {
-    claude.innerHTML = g.claude === 'ready'
-      ? `<p class="small">${pill('green', 'Claude Code: guarded')} Houndbit is connected to Claude Code, so these folders are checked before Claude changes anything.</p>`
-      : g.claude === 'needs_update'
-        ? `<div class="note note-plain"><p class="small">${pill('amber', 'Claude Code: one step left')} Houndbit's Claude Code connection is from an older version. Restart Houndbit, or go to <b>Connections</b> and press <b>Connect...</b> on Claude Code again, so the guard has time to ask you.</p></div>`
-        : `<div class="note note-plain"><p class="small">${pill('amber', 'Claude Code: not connected')} The guard only works once Houndbit is connected to Claude Code. Go to <b>Connections</b> and press <b>Connect...</b> on Claude Code, then start a new Claude session.</p></div>`;
+    const line = (name, state, extra) => state === 'ready'
+      ? `<p class="small">${pill('green', name + ': guarded')} Houndbit is connected to ${name}, so these folders are checked before ${name} changes anything.</p>`
+      : state === 'needs_update'
+        ? `<div class="note note-plain"><p class="small">${pill('amber', name + ': one step left')} Houndbit's ${name} connection is from an older version. Restart Houndbit, or go to <b>Connections</b> and press <b>Connect...</b> on ${name} again.</p></div>`
+        : `<p class="small muted">${pill('gray', name + ': not connected')} To guard ${name} too, go to <b>Connections</b> and press <b>Connect...</b> on ${name}${extra}.</p>`;
+    claude.innerHTML = on
+      ? line('Claude Code', g.claude, ', then start a new Claude session') + line('Cursor', g.cursor, ', then restart Cursor')
+      : `<div class="note note-plain"><p class="small">${pill('gray', 'Protect add-on is off')} Switch it on above to guard these folders again.</p></div>`;
   }
   const asks = g.asks || [];
   const asksBox = document.getElementById('guard-asks');
@@ -84,7 +114,7 @@ async function refreshGuard() {
   const fbox = document.getElementById('guard-folders');
   if (fbox) {
     fbox.innerHTML = folders.length ? `
-      <table class="table"><thead><tr><th>Folder</th><th>When Claude tries to change it</th><th></th></tr></thead>
+      <table class="table"><thead><tr><th>Folder</th><th>When an AI helper tries to change it</th><th></th></tr></thead>
       <tbody>${folders.map(f => `
         <tr>
           <td class="mono">${esc(shownPath(f.path))}</td>
@@ -114,7 +144,7 @@ async function refreshGuard() {
             <div class="mono muted small">${esc(x.tool || '')}: ${esc(x.target || '')}</div></td>
           <td class="small">${esc(x.why || '')}</td>
         </tr>`).join('')}</tbody></table>`
-      : '<p class="muted">Nothing yet. When Claude Code tries to change a guarded folder, it shows up here.</p>';
+      : '<p class="muted">Nothing yet. When an AI helper tries to change a guarded folder, it shows up here.</p>';
   }
   return g;
 }
@@ -149,7 +179,7 @@ setInterval(async () => {
     for (const a of (g.asks || [])) {
       if (guardSeenAsks.has(a.id)) continue;
       guardSeenAsks.add(a.id);
-      showToast(`Claude Code wants to change ${a.folder}. Open Protect to allow or block it.`, 'error');
+      showToast(`${a.app || 'An AI helper'} wants to change ${a.folder}. Open Protect to allow or block it.`, 'error');
     }
   } catch (_) { /* Houndbit's page will show its own error */ }
 }, 3000);
@@ -177,23 +207,19 @@ async function refreshProtect() {
   }
 
   const hosted = admin && admin.hosted;
-  const step1 = s.paired
-    ? `<p>${pill('green', 'Done')} Houndbit is connected to Protect.</p>`
-    : `<p class="muted">${esc(s.message || '')}</p>
-       <div class="row"><button class="btn btn-primary" data-act="protectConnect">Connect Houndbit</button></div>
-       ${hosted ? '' : '<p class="small muted mt">A separate Protect program is running, so you\u2019ll need to accept the request there.</p>'}`;
+  const linked = s.paired
+    ? `<p class="small">${pill('green', 'Linked')} Houndbit is linked to Protect automatically. There is nothing to set up.</p>`
+    : `<p class="small muted">${esc(s.message || 'Houndbit is linking itself to Protect.')}</p>
+       <div class="row"><button class="btn btn-secondary btn-small" data-act="protectRefresh">Check again</button></div>`;
 
   body.innerHTML = `
     <div class="card">
       <div class="card-head"><h2>Safe copy is on</h2>${pill('green', 'Running')}</div>
       <p class="small muted">${hosted ? 'It started together with Houndbit and stops when you quit Houndbit.' : 'Houndbit is using a separate Protect program that was already running.'}</p>
-    </div>
-    <div class="card">
-      <div class="card-head"><h2>1. Connect Houndbit to its safe copy</h2></div>
-      ${step1}
+      ${linked}
     </div>
     ${s.paired ? `<div class="card" id="protect-folders">
-      <div class="card-head"><h2>2. Folders Houndbit may work on (in a safe copy)</h2></div>
+      <div class="card-head"><h2>1. Folders Houndbit may work on (in a safe copy)</h2></div>
       <p class="muted">Loading…</p></div>` : ''}
     ${hosted ? '<div id="protect-waiting"></div><div id="protect-apps"></div>' : ''}`;
 
@@ -208,7 +234,7 @@ async function refreshFolders(hosted) {
   try {
     g = await api('GET', '/api/ui/runtime/protect/grants');
   } catch (e) {
-    box.innerHTML = `<div class="card-head"><h2>2. Folders Houndbit may work on (in a safe copy)</h2></div><p class="small" style="color:var(--danger)">${esc(e.message)}</p>`;
+    box.innerHTML = `<div class="card-head"><h2>1. Folders Houndbit may work on (in a safe copy)</h2></div><p class="small" style="color:var(--danger)">${esc(e.message)}</p>`;
     return;
   }
   const grants = (g && g.grants) || [];
@@ -219,7 +245,7 @@ async function refreshFolders(hosted) {
     </div>` : '<p class="small muted mt">Add folders in the separate Protect program.</p>';
 
   const list = grants.length ? `
-    <p class="muted">3. Test the safe copy: type the name of a file inside the folder and press <b>Test</b>. Houndbit makes a small test change in the copy only. This tests Houndbit\u2019s own file work. It does not test Claude; use the guard above for that.</p>
+    <p class="muted">2. Test the safe copy: type the name of a file inside the folder and press <b>Test</b>. Houndbit makes a small test change in the copy only. This tests Houndbit\u2019s own file work. It does not test Claude or Cursor; use the guard above for that.</p>
     <table class="table"><thead><tr><th>Folder</th><th>Test the safe copy</th></tr></thead>
     <tbody>${grants.map((x, i) => `
       <tr>
@@ -234,7 +260,7 @@ async function refreshFolders(hosted) {
       </tr>`).join('')}</tbody></table>`
     : '<p class="muted">No folders yet. Add one below.</p>';
 
-  box.innerHTML = `<div class="card-head"><h2>2. Folders Houndbit may work on (in a safe copy)</h2></div>${list}${addRow}`;
+  box.innerHTML = `<div class="card-head"><h2>1. Folders Houndbit may work on (in a safe copy)</h2></div>${list}${addRow}`;
 }
 
 function renderAdmin(a) {
@@ -298,7 +324,6 @@ async function protectDo(path, payload, okMsg) {
 }
 
 actions.protectRefresh = async () => { await refreshProtect(); };
-actions.protectConnect = () => protectDo('/api/ui/runtime/protect/connect', {}, 'Houndbit is connected to Protect.');
 actions.protectPairing = (d) => protectDo('/api/ui/runtime/protect/admin/pairing', { id: d.id, accept: d.ok === '1' }, d.ok === '1' ? 'Allowed.' : 'Said no.');
 actions.protectApproval = (d) => protectDo('/api/ui/runtime/protect/admin/approval', { id: d.id, accept: d.ok === '1' }, d.ok === '1' ? 'Allowed.' : 'Blocked.');
 actions.protectRemoveApp = (d) => protectDo('/api/ui/runtime/protect/admin/remove-app', { app_id: d.app }, 'Disconnected.');

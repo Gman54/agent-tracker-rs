@@ -11,37 +11,113 @@ writing area. It is **not** operating-system isolation: it does not sandbox anot
 file or shell access, and there is no Windows isolation backend yet. Gate and isolate modes are
 still reported as unavailable.
 
-## Claude Code folder guard (first piece of part E)
+## The Protect add-on switch
 
-Before this, Protect did **not** watch Claude Code at all. A test where Claude Code wrote primes
-into `F:\Test\sigmadelta.txt` went straight through, because Claude used its own commands and
-nothing asked Protect first. The "Try it" button only tested Houndbit's own safe copy.
+Protect is meant to become a paid add-on later. For now it is **on for testing**:
 
-Now there is a folder guard:
+- The Protect page shows "Protect add-on: on for testing" with an on/off switch. Off shows
+  "Protect add-on is off", greys out the folder guard and stops it from blocking anything (the
+  hooks and the chat recorder let everything through).
+- The switch is the `"enabled"` field in `guard.json`, so the hook program sees it even when the
+  Houndbit window is closed. A missing field means on, so older lists keep working.
+- Endpoint: `POST /api/ui/runtime/protect/addon {"enabled": true|false}`; `GET .../protect/guard`
+  reports `addon_enabled`.
+- **Where a license check would go:** `tracker_common::guard::addon_active` (read by the hook, the
+  relay and the page) and `protect::set_addon` (switching it on). Both are marked
+  `FUTURE LICENSE CHECK`. No license check exists today; part F (payments, license server) needs
+  your payment service, certificate and server.
+- The switch only covers the folder guard. Houndbit's safe copy (parts B and D) is not affected.
+
+## Folder guard for AI helpers (part E, first pieces)
+
+Before the guard, Protect did **not** watch Claude Code at all. A test where Claude Code wrote
+primes into `F:\Test\sigmadelta.txt` went straight through.
+
+How it works:
 
 - On the Protect page you add folders and pick **Always block** or **Ask me first**. The list is
   saved to `%USERPROFILE%\.agenttracker\guard.json`.
-- Houndbit's existing Claude Code hook (`agenttracker-hook`, run on every `PreToolUse`) reads that
-  list itself, so it works even when the Houndbit window is closed. If a request would change a
-  guarded folder, the hook exits with code 2 and a plain reason, which stops the tool and tells
-  Claude why.
-- What counts as "would change": Claude's file tools (Write, Edit, MultiEdit, NotebookEdit and any
-  other non-read tool) whose paths are inside the folder; any command (Bash, PowerShell) whose text
-  names the folder, including Git Bash `/f/...` and WSL `/mnt/f/...` spellings; any command run
-  with its working folder inside the guarded folder. Read, Grep, Glob and similar stay allowed.
-- **Ask me first** writes a request that shows on the Protect page (and as a pop-up note on other
-  pages). The hook waits up to 90 seconds; no answer means stopped. Claude Code's timeout for this
-  hook is set to 120 seconds so the guard, not Claude, decides. Older installs with a 5-second
-  timeout are updated when Houndbit starts.
+- Houndbit's hook program (`agenttracker-hook`) reads that list itself, so it works even when the
+  Houndbit window is closed.
+- What counts as "would change":
+  - file tools (Write, Edit, MultiEdit, NotebookEdit, Delete and any other non-read tool) whose
+    paths are inside the folder;
+  - any command (Bash, PowerShell, Cursor's Shell) whose text names the folder, including Git Bash
+    `/f/...` and WSL `/mnt/f/...` spellings;
+  - any command whose working folder is inside the guarded folder;
+  - **new:** any command that runs a script file (`.py`, `.js`, `.ps1`, `.sh`, `.bat`, `.cmd` and
+    similar, or the file after `-File`) that is stored in the guarded folder, or whose text names
+    the guarded folder. Only scripts up to 256 KB are read (`SCRIPT_READ_CAP`); bigger ones are only
+    checked for where they are stored.
+  - Read, Grep, Glob and MCP tools whose names start with read/list/get/search/find/view/fetch stay
+    allowed.
+- **Ask me first** shows a request on the Protect page (and a pop-up note on other pages) naming
+  the app that asked. The hook waits up to 90 seconds; no answer means stopped.
 - If `guard.json` exists but can't be read, every non-read tool is stopped until it's fixed.
-- Every decision is listed under "What Protect stopped or let through".
+- Every decision is listed under "What Protect stopped or let through", with the app's name.
 
-Limits, plainly: this matches paths named in the request. A command can still reach a folder
-without naming it (a script stored elsewhere, a variable built at run time). That is the spec's
-point that shell string matching isn't real confinement. If the hook program itself crashes or is
-removed, Claude Code carries on. Only Claude Code is covered; whether the Claude desktop app's Code
-tab uses the same settings file has to be checked on your PC. Tested on Linux by running the real
-hook program with Claude-style requests; **not yet tried with live Claude Code on Windows.**
+### Claude Code
+
+The hook runs on every `PreToolUse`. A stop is exit code 2 plus a plain reason, which stops the
+tool and tells Claude why. Claude Code's timeout for this hook is 120 seconds so the guard's own
+90-second wait decides. Older installs with a 5-second timeout are updated when Houndbit starts.
+Whether the Claude desktop app's Code tab uses the same settings file has to be checked on your PC.
+
+### Cursor (new, untried with a live Cursor)
+
+Connecting Cursor on the Connections page now also installs Cursor's three hooks that can say no:
+`preToolUse` (every agent tool, including Shell, Write, Delete and `MCP:<tool>`),
+`beforeShellExecution` and `beforeMCPExecution`, each with a 120-second timeout. Older Cursor
+installs are updated when Houndbit starts.
+
+- The hook always answers these with Cursor's JSON: `{"permission":"allow"}`, or
+  `{"permission":"deny","user_message":...,"agent_message":...}` with the reason. (Cursor treats
+  an empty answer as a block, so the hook never stays silent on these.)
+- **Ask me first** asks in Houndbit, not in Cursor's own window. Cursor does not honour "ask" on
+  `preToolUse`, so Houndbit waits for your answer itself and then says allow or deny. Cursor runs
+  both `preToolUse` and `beforeShellExecution` for one command; an OK given for the first covers the
+  second for two minutes, so you are only asked once.
+- Cursor's `beforeReadFile` is not used (reading stays allowed) and `afterFileEdit` can't block.
+- Cursor's own file-editing path: Cursor's docs list Write and Delete as `preToolUse` tools, but
+  the exact fields in their requests aren't documented. The guard looks at every path-like field,
+  so it should catch them, but this has only been tested with requests shaped from the docs.
+- If the hook program crashes, Cursor carries on (Cursor fails open unless `failClosed` is set;
+  Houndbit doesn't set it, so a broken hook can't lock you out of Cursor).
+- Tested on Linux by running the real hook program with Cursor-shaped requests
+  (`crates/agenttracker-hook/tests/guard.rs`). **Not tried with a live Cursor on Windows.**
+
+### Chat recorder (new)
+
+When a chat app sends a request through Houndbit's chat recorder and offers the model tools, and
+folders are guarded, the recorder holds the model's reply until it is complete (so that reply is
+not streamed live) and checks every tool call in it. If one would change a guarded folder:
+
+- the chat app gets a short refusal instead, in the same format (plain JSON or a stream, for
+  OpenAI chat/completions, the Responses API and Ollama), with no tool call in it;
+- it is written to the guard log as "Chat recorder";
+- **Ask me first folders are blocked too**: a reply can't wait halfway for your answer, so the
+  recorder stops it and says so in the log.
+
+The recorded call still shows what the model really asked for. Replies over 16 MB are passed
+through unchecked. Requests without tools aren't held or checked. Tested on Linux with a fake model
+server (`crates/agenttracker-runtime/tests/relay_guard.rs`); **not tried with LM Studio, Ollama or
+a real chat app.** The Responses API streaming refusal in particular is untried with a real client.
+
+### MCP gateway: not built
+
+Spec part E also describes an MCP gateway (Houndbit sitting between an AI app and its MCP servers,
+holding their credentials and checking every call). It needs an MCP stdio shim, upstream proxying
+and credential storage in the engine. That is too big to do solidly with tests in this round, so
+it was **skipped**. MCP tool calls are still covered by the hooks above (Claude Code's
+`mcp__server__tool` and Cursor's `beforeMCPExecution`), but only by path matching.
+
+### Limits, plainly
+
+This matches paths named in the request, the working folder, and small scripts. A command can
+still reach a folder in ways it can't see: a folder name built while the command runs, a program
+that isn't a script, a big script, or a script that fetches another one. That is the spec's point
+that string matching isn't real confinement. If the hook program itself crashes or is removed,
+Claude Code and Cursor carry on.
 
 ## What works today (parts A, B and D)
 
@@ -139,22 +215,31 @@ uses. No private shortcut.
   background on Protect's normal endpoint (`protect::autostart`). One install, nothing extra to run.
   If a separate `protect-engine serve` is already running for this user, Houndbit leaves it alone
   and connects to it like any other app. When Houndbit quits, its built-in Protect stops too.
-- **In the app.** The sidebar has a **Protect** page (`static/protect.js`): shows Protect is on,
-  a one-click **Connect Houndbit** button, a box to add folders, a **Try it** sandbox check per
+- **In the app.** The sidebar has a **Protect** page (`static/protect.js`): shows Protect is on
+  and that Houndbit is linked to it automatically (there is no Connect button), a box to add folders, a **Try it** sandbox check per
   folder, a "Waiting for your OK" list (other apps asking to connect, actions needing approval) with
   Allow / Say no, and a list of other connected apps with Add folder / Disconnect. Endpoints:
-  `GET .../protect/status`, `POST .../protect/connect`, `GET .../protect/grants`,
+  `GET .../protect/status`, `GET .../protect/grants`,
   `POST .../protect/sandbox-check`, and `GET .../protect/admin` plus
   `POST .../protect/admin/{pairing,folder,remove-app,approval}`.
-- **The Protect controls only act on Houndbit's built-in engine.** Clicking Connect Houndbit is the
-  user's OK, so Houndbit's own pairing is accepted straight away. Houndbit's file work still goes
+- **Houndbit links itself.** When Houndbit hosts Protect (the normal case), it pairs with its own
+  built-in engine by itself the first time the Protect status is asked for (or when it first needs
+  Protect), and accepts that pairing straight away with no question: it is your own app talking to
+  its own built-in engine (`protect::ensure_linked`). If the engine knows Houndbit by an older key
+  (for example after Houndbit's data folder was reset), Houndbit replaces its own old entry; the
+  folders given to the old entry are not carried over. With a separate `protect-engine serve`,
+  Houndbit sends it one pairing request per run and you accept it there, like any other app. Other
+  apps' pairing requests are unchanged: they still wait for your Allow on the Protect page.
+- **The Protect controls only act on Houndbit's built-in engine.** Houndbit's file work still goes
   through the normal signed-in client path with its own key, like any other app.
 - **What was checked (on Linux):** `tests/protect_connector.rs` (separate engine: pair, accept,
   folder, sandbox, original unchanged) and `tests/protect_hosted.rs` (built-in engine: starts,
-  one-click connect, another app's request shows up and can be refused, add folder, sandbox,
+  links itself with nothing waiting for an OK, links again after its entry is removed, replaces an
+  old key, another app's request shows up and can be refused, add folder, sandbox,
   original unchanged, disconnect). The Protect page was also clicked through in a browser using the
-  headless preview (`cargo run -p agenttracker-runtime --example ui_preview`): Connect, Add folder,
-  Try it, and the real file was unchanged afterwards. Not yet clicked through in the Windows app.
+  headless preview (`cargo run -p agenttracker-runtime --example ui_preview`); the latest check
+  confirmed it shows "Houndbit is linked to Protect automatically" with no Connect button, and that
+  the add-on switch turns off and saves `"enabled": false`. Not yet clicked through in the Windows app.
 
 ## Honest limits
 
@@ -167,8 +252,8 @@ uses. No private shortcut.
 - The command line is not a trusted screen. Any program running as you could use it to approve
   things. The real approval window has to come before gate mode is switched on.
 - Anything harmful already running as your Windows user is out of scope.
-- **Claude Code:** a hook only blocks when it exits with code 2 (or replies "deny"). If it crashes
-  or takes too long, Claude Code carries on. The folder guard keeps its own 90-second timer under
+- **Claude Code and Cursor:** a hook only blocks when it says so (exit code 2 for Claude Code,
+  `"deny"` for Cursor). If it crashes or takes too long, the app carries on. The folder guard keeps its own 90-second timer under
   Claude's 120-second limit and stops the change when nobody answers.
 
 ## Test results
@@ -187,6 +272,6 @@ uses. No private shortcut.
 | B | Restricted worker that actually does the file work | Done for the four file actions and tested on Linux (snapshot + writing area, originals never touched). A confined file worker, **not** OS isolation; no Windows isolation backend yet. Not run on Windows named pipes. |
 | C | Python and TypeScript kits plus a sample app | Small Python and Node.js examples work on Linux. Not full kits yet, and not run on Windows. |
 | D | Houndbit talking to Protect through the same public door | Done and tested on Linux. Protect now starts inside Houndbit; the Protect page was clicked through in the headless preview, not yet in the Windows app. |
-| E | MCP gateway and Claude Code gate hook | Folder guard for Claude Code built and tested on Linux with the real hook program; not yet tried with live Claude Code on Windows. Uses path matching, not OS isolation. MCP gateway not started. |
-| F | Payments, license, signed installer | Not started. Needs your choice of payment service, a code-signing certificate and a server. |
+| E | MCP gateway and Claude Code gate hook | Folder guard for Claude Code and Cursor (hooks), plus the chat recorder, with script and working-folder checks and an add-on switch. Tested on Linux with the real hook program and a fake model server; not yet tried with live Claude Code, Cursor or a chat app on Windows. Uses path matching, not OS isolation. **MCP gateway skipped** (too big to do solidly this round). |
+| F | Payments, license, signed installer | Not started. An on/off add-on switch is in place (on for testing), with a marked spot for a license check. Needs your choice of payment service, a code-signing certificate and a server. |
 | G | More hosts and launchers | Not started. |

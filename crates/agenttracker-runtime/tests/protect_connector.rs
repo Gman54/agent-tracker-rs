@@ -62,16 +62,18 @@ async fn houndbit_connector_pairs_and_runs_the_sandbox() {
     // Stands in for the Protect window.
     let admin = Engine::open(protect_dir.path()).unwrap();
 
-    // Before pairing: the engine is running but Houndbit isn't connected.
+    // A separate Protect program (not hosted by Houndbit): looking at the status sends it one
+    // pairing request by itself, and the owner accepts it in that program.
     let before = protect::status(home.path()).await;
     assert_eq!(before["running"], true);
     assert_eq!(before["paired"], false);
-
-    // Pair, then the user accepts inside Protect.
-    let p = protect::pair(home.path()).await.unwrap();
-    let pid = p["pairing_id"].as_str().unwrap().to_string();
-    assert_eq!(p["state"], "pending");
+    assert!(before["message"].as_str().unwrap().contains("accept the request in that program"), "{before}");
     assert!(protect::key_path(home.path()).exists(), "pairing creates Houndbit's key");
+    let again = protect::status(home.path()).await;
+    assert_eq!(again["paired"], false);
+    let pending: Vec<_> = admin.admin_pairings().unwrap().into_iter().filter(|p| p["state"] == "pending" && p["app_id"] == protect::APP_ID).collect();
+    assert_eq!(pending.len(), 1, "only one request per run: {pending:?}");
+    let pid = pending[0]["pairing_id"].as_str().unwrap().to_string();
     admin.admin_pairing_resolve(&pid, true, None).unwrap();
 
     // After accepting: connected, with only the scopes an app may ask for.

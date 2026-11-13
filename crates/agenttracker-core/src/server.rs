@@ -117,7 +117,7 @@ impl AppState {
             let fixes: [(&str, bool, Box<dyn Fn() -> crate::Result<crate::connectors::InstallReport>>); 3] = [
                 // Also re-applied when an older install gave PreToolUse too short a timeout for the folder guard.
                 ("Claude Code", stale(self.claude().installed_hook_path()) || self.claude().guard_ready() == Some(false), Box::new(|| self.claude().install(&current))),
-                ("Cursor", stale(self.cursor().installed_hook_path()), Box::new(|| self.cursor().install(&current))),
+                ("Cursor", stale(self.cursor().installed_hook_path()) || self.cursor().guard_ready() == Some(false), Box::new(|| self.cursor().install(&current))),
                 ("Copilot", stale(self.copilot().installed_hook_path()), Box::new(|| self.copilot().install(&current))),
             ];
             for (name, needs_fix, fix) in fixes {
