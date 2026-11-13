@@ -63,6 +63,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/guard/remove", post(guard_remove))
         .route("/api/ui/runtime/protect/guard/answer", post(guard_answer))
         .route("/api/ui/runtime/protect/addon", post(protect_addon))
+        .route("/api/ui/runtime/protect/model", get(model_get))
+        .route("/api/ui/runtime/protect/model/run", post(model_run))
+        .route("/api/ui/runtime/protect/model/job/:id", get(model_job))
+        .route("/api/ui/runtime/protect/model/stop", post(model_stop))
+        .route("/api/ui/runtime/protect/model/apply", post(model_apply))
+        .route("/api/ui/runtime/protect/model/discard", post(model_discard))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -642,4 +648,90 @@ async fn protect_addon(State(st): St, Json(b): Json<AddonIn>) -> Response {
         Ok(v) => j(200, v),
         Err(m) => j(500, json!({"error": m})),
     }
+}
+
+
+// ---- Local model helper (a model on this computer works on a Protect folder) ----
+
+/// The model server and model the helper would use (the ones saved on the Runtime page), and the
+/// latest job. The API key, if any, is never sent back.
+async fn model_get(State(st): St) -> Response {
+    let cfg = load_config(&st.engine.db).provider;
+    j(200, json!({
+        "endpoint": cfg.endpoint,
+        "model": cfg.model,
+        "local": crate::protect_model::endpoint_is_local(&cfg.endpoint),
+        "hosted": crate::protect::is_hosted(),
+        "job": crate::protect_model::latest(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ModelRunIn {
+    grant_id: String,
+    request: String,
+    #[serde(default)]
+    model: String,
+    /// Must be true when the model server is not on this computer: the files it reads go there.
+    #[serde(default)]
+    confirm_remote: bool,
+}
+
+async fn model_run(State(st): St, Json(b): Json<ModelRunIn>) -> Response {
+    let home = st.agenttracker_home.clone();
+    let mut cfg = load_config(&st.engine.db).provider;
+    if !b.model.trim().is_empty() {
+        cfg.model = b.model.trim().to_string();
+    }
+    if cfg.model.trim().is_empty() {
+        return j(400, json!({"error": "Pick a model first. Press \"Find models\" to see what your model server has loaded."}));
+    }
+    let local = crate::protect_model::endpoint_is_local(&cfg.endpoint);
+    if !local && !b.confirm_remote {
+        return j(400, json!({"error": format!("Your model server ({}) isn't on this computer. The files the model reads would be sent there. Tick the box to say that's OK, or use a model on this PC.", cfg.endpoint)}));
+    }
+    // Writing whole files needs room for a longer reply than the Runtime page's default.
+    cfg.max_tokens = cfg.max_tokens.max(4096);
+    let context_chars = (cfg.model_context_tokens as usize).saturating_mul(3).saturating_sub(cfg.max_tokens as usize * 3);
+    let folder = match crate::protect::grants(&home).await {
+        Ok(g) => g["grants"].as_array().into_iter().flatten().find(|x| x["grant_id"] == b.grant_id.as_str()).and_then(|x| x["folder"].as_str().map(String::from)),
+        Err(m) => return j(502, json!({"error": m})),
+    };
+    let Some(folder) = folder else {
+        return j(400, json!({"error": "That folder isn't one of Houndbit's Protect folders any more. Pick another."}));
+    };
+    let (endpoint, model) = (cfg.endpoint.clone(), cfg.model.clone());
+    let provider = match tokio::task::spawn_blocking(move || OpenAiCompatProvider::new(cfg)).await {
+        Ok(Ok(p)) => Arc::new(p) as Arc<dyn Provider>,
+        Ok(Err(e)) => return rt_err(e),
+        Err(e) => return j(500, json!({"error": format!("worker failed: {e}")})),
+    };
+    protect_result(crate::protect_model::start(home, provider, &endpoint, &model, &b.grant_id, &folder, &b.request, context_chars))
+}
+
+async fn model_job(UrlPath(id): UrlPath<String>) -> Response {
+    match crate::protect_model::view(&id) {
+        Some(v) => j(200, v),
+        None => j(404, json!({"error": "That job isn't here any more (Houndbit may have restarted)."})),
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelDecisionIn {
+    job_id: String,
+    /// The files to apply or throw away. Leave out for all of them.
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+async fn model_stop(Json(b): Json<ModelDecisionIn>) -> Response {
+    protect_result(crate::protect_model::stop(&b.job_id))
+}
+
+async fn model_apply(Json(b): Json<ModelDecisionIn>) -> Response {
+    protect_result(tokio::task::spawn_blocking(move || crate::protect_model::apply(&b.job_id, b.paths)).await.unwrap_or_else(|e| Err(format!("worker failed: {e}"))))
+}
+
+async fn model_discard(Json(b): Json<ModelDecisionIn>) -> Response {
+    protect_result(tokio::task::spawn_blocking(move || crate::protect_model::discard(&b.job_id, b.paths)).await.unwrap_or_else(|e| Err(format!("worker failed: {e}"))))
 }

@@ -241,6 +241,54 @@ uses. No private shortcut.
   confirmed it shows "Houndbit is linked to Protect automatically" with no Connect button, and that
   the add-on switch turns off and saves `"enabled": false`. Not yet clicked through in the Windows app.
 
+## Local model helper (spec section 12, new, untried with a real model)
+
+The Protect page has a new card under Houndbit's folders: **"Let a model on this PC work on a folder."** You pick a model,
+pick one of Houndbit's folders, type what you want done, and press Start. The model works only
+through Protect's sandbox, and nothing reaches your real folder until you look at each change and
+press Apply.
+
+How to use it:
+
+1. On the **Runtime** page, set the model server (LM Studio, Ollama or any OpenAI-style server on
+   this PC). The helper uses that same address.
+2. On the **Protect** page, press **Find models**, pick one, pick a folder, type your request.
+3. Press **Start**. The step list shows what the model is doing. **Stop** ends it early.
+4. When it's done, each changed file shows **Now** and **After**. Press **Apply** or **Don't apply**
+   per file, or **Apply all** / **Don't apply any**.
+
+What the model can and can't do:
+
+- It can only ask for four things: list files, read a file, write a changed copy (into Protect's
+  writing area, never the real folder), or say it's done. No shell, no running code, no internet,
+  no deleting files.
+- Every request goes through Protect's normal rules: the "never touch" list (`.env`, keys and so on)
+  still applies, and anything that needs your OK waits in "Waiting for your OK".
+- A file that was only partly read (too big) can't be rewritten.
+- It stops after 30 steps, or after 3 replies it can't understand.
+- **Apply** writes to the real file only if the original hasn't changed since the snapshot was
+  taken. If you or another program edited it meanwhile, Apply refuses and says so. Applies,
+  refusals and discards are recorded as `changes.applied`, `changes.refused` and
+  `changes.discarded`.
+- Only a model on this PC (localhost) runs without asking. Any other address needs you to tick a
+  box confirming file contents will leave your PC.
+- A model's answer never grants permission. Only you do, on the page.
+
+Limits, plainly:
+
+- Same sandbox as above: a confined file worker, not operating-system isolation.
+- Houndbit doesn't judge whether the model's work is any good. That's what the review is for.
+- Jobs are kept in memory. If Houndbit restarts, the job list is gone; staged copies stay in
+  Protect's data folder until discarded.
+- Endpoints: `GET .../protect/model`, `POST .../protect/model/run`, `GET .../protect/model/job/:id`,
+  `POST .../protect/model/{stop,apply,discard}`.
+- **What was checked (on Linux):** `tests/protect_model.rs` with a scripted stand-in model (not a
+  real one): the `.env` read is refused, nothing is written before Apply, applying one file works,
+  a file edited by hand blocks Apply, discarding the rest finishes the job, and a model that never
+  answers properly ends as failed. The page was also clicked through in the headless preview
+  against a small fake model server: Find models, Start, the Now/After review, Apply, and the real
+  file changed only after Apply. Not yet tried with LM Studio or Ollama, and not on Windows.
+
 ## Honest limits
 
 - The sandbox only covers the four file actions, and only for the folders you add. It is a confined
@@ -275,3 +323,4 @@ uses. No private shortcut.
 | E | MCP gateway and Claude Code gate hook | Folder guard for Claude Code and Cursor (hooks), plus the chat recorder, with script and working-folder checks and an add-on switch. Tested on Linux with the real hook program and a fake model server; not yet tried with live Claude Code, Cursor or a chat app on Windows. Uses path matching, not OS isolation. **MCP gateway skipped** (too big to do solidly this round). |
 | F | Payments, license, signed installer | Not started. An on/off add-on switch is in place (on for testing), with a marked spot for a license check. Needs your choice of payment service, a code-signing certificate and a server. |
 | G | More hosts and launchers | Not started. |
+| 12 | Optional model relay | Local model helper on the Protect page: works through the sandbox, you review and Apply each change. Tested on Linux with a scripted stand-in model; not tried with a real model or on Windows. |

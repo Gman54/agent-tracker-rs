@@ -29,6 +29,7 @@ pub mod http;
 pub mod ids;
 pub mod investigate;
 pub mod protect;
+pub mod protect_model;
 pub mod proposal;
 pub mod provider;
 pub mod relay;

@@ -261,7 +261,219 @@ async function refreshFolders(hosted) {
     : '<p class="muted">No folders yet. Add one below.</p>';
 
   box.innerHTML = `<div class="card-head"><h2>1. Folders Houndbit may work on (in a safe copy)</h2></div>${list}${addRow}`;
+  if (hosted) await renderModelCard(grants);
 }
+
+// ---- Let a model on this PC work on a folder --------------------------------------------------
+// The model only sees the safe copy and can only look at files and suggest new versions. Nothing
+// goes into the real folder until you press Apply on a change.
+
+let modelPoll = null;
+let modelJobId = null;
+// Remember what "Find models" found and what you picked, so the list survives the page redrawing.
+let foundModels = [];
+let pickedModel = '';
+
+function modelOptions(m) {
+  const pick = pickedModel || (m.job && m.job.model) || m.model || '';
+  const list = foundModels.slice();
+  if (pick && !list.includes(pick)) list.unshift(pick);
+  if (!list.length) return '<option value="">Press "Find models"</option>';
+  return list.map(x => `<option value="${esc(x)}"${x === pick ? ' selected' : ''}>${esc(x)}</option>`).join('');
+}
+
+async function renderModelCard(grants) {
+  let card = document.getElementById('model-card');
+  if (!card) {
+    const folders = document.getElementById('protect-folders');
+    if (!folders) return;
+    card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'model-card';
+    folders.after(card);
+  }
+  let m;
+  try {
+    m = await api('GET', '/api/ui/runtime/protect/model');
+  } catch (e) {
+    card.innerHTML = `<div class="card-head"><h2>3. Let a model on this PC work on a folder</h2></div><p class="small text-danger">${esc(e.message)}</p>`;
+    return;
+  }
+  const busy = m.job && (m.job.state === 'working' || m.job.state === 'stopping');
+  const remoteNote = m.local ? '' : `
+    <div class="note note-plain mt-xs">
+      <p class="small">${pill('amber', 'Not on this PC')} Your model server (<span class="mono">${esc(m.endpoint)}</span>) is on another computer. Every file the model reads is sent there.</p>
+      <label class="row small"><input type="checkbox" id="model-remote-ok"> That's OK for this folder</label>
+    </div>`;
+  card.innerHTML = `
+    <div class="card-head"><h2>3. Let a model on this PC work on a folder</h2></div>
+    <p class="muted">Ask your own model (LM Studio or Ollama) to do something in one of the folders above. It works in the safe copy, and it can only look at files and suggest new versions. It can't run programs, go online, or delete anything. When it's finished you see each change and choose <b>Apply</b> or <b>Don't apply</b>.</p>
+    <p class="small muted">Model server: <span class="mono">${esc(m.endpoint || 'not set')}</span>. You can change it on the Runtime page.</p>
+    ${remoteNote}
+    <div class="row mt">
+      <label class="small" for="model-pick">Model</label>
+      <select class="input model-pick" id="model-pick">
+        ${modelOptions(m)}
+      </select>
+      <button class="btn btn-secondary btn-small" data-act="modelFind">Find models</button>
+    </div>
+    <div class="row mt-xs">
+      <label class="small" for="model-folder">Folder</label>
+      <select class="input model-folder" id="model-folder">
+        ${grants.length ? grants.map(g => `<option value="${esc(g.grant_id)}">${esc(shownPath(g.folder))}</option>`).join('') : '<option value="">Add a folder above first</option>'}
+      </select>
+    </div>
+    <textarea class="input mt-xs model-request" id="model-request" rows="3" placeholder="What should it do? For example: fix the spelling mistakes in README.md"></textarea>
+    <div class="row mt-xs">
+      <button class="btn btn-primary" data-act="modelStart"${busy || !grants.length ? ' disabled' : ''}>Start</button>
+      ${busy ? '<button class="btn btn-secondary" data-act="modelStop">Stop</button>' : ''}
+    </div>
+    <div id="model-job" class="mt"></div>`;
+  if (m.job) showModelJob(m.job);
+}
+
+function modelStateLine(job) {
+  switch (job.state) {
+    case 'working': return `${pill('amber', 'Working')} The model is on it. This page updates by itself.`;
+    case 'stopping': return `${pill('amber', 'Stopping')} It will stop after the step it's on.`;
+    case 'review': return `${pill('amber', 'Your turn')} Look over the changes below. Nothing in your real folder has changed yet.`;
+    case 'finished': return `${pill('green', 'Finished')} Nothing is waiting for you.`;
+    default: return `${pill('red', 'Stopped with a problem')}`;
+  }
+}
+
+function showModelJob(job) {
+  const box = document.getElementById('model-job');
+  if (!box) return;
+  modelJobId = job.id;
+  const changes = job.changes || [];
+  const steps = job.steps || [];
+  const textBlock = (label, text, note) => `
+    <div>
+      <div class="small"><b>${label}</b></div>
+      ${text === null || text === undefined
+        ? `<p class="small muted review-missing">${esc(note || '(no file)')}</p>`
+        : `<pre class="diff mono review-text">${esc(text)}</pre>`}
+    </div>`;
+  box.innerHTML = `
+    <div class="note note-plain">
+      <p class="small">${modelStateLine(job)}</p>
+      <p class="small muted">You asked: ${esc(job.request)} <span class="mono">(${esc(shownPath(job.folder))}, model ${esc(job.model)})</span></p>
+      ${job.error ? `<p class="small text-danger">${esc(job.error)}</p>` : ''}
+      ${job.summary ? `<p class="small"><b>The model says:</b> ${esc(job.summary)}</p>` : ''}
+      ${job.changes_error ? `<p class="small text-danger">${esc(job.changes_error)}</p>` : ''}
+    </div>
+    ${changes.length ? `
+      <div class="row mt row-spread">
+        <p><b>Changes waiting for you</b> ${pill('amber', String(changes.length))}</p>
+        <div class="row">
+          <button class="btn btn-primary btn-small" data-act="modelApply" data-all="1">Apply all</button>
+          <button class="btn btn-secondary btn-small" data-act="modelDiscard" data-all="1">Don't apply any</button>
+        </div>
+      </div>
+      ${changes.map(c => `
+        <details class="mt-xs" open>
+          <summary><span class="mono">${esc(c.path)}</span> ${c.kind === 'added' ? pill('gray', 'new file') : pill('gray', 'changed')}
+            ${c.original_changed_since_snapshot ? pill('red', 'changed in your folder since') : ''}</summary>
+          ${c.original_changed_since_snapshot ? '<p class="small text-danger">This file was changed in your real folder after the model started. Applying it is refused so your newer edit isn\u2019t lost.</p>' : ''}
+          <div class="review-cols">
+            ${textBlock('Now', c.kind === 'added' ? null : c.old_text, c.kind === 'added' ? 'This file doesn\u2019t exist yet.' : c.old_note)}
+            ${textBlock('After', c.new_text, c.new_note)}
+          </div>
+          <div class="row mt-xs">
+            <button class="btn btn-primary btn-small" data-act="modelApply" data-path="${esc(c.path)}"${c.original_changed_since_snapshot ? ' disabled' : ''}>Apply</button>
+            <button class="btn btn-secondary btn-small" data-act="modelDiscard" data-path="${esc(c.path)}">Don't apply</button>
+          </div>
+        </details>`).join('')}` : ''}
+    <details class="mt"${job.state === 'working' ? ' open' : ''}><summary class="small">What happened, step by step (${steps.length})</summary>
+      <ol class="small">${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+    </details>`;
+  const working = job.state === 'working' || job.state === 'stopping';
+  if (working && !modelPoll) {
+    modelPoll = setInterval(pollModelJob, 1500);
+  } else if (!working && modelPoll) {
+    clearInterval(modelPoll);
+    modelPoll = null;
+  }
+}
+
+async function pollModelJob() {
+  if (!document.getElementById('model-job') || !modelJobId) {
+    clearInterval(modelPoll);
+    modelPoll = null;
+    return;
+  }
+  try {
+    const job = await api('GET', '/api/ui/runtime/protect/model/job/' + encodeURIComponent(modelJobId));
+    const wasWorking = document.querySelector('[data-act="modelStop"]');
+    if (wasWorking && job.state !== 'working' && job.state !== 'stopping') {
+      // Finished: redraw the whole card so Start comes back.
+      await refreshProtect();
+      return;
+    }
+    showModelJob(job);
+    // If Protect's rules ask for your OK on a step, the question shows up without a refresh.
+    renderAdmin(await api('GET', '/api/ui/runtime/protect/admin'));
+  } catch (_) { /* keep the last view; the next poll tries again */ }
+}
+
+actions.modelFind = async () => {
+  const sel = document.getElementById('model-pick');
+  try {
+    const r = await api('GET', '/api/ui/runtime/provider/models');
+    const models = (r && r.models) || [];
+    if (!models.length) { showToast('Your model server answered but has no models loaded. Load one in LM Studio or Ollama first.', 'error'); return; }
+    const current = sel ? sel.value : '';
+    foundModels = models;
+    if (!pickedModel) pickedModel = models.includes(current) ? current : models[0];
+    if (sel) sel.innerHTML = models.map(x => `<option value="${esc(x)}"${x === current ? ' selected' : ''}>${esc(x)}</option>`).join('');
+    showToast(`Found ${models.length} model${models.length === 1 ? '' : 's'}.`, 'success');
+  } catch (e) {
+    showToast('Couldn\u2019t reach your model server. Is LM Studio or Ollama running? ' + e.message, 'error');
+  }
+};
+
+actions.modelStart = async () => {
+  const model = (document.getElementById('model-pick') || {}).value || '';
+  const grant_id = (document.getElementById('model-folder') || {}).value || '';
+  const request = ((document.getElementById('model-request') || {}).value || '').trim();
+  const remote = document.getElementById('model-remote-ok');
+  if (!model) { showToast('Pick a model first. Press "Find models".', 'error'); return; }
+  pickedModel = model;
+  if (!grant_id) { showToast('Pick a folder first.', 'error'); return; }
+  if (!request) { showToast('Type what you\u2019d like the model to do.', 'error'); return; }
+  try {
+    await api('POST', '/api/ui/runtime/protect/model/run', { model, grant_id, request, confirm_remote: !!(remote && remote.checked) });
+    showToast('Started. The model is working in the safe copy.', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+    return;
+  }
+  await refreshProtect();
+};
+
+actions.modelStop = async () => {
+  if (!modelJobId) return;
+  try { await api('POST', '/api/ui/runtime/protect/model/stop', { job_id: modelJobId }); } catch (e) { showToast(e.message, 'error'); }
+};
+
+async function modelDecide(path, d, okMsg) {
+  if (!modelJobId) return;
+  const payload = { job_id: modelJobId };
+  if (d.all !== '1') payload.paths = [d.path];
+  try {
+    const r = await api('POST', path, payload);
+    const refused = ((r && r.results) || []).filter(x => x.applied === false);
+    if (refused.length) showToast(refused.map(x => `${x.path}: ${x.reason}`).join(' '), 'error');
+    else showToast(okMsg, 'success');
+    showModelJob(r);
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+actions.modelApply = (d) => modelDecide('/api/ui/runtime/protect/model/apply', d, d.all === '1' ? 'Applied. Your real files were updated.' : 'Applied. Your real file was updated.');
+actions.modelDiscard = (d) => modelDecide('/api/ui/runtime/protect/model/discard', d, 'Thrown away. Your real folder wasn\u2019t touched.');
 
 function renderAdmin(a) {
   const wait = document.getElementById('protect-waiting');

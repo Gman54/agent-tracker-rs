@@ -147,6 +147,103 @@ impl Workspace {
         changes.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         Ok(json!({"changes": changes, "note": "The worker never deletes or writes your original files; these are staged changes only."}))
     }
+
+    /// The staged files' relative paths, sorted.
+    pub fn staged_paths(&self) -> Vec<String> {
+        let mut v: Vec<String> = walk_files(&self.staging(), &self.staging()).into_iter().map(|(p, _)| p).collect();
+        v.sort();
+        v
+    }
+
+    /// For the person reviewing: every staged change with the old and new text (each capped at
+    /// `max_text` bytes) and whether the real file changed since the snapshot was taken.
+    /// Only the user's own Protect controls call this; it is not an operation a session can submit.
+    pub fn review(&self, real_root: &Path, max_text: u64) -> Result<Value> {
+        let mut out = vec![];
+        for rel in self.staged_paths() {
+            let snap = safe_join(&self.snapshot(), &rel)?;
+            let staged = safe_join(&self.staging(), &rel)?;
+            let kind = if snap.is_file() { "modified" } else { "added" };
+            let (old_text, old_note) = text_for_review(&snap, max_text);
+            let (new_text, new_note) = text_for_review(&staged, max_text);
+            let stale = !self.original_unchanged(real_root, &rel)?;
+            out.push(json!({"path": rel, "kind": kind, "old_text": old_text, "new_text": new_text, "old_note": old_note, "new_note": new_note,
+                "original_changed_since_snapshot": stale}));
+        }
+        Ok(json!({"changes": out}))
+    }
+
+    /// True when the real file still matches what the snapshot saw: same bytes, or, for a file
+    /// the session added, still absent. Anything else means someone changed it in the meantime.
+    fn original_unchanged(&self, real_root: &Path, rel: &str) -> Result<bool> {
+        let snap = safe_join(&self.snapshot(), rel)?;
+        let real = safe_join(real_root, rel)?;
+        if snap.is_file() {
+            match (std::fs::read(&snap), std::fs::read(&real)) {
+                (Ok(a), Ok(b)) => Ok(a == b),
+                _ => Ok(false),
+            }
+        } else {
+            Ok(std::fs::symlink_metadata(&real).is_err())
+        }
+    }
+
+    /// Writes one staged file into the real folder, after the user said yes. Refuses if the real
+    /// file changed since the snapshot (so nobody's newer edit gets overwritten) or if the policy's
+    /// deny list covers the path. Writes to a temporary file first and renames it into place. On
+    /// success the snapshot is brought up to date and the staged copy is removed.
+    pub fn apply(&self, real_root: &Path, rel: &str, policy: &Policy) -> Result<Value> {
+        let staged = safe_join(&self.staging(), rel)?;
+        if !staged.is_file() {
+            return Err(err(Code::NotFound, format!("there's no staged change for \"{rel}\"")));
+        }
+        if policy_denies(policy, rel) {
+            return Err(err(Code::PolicyDenied, format!("\"{rel}\" is on Protect's do-not-touch list")));
+        }
+        if !self.original_unchanged(real_root, rel)? {
+            return Err(err(Code::StaleResource, format!("\"{rel}\" was changed in your folder after the helper started, so it was left alone")));
+        }
+        let kind = if safe_join(&self.snapshot(), rel)?.is_file() { "modified" } else { "added" };
+        let bytes = std::fs::read(&staged).map_err(|e| err(Code::AuditUnavailable, format!("couldn't read the staged file: {e}")))?;
+        let real = safe_join(real_root, rel)?;
+        if let Some(dir) = real.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| err(Code::AuditUnavailable, format!("couldn't make the folder for \"{rel}\": {e}")))?;
+        }
+        let tmp = real.with_file_name(format!(".{}.houndbit-tmp", real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        std::fs::write(&tmp, &bytes).map_err(|e| err(Code::AuditUnavailable, format!("couldn't write \"{rel}\": {e}")))?;
+        if let Err(e) = std::fs::rename(&tmp, &real) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err(Code::AuditUnavailable, format!("couldn't put \"{rel}\" in place: {e}")));
+        }
+        let snap = safe_join(&self.snapshot(), rel)?;
+        if let Some(dir) = snap.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&snap, &bytes);
+        let _ = std::fs::remove_file(&staged);
+        Ok(json!({"path": rel, "kind": kind, "bytes_written": bytes.len(), "wrote_original": true}))
+    }
+
+    /// Throws away one staged change. The real folder is not touched.
+    pub fn discard(&self, rel: &str) -> Result<()> {
+        let staged = safe_join(&self.staging(), rel)?;
+        if !staged.is_file() {
+            return Err(err(Code::NotFound, format!("there's no staged change for \"{rel}\"")));
+        }
+        std::fs::remove_file(&staged).map_err(|e| err(Code::AuditUnavailable, format!("couldn't remove the staged file: {e}")))
+    }
+}
+
+/// Text to show in a review, or None with a short note when it isn't shown.
+fn text_for_review(path: &Path, max: u64) -> (Option<String>, Option<&'static str>) {
+    match std::fs::read(path) {
+        Err(_) => (None, None),
+        Ok(b) if b.len() as u64 > max => (None, Some("too large to show here")),
+        Ok(b) => match String::from_utf8(b) {
+            Ok(t) => (Some(t), None),
+            Err(_) => (None, Some("not a text file")),
+        },
+    }
 }
 
 /// Joins a relative path under `base`, refusing any component that is a symbolic link or
@@ -308,6 +405,44 @@ mod tests {
         assert_eq!(ws.write_staged("two.txt", "y", &p).unwrap_err().code, Code::PolicyDenied);
         // Re-writing the same staged file stays within the one-file limit.
         ws.write_staged("one.txt", "xx", &p).unwrap();
+    }
+
+    #[test]
+    fn apply_writes_the_original_only_when_it_is_unchanged() {
+        let (_d, source, ws, p) = setup();
+        ws.write_staged("a.txt", "changed", &p).unwrap();
+        ws.write_staged("new/c.txt", "brand new", &p).unwrap();
+        ws.write_staged("sub/b.txt", "beta 2", &p).unwrap();
+        let rev = ws.review(source.path(), 1000).unwrap();
+        assert_eq!(rev["changes"].as_array().unwrap().len(), 3);
+        // Someone edits b.txt in the real folder after the snapshot.
+        std::fs::write(source.path().join("sub/b.txt"), "edited by hand").unwrap();
+        let rev = ws.review(source.path(), 1000).unwrap();
+        let b = rev["changes"].as_array().unwrap().iter().find(|c| c["path"] == "sub/b.txt").unwrap().clone();
+        assert_eq!(b["original_changed_since_snapshot"], true);
+        assert_eq!(b["old_text"], "beta");
+        assert_eq!(b["new_text"], "beta 2");
+
+        ws.apply(source.path(), "a.txt", &p).unwrap();
+        ws.apply(source.path(), "new/c.txt", &p).unwrap();
+        assert_eq!(std::fs::read_to_string(source.path().join("a.txt")).unwrap(), "changed");
+        assert_eq!(std::fs::read_to_string(source.path().join("new/c.txt")).unwrap(), "brand new");
+        assert_eq!(ws.apply(source.path(), "sub/b.txt", &p).unwrap_err().code, Code::StaleResource);
+        assert_eq!(std::fs::read_to_string(source.path().join("sub/b.txt")).unwrap(), "edited by hand");
+        // Applied changes leave staging; the refused one stays for the person to decide.
+        assert_eq!(ws.staged_paths(), vec!["sub/b.txt".to_string()]);
+        ws.discard("sub/b.txt").unwrap();
+        assert!(ws.staged_paths().is_empty());
+        assert_eq!(std::fs::read_to_string(source.path().join("sub/b.txt")).unwrap(), "edited by hand");
+    }
+
+    #[test]
+    fn apply_refuses_an_added_file_that_now_exists() {
+        let (_d, source, ws, p) = setup();
+        ws.write_staged("fresh.txt", "mine", &p).unwrap();
+        std::fs::write(source.path().join("fresh.txt"), "someone else's").unwrap();
+        assert_eq!(ws.apply(source.path(), "fresh.txt", &p).unwrap_err().code, Code::StaleResource);
+        assert_eq!(std::fs::read_to_string(source.path().join("fresh.txt")).unwrap(), "someone else's");
     }
 
     #[cfg(unix)]

@@ -331,6 +331,26 @@ pub fn admin_approval(approval_id: &str, approve: bool) -> Result<Value, String>
     e.approvals_resolve(approval_id, &nonce, approve).map_err(emsg)
 }
 
+/// Houndbit signed in to Protect with its own key, for the model helper's actions.
+pub async fn signed_in_client(home: &Path) -> Result<Client, String> {
+    signed_in(home).await
+}
+
+/// A session's staged changes with old and new text, for you to look over.
+pub fn admin_changes(session_id: &str) -> Result<Value, String> {
+    hosted()?.admin_session_changes(session_id).map_err(emsg)
+}
+
+/// Writes the chosen staged changes (None = all) into the real folder. Only your click calls this.
+pub fn admin_apply(session_id: &str, paths: Option<&[String]>) -> Result<Value, String> {
+    hosted()?.admin_apply_changes(session_id, paths).map_err(emsg)
+}
+
+/// Throws away the chosen staged changes (None = all).
+pub fn admin_discard(session_id: &str, paths: Option<&[String]>) -> Result<Value, String> {
+    hosted()?.admin_discard_changes(session_id, paths).map_err(emsg)
+}
+
 // ---- Folder guard for AI helpers (Claude Code, Cursor, the chat recorder) ----
 // The list is a small file the hook program reads by itself (see tracker_common::guard), so
 // guarding keeps working when the Houndbit window is closed.

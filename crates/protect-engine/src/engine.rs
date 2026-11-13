@@ -491,6 +491,86 @@ impl Engine {
         Ok(json!({"approval_id": approval_id, "state": ap_state, "action_id": action_id}))
     }
 
+    // ---------------------------------------------------------------- reviewing staged changes
+    //
+    // Admin path only: Protect's own controls (or Houndbit's window when it hosts the engine).
+    // There is no operation a session can submit to apply its own changes; only the user can.
+
+    /// The session's real granted folder and its policy. Refuses when the grant was taken away.
+    fn session_folder(&self, session_id: &str) -> Result<(std::path::PathBuf, Policy)> {
+        let c = self.conn();
+        let row: Option<(String, Option<i64>, String, i64)> = c
+            .query_row(
+                "SELECT g.folder, g.revoked_at, s.profile, s.policy_revision FROM sessions s JOIN resource_grants g ON g.id=s.grant_id WHERE s.id=?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (folder, revoked, profile, rev) = row.ok_or_else(|| err(Code::NotFound, "No such session"))?;
+        if revoked.is_some() {
+            return Err(err(Code::ScopeDenied, "That folder was taken back from the app, so nothing can be written to it."));
+        }
+        if !Path::new(&folder).is_dir() {
+            return Err(err(Code::StaleResource, "The granted folder no longer exists."));
+        }
+        let p = policy_at(&c, &profile, rev)?;
+        Ok((std::path::PathBuf::from(folder), p))
+    }
+
+    /// Every staged change in a session with the old and new text, for the user to look over.
+    pub fn admin_session_changes(&self, session_id: &str) -> Result<Value> {
+        let (folder, _) = self.session_folder(session_id)?;
+        let ws = crate::worker::Workspace::new(&self.data_dir, session_id);
+        let mut v = ws.review(&folder, 200_000)?;
+        v["session_id"] = json!(session_id);
+        v["folder"] = json!(folder.to_string_lossy());
+        Ok(v)
+    }
+
+    /// Copies the chosen staged changes (None = all of them) into the real folder. Each file is
+    /// checked on its own; a file that changed since the snapshot is refused and left staged.
+    pub fn admin_apply_changes(&self, session_id: &str, paths: Option<&[String]>) -> Result<Value> {
+        let (folder, policy) = self.session_folder(session_id)?;
+        let ws = crate::worker::Workspace::new(&self.data_dir, session_id);
+        let targets: Vec<String> = paths.map(|p| p.to_vec()).unwrap_or_else(|| ws.staged_paths());
+        let mut results = vec![];
+        for rel in targets {
+            let r = ws.apply(&folder, &rel, &policy);
+            let c = self.conn();
+            match r {
+                Ok(out) => {
+                    event(&c, Some(session_id), None, "changes.applied", "user", None, json!({"path": rel, "kind": out["kind"], "bytes_written": out["bytes_written"], "wrote_original": true}))?;
+                    results.push(json!({"path": rel, "applied": true, "kind": out["kind"]}));
+                }
+                Err(e) => {
+                    event(&c, Some(session_id), None, "changes.refused", "engine", None, json!({"path": rel, "code": e.code.as_str(), "reason": e.message}))?;
+                    results.push(json!({"path": rel, "applied": false, "reason": e.message, "code": e.code.as_str()}));
+                }
+            }
+        }
+        Ok(json!({"session_id": session_id, "results": results}))
+    }
+
+    /// Throws away the chosen staged changes (None = all). The real folder isn't touched.
+    pub fn admin_discard_changes(&self, session_id: &str, paths: Option<&[String]>) -> Result<Value> {
+        {
+            let c = self.conn();
+            c.query_row("SELECT id FROM sessions WHERE id=?1", [session_id], |r| r.get::<_, String>(0)).optional()?.ok_or_else(|| err(Code::NotFound, "No such session"))?;
+        }
+        let ws = crate::worker::Workspace::new(&self.data_dir, session_id);
+        let targets: Vec<String> = paths.map(|p| p.to_vec()).unwrap_or_else(|| ws.staged_paths());
+        let mut results = vec![];
+        for rel in targets {
+            let ok = ws.discard(&rel);
+            let c = self.conn();
+            if ok.is_ok() {
+                event(&c, Some(session_id), None, "changes.discarded", "user", None, json!({"path": rel}))?;
+            }
+            results.push(json!({"path": rel, "discarded": ok.is_ok(), "reason": ok.err().map(|e| e.message)}));
+        }
+        Ok(json!({"session_id": session_id, "results": results}))
+    }
+
     // ---------------------------------------------------------------- events
 
     pub fn events_read(&self, app_id: &str, session_id: &str, cursor: Option<&str>, limit: usize) -> Result<Value> {
