@@ -20,9 +20,21 @@ use std::time::Duration;
 
 pub const NAME: &str = "claude_code";
 
-/// Hook events AgentTracker installs. Tool events use matcher "*".
+/// Hook events Houndbit installs. Tool events use matcher "*".
 pub const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "SessionEnd"];
 const TOOL_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "PostToolUseFailure"];
+/// Seconds Claude Code waits for the PreToolUse hook. Longer than the hook's own wait for an
+/// "ask" answer (90 s), so the folder guard decides rather than Claude timing out and carrying on.
+pub const PRE_TOOL_TIMEOUT_SECS: u64 = 120;
+const OTHER_TIMEOUT_SECS: u64 = 5;
+
+fn timeout_for(event: &str) -> u64 {
+    if event == "PreToolUse" {
+        PRE_TOOL_TIMEOUT_SECS
+    } else {
+        OTHER_TIMEOUT_SECS
+    }
+}
 
 pub fn info() -> ConnectorInfo {
     ConnectorInfo {
@@ -47,16 +59,18 @@ impl HooksFormat for ClaudeFormat {
             if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 for h in inner.iter_mut() {
                     if h.get("command").and_then(Value::as_str).map(super::is_owned_command).unwrap_or(false) {
-                        if h["command"] == cmd {
+                        let want = timeout_for(event);
+                        if h["command"] == cmd && h.get("timeout").and_then(Value::as_u64) == Some(want) {
                             return Upsert::Unchanged;
                         }
                         h["command"] = Value::String(cmd.to_string());
+                        h["timeout"] = json!(want);
                         return Upsert::Updated;
                     }
                 }
             }
         }
-        let hook = json!({"type": "command", "command": cmd, "timeout": 5});
+        let hook = json!({"type": "command", "command": cmd, "timeout": timeout_for(event)});
         let group = if TOOL_EVENTS.contains(&event) { json!({"matcher": "*", "hooks": [hook]}) } else { json!({"hooks": [hook]}) };
         arr.push(group);
         Upsert::Added
@@ -82,6 +96,109 @@ impl HooksFormat for ClaudeFormat {
             .filter_map(|h| h.get("command").and_then(Value::as_str).map(str::to_string))
             .collect()
     }
+}
+
+/// Looks in the documented / common install locations for Claude Code.
+/// Returns (stand-alone CLI executables, apps that bundle Claude Code). Pure apart from
+/// `exists()` checks so it can be tested with a fake home folder.
+pub(crate) fn find_claude_installs(home: &Path, appdata: Option<PathBuf>, localappdata: Option<PathBuf>) -> (Vec<PathBuf>, Vec<(&'static str, PathBuf)>) {
+    let mut cli = vec![
+        // Native installer (Windows: %USERPROFILE%\.local\bin\claude.exe; macOS/Linux: ~/.local/bin/claude).
+        home.join(".local").join("bin").join("claude.exe"),
+        home.join(".local").join("bin").join("claude"),
+        home.join(".claude").join("local").join("claude.exe"),
+        home.join(".claude").join("local").join("claude"),
+    ];
+    if let Some(a) = &appdata {
+        cli.push(a.join("npm").join("claude.cmd"));
+        cli.push(a.join("npm").join("claude.exe"));
+    }
+    if let Some(l) = &localappdata {
+        cli.push(l.join("Microsoft").join("WinGet").join("Links").join("claude.exe"));
+    }
+    let mut cli: Vec<PathBuf> = cli.into_iter().filter(|p| p.is_file()).collect();
+
+    // Claude desktop app (Code tab) keeps its own copy of Claude Code:
+    //   MSIX:     %LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude-code\<version>\claude.exe
+    //   Non-MSIX: %APPDATA%\Claude\claude-code\<version>\claude.exe
+    let packages = msix_claude_packages(localappdata.as_deref());
+    let mut desktop_roots: Vec<PathBuf> = packages.iter().map(|p| p.join("LocalCache").join("Roaming").join("Claude").join("claude-code")).collect();
+    if let Some(a) = &appdata {
+        desktop_roots.push(a.join("Claude").join("claude-code"));
+    }
+    for root in &desktop_roots {
+        cli.extend(desktop_cli_versions(root));
+    }
+
+    let mut bundled = vec![];
+    for p in packages {
+        bundled.push(("Claude desktop app", p));
+    }
+    if let Some(a) = &appdata {
+        let p = a.join("Claude");
+        if p.join("claude-code").is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+    }
+    if let Some(l) = &localappdata {
+        let p = l.join("Claude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+        let p = l.join("AnthropicClaude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+        let p = l.join("Programs").join("Claude");
+        if p.is_dir() {
+            bundled.push(("Claude desktop app", p));
+        }
+    }
+    for ext_root in [home.join(".vscode").join("extensions"), home.join(".cursor").join("extensions")] {
+        if let Ok(rd) = std::fs::read_dir(&ext_root) {
+            if let Some(e) = rd.flatten().find(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("anthropic.claude-code")) {
+                bundled.push(("Claude Code editor extension", e.path()));
+            }
+        }
+    }
+    (cli, bundled)
+}
+
+/// `%LOCALAPPDATA%\Packages\Claude_*` folders (the Microsoft Store / MSIX desktop app), sorted by name.
+fn msix_claude_packages(localappdata: Option<&Path>) -> Vec<PathBuf> {
+    let Some(l) = localappdata else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(l.join("Packages")) else { return vec![] };
+    let mut v: Vec<PathBuf> = rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("Claude_") && e.path().is_dir()).map(|e| e.path()).collect();
+    v.sort();
+    v
+}
+
+/// `<root>\<version>\claude.exe` for every version folder, newest version first.
+fn desktop_cli_versions(root: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return vec![] };
+    let mut found: Vec<(Vec<u64>, String, PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let exe = e.path().join("claude.exe");
+            exe.is_file().then(|| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                (version_key(&name), name, exe)
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    found.into_iter().map(|(_, _, p)| p).collect()
+}
+
+/// Numeric parts of a version folder name ("2.1.10" -> [2, 1, 10]) so 2.1.10 sorts above 2.1.9.
+fn version_key(name: &str) -> Vec<u64> {
+    name.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap_or(0)).collect()
+}
+
+/// True for a claude.exe that ships inside the Claude desktop app (lives under a `Claude\claude-code` folder).
+fn is_desktop_bundled(p: &Path) -> bool {
+    let parts: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+    parts.windows(2).any(|w| w[0] == "claude" && w[1] == "claude-code")
 }
 
 pub struct ClaudeConnector {
@@ -113,18 +230,51 @@ impl ClaudeConnector {
     }
 
     pub fn detect(&self) -> DetectResult {
-        let version = probe_version(&["claude", "claude.cmd", "claude.exe"], Duration::from_secs(4));
         let config_exists = self.settings_path.exists();
         let mut notes = vec![];
+        let mut version = probe_version(&["claude", "claude.cmd", "claude.exe"], Duration::from_secs(4));
+        if version.is_none() {
+            // Not on PATH (common when the installer updated PATH after this app's parent
+            // process started, or when Claude Code only ships inside another app).
+            let (cli, bundled) = find_claude_installs(&crate::user_home(), std::env::var_os("APPDATA").map(PathBuf::from), std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
+            for p in &cli {
+                if let Some(v) = probe_version(&[p.to_string_lossy().as_ref()], Duration::from_secs(4)) {
+                    if is_desktop_bundled(p) {
+                        notes.push(format!("Found the Claude Code that comes with the Claude desktop app, at {}.", p.display()));
+                    } else {
+                        notes.push(format!("Claude Code found at {} (it isn't on the PATH this app sees).", p.display()));
+                    }
+                    version = Some(v);
+                    break;
+                }
+            }
+            if version.is_none() {
+                if let Some(p) = cli.first() {
+                    if is_desktop_bundled(p) {
+                        notes.push(format!("Found the Claude Code that comes with the Claude desktop app, at {}. It didn't tell us its version, which is normal for the built-in copy.", p.display()));
+                        version = Some("Claude desktop app (built-in Claude Code)".into());
+                    } else {
+                        notes.push(format!("Found {} but it didn't answer `--version`.", p.display()));
+                        version = Some("Found (version unknown)".into());
+                    }
+                }
+            }
+            if version.is_none() {
+                if let Some((label, p)) = bundled.first() {
+                    notes.push(format!("{label} found at {}. It has Claude Code built in. If nothing shows up after you start a Claude session, try running `claude` from a terminal instead.", p.display()));
+                    version = Some(format!("{label} (built-in Claude Code)"));
+                }
+            }
+        }
         if !config_exists {
             for alt in Self::alternate_paths() {
                 if alt.exists() {
-                    notes.push(format!("Found a Claude settings file at {} (AgentTracker uses {})", alt.display(), self.settings_path.display()));
+                    notes.push(format!("Found a Claude settings file at {} (Houndbit uses {})", alt.display(), self.settings_path.display()));
                 }
             }
         }
         if version.is_none() {
-            notes.push("The `claude` command wasn't found on PATH. Hooks can still be installed; they take effect when Claude Code runs.".into());
+            notes.push("We couldn't spot Claude Code in the usual places, but that's okay. The hooks are ready and will start working as soon as Claude Code runs. Try starting a Claude session (for example in the Code tab of the Claude desktop app), then check back here.".into());
         }
         let hooks_installed = read_json_file(&self.settings_path).ok().flatten().map(|c| !json_hooks::owned_events(&ClaudeFormat, &c).is_empty()).unwrap_or(false);
         DetectResult {
@@ -136,6 +286,29 @@ impl ClaudeConnector {
             hooks_installed,
             notes,
         }
+    }
+
+    /// The hook program our installed hooks point at, if any are installed.
+    pub fn installed_hook_path(&self) -> Option<std::path::PathBuf> {
+        let cfg = read_json_file(&self.settings_path).ok().flatten()?;
+        json_hooks::owned_events(&ClaudeFormat, &cfg).first().and_then(|(_, c)| hook_path_from_command(c))
+    }
+
+    /// Whether Houndbit's PreToolUse hook is installed with the long timeout the folder guard
+    /// needs. `None` when Houndbit's Claude hooks aren't installed at all.
+    pub fn guard_ready(&self) -> Option<bool> {
+        let cfg = read_json_file(&self.settings_path).ok().flatten()?;
+        let groups = cfg.get("hooks")?.get("PreToolUse")?.as_array()?;
+        let owned: Vec<&Value> = groups
+            .iter()
+            .filter_map(|g| g.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .filter(|h| h.get("command").and_then(Value::as_str).map(super::is_owned_command).unwrap_or(false))
+            .collect();
+        if owned.is_empty() {
+            return None;
+        }
+        Some(owned.iter().all(|h| h.get("timeout").and_then(Value::as_u64).unwrap_or(0) >= PRE_TOOL_TIMEOUT_SECS))
     }
 
     pub fn preview(&self, hook_binary_path: &Path) -> Result<super::ConfigPreview> {
@@ -169,7 +342,7 @@ impl ClaudeConnector {
         let owned = cfg.as_ref().map(|c| json_hooks::owned_events(&ClaudeFormat, c)).unwrap_or_default();
         let missing: Vec<&str> = HOOK_EVENTS.iter().copied().filter(|e| !owned.iter().any(|(oe, _)| oe == e)).collect();
         steps.push(TestStep {
-            name: "AgentTracker hooks".into(),
+            name: "Houndbit hooks".into(),
             ok: missing.is_empty(),
             detail: if missing.is_empty() { format!("{} hooks installed", owned.len()) } else { format!("Missing: {}", missing.join(", ")) },
         });
@@ -186,7 +359,7 @@ impl ClaudeConnector {
             c(EventType::ToolFinished, true, "PostToolUse hook"),
             c(EventType::AgentReportedCompletion, true, "Stop hook — the agent *says* it is done; files are verified separately"),
             c(EventType::SessionEnded, true, "SessionEnd hook"),
-            c(EventType::CaptureError, true, "Generated by AgentTracker when a payload can't be understood"),
+            c(EventType::CaptureError, true, "Generated by Houndbit when a payload can't be understood"),
         ]
     }
 }
@@ -196,6 +369,12 @@ impl ClaudeConnector {
 pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
     let p = &env.payload;
     let name = p.get("hook_event_name").and_then(Value::as_str).unwrap_or(&env.hook_event);
+    // Cursor also runs Claude Code's hooks (its "third-party hooks" setting), but sends its own
+    // camelCase event names and fields. Those runs are recorded by the Cursor connection, so they're
+    // skipped here instead of showing up as "Couldn't understand a message from the agent".
+    if p.get("cursor_version").is_some() || name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return None;
+    }
     let t = match name {
         "SessionStart" => EventType::SessionStarted,
         "UserPromptSubmit" => EventType::TaskSubmitted,
@@ -220,6 +399,106 @@ pub fn normalize(env: &HookEnvelope) -> Option<AgentEvent> {
         EventType::AgentReportedCompletion => json!({"stop_hook_active": p.get("stop_hook_active")}),
         EventType::CaptureError => json!({"error": format!("unrecognized Claude Code hook \"{name}\""), "payload": p}),
     };
+    // Where Claude Code keeps its own record of this conversation (read later for the report's
+    // "Conversation" section). Only plausible paths inside a Claude folder are kept.
+    if let (Some(tp), Some(obj)) = (p.get("transcript_path").and_then(Value::as_str).and_then(crate::conversation::plausible_transcript_path), ev.payload_redacted.as_object_mut()) {
+        obj.insert("transcript_path".into(), Value::String(tp));
+    }
     ev.redact();
     Some(ev)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_claude_outside_path() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let local = t.path().join("local");
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local.clone()));
+        assert!(cli.is_empty() && bundled.is_empty());
+
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/claude.exe"), b"").unwrap();
+        std::fs::create_dir_all(local.join("AnthropicClaude")).unwrap();
+        std::fs::create_dir_all(home.join(".vscode/extensions/anthropic.claude-code-2.1.0")).unwrap();
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local));
+        assert_eq!(cli, vec![home.join(".local/bin/claude.exe")]);
+        assert_eq!(bundled.len(), 2);
+        assert_eq!(bundled[0].0, "Claude desktop app");
+        assert_eq!(bundled[1].0, "Claude Code editor extension");
+    }
+
+    fn fake_exe(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join("claude.exe");
+        std::fs::write(&exe, b"").unwrap();
+        exe
+    }
+
+    #[test]
+    fn finds_msix_desktop_app_newest_version_first() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let local = t.path().join("local");
+        let pkg = local.join("Packages").join("Claude_pzs8sxrjxfjjc");
+        let cc = pkg.join("LocalCache").join("Roaming").join("Claude").join("claude-code");
+        let older = fake_exe(&cc.join("2.1.9"));
+        let newer = fake_exe(&cc.join("2.1.10"));
+        // A folder without claude.exe and an unrelated package are ignored.
+        std::fs::create_dir_all(cc.join("2.2.0")).unwrap();
+        std::fs::create_dir_all(local.join("Packages").join("Microsoft.Something_abc")).unwrap();
+
+        let (cli, bundled) = find_claude_installs(&home, None, Some(local));
+        assert_eq!(cli, vec![newer.clone(), older]);
+        assert!(is_desktop_bundled(&newer));
+        assert_eq!(bundled, vec![("Claude desktop app", pkg)]);
+    }
+
+    #[test]
+    fn finds_appdata_desktop_app_layout() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let appdata = t.path().join("roaming");
+        let local = t.path().join("local");
+        let exe = fake_exe(&appdata.join("Claude").join("claude-code").join("1.0.5"));
+        std::fs::create_dir_all(local.join("Claude").join("logs")).unwrap();
+
+        let (cli, bundled) = find_claude_installs(&home, Some(appdata.clone()), Some(local.clone()));
+        assert_eq!(cli, vec![exe.clone()]);
+        assert!(is_desktop_bundled(&exe));
+        assert!(!is_desktop_bundled(&home.join(".local/bin/claude.exe")));
+        assert_eq!(bundled, vec![("Claude desktop app", appdata.join("Claude")), ("Claude desktop app", local.join("Claude"))]);
+    }
+
+    #[test]
+    fn install_gives_pre_tool_use_a_long_timeout_and_upgrades_old_installs() {
+        let t = tempfile::tempdir().unwrap();
+        let settings = t.path().join("settings.json");
+        let hook = t.path().join("agenttracker-hook.exe");
+        std::fs::write(&hook, b"").unwrap();
+        let c = ClaudeConnector::with_paths(settings.clone(), t.path().join("state"));
+        assert_eq!(c.guard_ready(), None);
+        c.install(&hook).unwrap();
+        assert_eq!(c.guard_ready(), Some(true));
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(cfg["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 120);
+        assert_eq!(cfg["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"], 5);
+
+        // An older install used 5 seconds everywhere; installing again fixes it.
+        let mut old = cfg.clone();
+        old["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(5);
+        std::fs::write(&settings, old.to_string()).unwrap();
+        assert_eq!(c.guard_ready(), Some(false));
+        c.install(&hook).unwrap();
+        assert_eq!(c.guard_ready(), Some(true));
+    }
+
+    #[test]
+    fn version_folders_sort_numerically() {
+        assert!(version_key("2.1.10") > version_key("2.1.9"));
+        assert!(version_key("10.0.0") > version_key("9.9.9"));
+    }
 }

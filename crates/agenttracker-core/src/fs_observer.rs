@@ -223,7 +223,7 @@ pub struct Snapshotter {
     pub after_hash_hook: Option<HashHook>,
 }
 
-fn mtime_ms(md: &fs::Metadata) -> Option<i64> {
+pub(crate) fn mtime_ms(md: &fs::Metadata) -> Option<i64> {
     md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64)
 }
 
@@ -453,14 +453,14 @@ fn err_entry(rel: &str, t: EntryType, observed_ts: i64, detail: String) -> Manif
 }
 
 #[cfg(windows)]
-fn is_reparse_point(md: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(md: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[cfg(not(windows))]
-fn is_reparse_point(_md: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(_md: &fs::Metadata) -> bool {
     false
 }
 

@@ -1,4 +1,4 @@
-//! Stable, privacy-preserving machine fingerprint for AgentTracker.
+//! Stable, privacy-preserving machine fingerprint for Houndbit.
 //! Only a SHA-256 hash is ever used; raw identifiers never leave the machine.
 use sha2::{Digest, Sha256};
 
@@ -24,7 +24,7 @@ fn primary_id() -> String {
     String::new()
 }
 
-/// Product-scoped fingerprint for AgentTracker.
+/// Product-scoped fingerprint for Houndbit.
 pub fn fingerprint_from(primary: &str) -> String {
     let primary = if primary.is_empty() { format!("node:{}", machine_name()) } else { primary.to_string() };
     let s = format!("agenttracker-v1|{}|{}|{}", primary, std::env::consts::OS, std::env::consts::ARCH);

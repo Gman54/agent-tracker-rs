@@ -1,4 +1,4 @@
-//! AgentTracker acceptance tests (spec §15, automatable items).
+//! Houndbit acceptance tests (spec §15, automatable items).
 //!
 //! Every test here is a **fake-agent contract test**: agent activity is simulated with
 //! hand-built hook envelopes (documented Claude Code hook JSON) and ordinary file operations.
@@ -876,7 +876,7 @@ fn test_copilot_install_idempotent() {
     assert!(r2.added.is_empty() && r3.added.is_empty() && r3.updated.is_empty());
     assert!(!c.preview(&bin).unwrap().changes);
     assert!(c.detect().hooks_installed);
-    assert!(c.connection_test().steps.iter().any(|s| s.name == "AgentTracker hooks" && s.ok));
+    assert!(c.connection_test().steps.iter().any(|s| s.name == "Houndbit hooks" && s.ok));
 }
 
 // fake-agent contract test
@@ -890,7 +890,7 @@ fn test_copilot_uninstall_preserves_unrelated() {
     std::fs::write(&bin, b"fake").unwrap();
     let c = CopilotConnector::with_paths(hooks.clone(), dir.path().join("state"));
 
-    // Case 1: untouched since install → AgentTracker's file goes away entirely (or is left with none of its hooks).
+    // Case 1: untouched since install → Houndbit's file goes away entirely (or is left with none of its hooks).
     c.install(&bin).unwrap();
     c.uninstall().unwrap();
     if hooks.exists() {
@@ -1005,4 +1005,250 @@ fn test_copilot_unsupported_version() {
     fx.deliver(serde_json::to_value(copilot_env("sessionStart", 5, json!({"sessionId": "cp-ok", "timestamp": 5}))).unwrap());
     assert_eq!(fx.engine.events.count().unwrap(), 2);
     assert_eq!(fx.engine.events.by_session("cp-ok").unwrap().len(), 1);
+}
+
+/// Automatic tasks: a prompt with a working folder starts a task, and "Stop" checks it.
+#[test]
+fn automatic_task_starts_on_prompt_and_checks_on_stop() {
+    use agenttracker_core::task::Lifecycle;
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-auto", "cwd": cwd, "prompt": "Create notes.txt with a greeting"})));
+    let tasks = fx.engine.tasks.list().unwrap();
+    assert_eq!(tasks.len(), 1, "one automatic task");
+    let t = &tasks[0];
+    assert!(t.is_auto());
+    assert_eq!(t.lifecycle, Lifecycle::Running);
+    assert_eq!(t.title, "Create notes.txt with a greeting");
+    // Titles can be renamed; the original request stays as it was.
+    let renamed = fx.engine.tasks.set_title(&t.id, "  Greeting note  ").unwrap();
+    assert_eq!(renamed.title, "Greeting note");
+    assert_eq!(fx.engine.tasks.get(&t.id).unwrap().instruction, "Create notes.txt with a greeting");
+    assert!(fx.engine.tasks.set_title(&t.id, "   ").is_err());
+
+    let file = work.join("notes.txt");
+    std::fs::write(&file, "hello").unwrap();
+    fx.deliver(claude_envelope("PostToolUse", 2_000, json!({"session_id": "s-auto", "cwd": cwd, "tool_name": "Write", "tool_input": {"file_path": file.to_string_lossy()}, "tool_response": {"success": true}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-auto", "cwd": cwd})));
+
+    let t = fx.engine.tasks.get(&t.id).unwrap();
+    assert_eq!(t.lifecycle, Lifecycle::Completed);
+    let runs = fx.engine.results.runs_for_task(&t.id).unwrap();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(status_of(run, "required_outputs_exist"), CheckStatus::Passed);
+    assert_eq!(status_of(run, "edits_inside_folder"), CheckStatus::Passed);
+    assert_eq!(status_of(run, "no_unexpected_deletions"), CheckStatus::Passed);
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Passed));
+}
+
+/// Automatic tasks: a deleted file and an edit outside the folder are both caught.
+#[test]
+fn automatic_task_catches_deletion_and_outside_edit() {
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-bad", "cwd": cwd, "prompt": "Tidy up"})));
+    std::fs::remove_file(work.join("keep.txt")).unwrap();
+    let outside = fx.dir.path().join("elsewhere.txt");
+    std::fs::write(&outside, "x").unwrap();
+    fx.deliver(claude_envelope("PostToolUse", 2_000, json!({"session_id": "s-bad", "cwd": cwd, "tool_name": "Write", "tool_input": {"file_path": outside.to_string_lossy()}, "tool_response": {"success": true}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-bad", "cwd": cwd})));
+    let t = &fx.engine.tasks.list().unwrap()[0];
+    let run = &fx.engine.results.runs_for_task(&t.id).unwrap()[0];
+    assert_eq!(status_of(run, "no_unexpected_deletions"), CheckStatus::Failed);
+    assert_eq!(status_of(run, "edits_inside_folder"), CheckStatus::Failed);
+    assert_eq!(run.overall_verdict, Some(CheckStatus::Failed));
+}
+
+/// Automatic tasks: a quick name list is taken when the prompt arrives and tied to the task, and
+/// the full snapshot's times are kept for the report.
+#[test]
+fn automatic_task_takes_a_quick_name_list_when_the_prompt_arrives() {
+    use agenttracker_core::quick_list;
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    std::fs::write(work.join("keep.txt"), "keep me").unwrap();
+    std::fs::write(work.join("sub/also.txt"), "me too").unwrap();
+    let cwd = work.to_string_lossy().into_owned();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-quick", "cwd": cwd, "prompt": "Tidy up"})));
+    let t = fx.engine.tasks.list().unwrap()[0].clone();
+    // The list runs in the background; give it a moment on a slow machine.
+    let mut lists = vec![];
+    for _ in 0..50 {
+        lists = quick_list::for_task(&fx.engine.db, &t.id).unwrap();
+        if lists.first().map(|l| l.finished_at.is_some()).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(lists.len(), 1, "one quick list, tied to the task");
+    let q = &lists[0];
+    assert!(q.complete());
+    assert_eq!(q.file_count, 2);
+    assert!(q.entries.iter().any(|e| e.rel_path == "sub/also.txt"));
+    let (bs, bf) = quick_list::baseline_times(&fx.engine.db, &t.id).unwrap().expect("full snapshot times kept");
+    assert!(q.received_at <= bs && bs <= bf);
+    let tl = quick_list::timeline_for_task(&fx.engine.db, &t.id, &[]);
+    assert_eq!(tl["rows"][0]["label"], "Your request arrived");
+    assert_eq!(tl["rows"][1]["text"].as_str().unwrap().split(' ').next(), Some("2"));
+    // Deleting the task removes its list.
+    fx.engine.db.delete_task_data(&t.id).unwrap();
+    assert!(quick_list::for_task(&fx.engine.db, &t.id).unwrap().is_empty());
+}
+
+/// Automatic tasks can be turned off in Settings.
+#[test]
+fn automatic_tasks_respect_the_setting() {
+    let fx = Fixture::new();
+    fx.collector.set_engine(fx.engine.clone());
+    fx.db.set_setting("auto_tasks", "0").unwrap();
+    let work = fx.dir.path().join("project");
+    std::fs::create_dir_all(&work).unwrap();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-off", "cwd": work.to_string_lossy(), "prompt": "Hi"})));
+    assert!(fx.engine.tasks.list().unwrap().is_empty());
+}
+
+// Conversation section: the hook's transcript_path is stored with the task's events and read back.
+#[test]
+fn test_claude_transcript_path_is_linked_to_the_task() {
+    use agenttracker_core::conversation;
+    let fx = Fixture::new();
+    let work = named_workspace(&fx, "letters", &[("a.txt", "a")]);
+    let t = task_in(&fx, &work, "Letters");
+    fx.engine.capture_baseline(&t.id).unwrap();
+    fx.engine.start(&t.id).unwrap();
+
+    let root = fx.dir.path().join("home").join(".claude");
+    let proj = root.join("projects").join("C--work-letters");
+    std::fs::create_dir_all(&proj).unwrap();
+    let record = proj.join("s-conv.jsonl");
+    std::fs::write(&record, include_str!("../../crates/agenttracker-core/tests/fixtures/claude_transcript.jsonl")).unwrap();
+    let cwd = work.to_string_lossy().to_string();
+    let tp = record.to_string_lossy().to_string();
+    let outside = fx.dir.path().join("not-claude.jsonl").to_string_lossy().to_string();
+    fx.deliver(claude_envelope("UserPromptSubmit", 1_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": tp, "prompt": "make letters"})));
+    // A path outside any Claude folder is never stored.
+    fx.deliver(claude_envelope("PreToolUse", 2_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": outside, "tool_name": "Write", "tool_input": {}})));
+    fx.deliver(claude_envelope("Stop", 3_000, json!({"session_id": "s-conv", "cwd": cwd, "transcript_path": tp})));
+
+    let events = fx.engine.events.by_task(&t.id).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events.iter().filter(|e| e.payload_redacted.get("transcript_path").is_some()).count(), 2);
+    assert_eq!(conversation::transcript_path_from_events(&events).as_deref(), Some(tp.as_str()));
+
+    let run = fx.engine.verify(&t.id).unwrap();
+    let task = fx.engine.tasks.get(&t.id).unwrap();
+    assert_eq!(task.session_id.as_deref(), Some("s-conv"));
+    let roots = vec![root.clone()];
+    let conv = conversation::for_task(&task, &run, &events, &roots);
+    assert_eq!(conv["status"], "ok", "{conv:#}");
+    assert_eq!(conv["entries"].as_array().unwrap().len(), 8);
+    assert_eq!(conv["entries"][0]["kind"], "you");
+
+    // "What it said vs what really happened": Stop = said it's done; Claude's last words are quoted.
+    use agenttracker_core::report::said_vs_happened;
+    use agenttracker_core::verifiers::CheckStatus;
+    let last_claude = conv["entries"].as_array().unwrap().iter().rev().find(|e| e["kind"] == "claude").unwrap()["text"].as_str().unwrap().to_string();
+    let s = said_vs_happened(&task, &run, &events, &conv);
+    assert_eq!(s["claimed"], true, "{s:#}");
+    assert!(s["said"].as_str().unwrap().starts_with("Claude said it was done"), "{s:#}");
+    let first_words: String = last_claude.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+    assert!(s["quote"].as_str().unwrap().starts_with(&first_words), "{s:#}");
+    let mut failing = run.clone();
+    failing.overall_verdict = Some(CheckStatus::Failed);
+    if let Some(r) = failing.results.first_mut() {
+        r.status = CheckStatus::Failed;
+    }
+    let s = said_vs_happened(&task, &failing, &events, &conv);
+    assert_eq!(s["tone"], "bad");
+    assert_eq!(s["headline"], "It said it was done, but a check found a problem.");
+    assert_eq!(s["verification"]["label"], "A check found a problem");
+    if !failing.results.is_empty() {
+        assert!(s["happened"].as_str().unwrap().contains("failed:"), "{s:#}");
+    }
+    let mut passing = run.clone();
+    passing.overall_verdict = Some(CheckStatus::Passed);
+    for r in passing.results.iter_mut() {
+        r.status = CheckStatus::Passed;
+    }
+    assert_eq!(said_vs_happened(&task, &passing, &events, &conv)["headline"], "It said it was done, and all required checks passed.");
+    // Nothing heard and no record: plain wording, no claim.
+    let s = said_vs_happened(&task, &passing, &[], &serde_json::Value::Null);
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["said"], "I didn't hear anything from Claude.");
+    assert_eq!(s["headline"], "All required checks passed.");
+    assert_eq!(s["verification"]["label"], "All required checks passed");
+    // Last words but no "done" signal: quoted, not counted as a claim.
+    let s = said_vs_happened(&task, &failing, &[], &conv);
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["headline"], "Here's what it said last, but a check found a problem.");
+    let html = agenttracker_core::report::export_html(&task, &failing, &events, &conv);
+    assert!(html.contains("What it said vs what really happened"));
+    assert!(agenttracker_core::report::export_json(&task, &failing, &events, &conv)["said_vs_happened"]["tone"] == "bad");
+
+    // No checks at all: "Verification wasn't run", never "couldn't confirm".
+    let mut empty = run.clone();
+    empty.results.clear();
+    empty.overall_verdict = Some(CheckStatus::UnableToVerify);
+    let s = said_vs_happened(&task, &empty, &events, &conv);
+    assert_eq!(s["verification"]["state"], "not_run", "{s:#}");
+    assert_eq!(s["verification"]["label"], "Verification wasn't run");
+    assert_eq!(s["verification"]["detail"], "Add checks to evaluate this task.");
+    assert_eq!(s["headline"], "It said it was done, but verification wasn't run.");
+    assert_eq!(s["tone"], "neutral");
+    let html = agenttracker_core::report::export_html(&task, &empty, &events, &conv);
+    assert!(html.contains("Verification wasn't run"));
+    assert!(!html.to_lowercase().contains("couldn't confirm everything"));
+
+    // Claude's last message is an API error: "Agent encountered an error", never "said it was done",
+    // even though Claude Code still sent its Stop signal.
+    let mut err_conv = conv.clone();
+    err_conv["entries"].as_array_mut().unwrap().push(json!({"kind": "claude", "text": "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}));
+    let s = said_vs_happened(&task, &passing, &events, &err_conv);
+    assert_eq!(s["agent_error"], true, "{s:#}");
+    assert_eq!(s["claimed"], false);
+    assert_eq!(s["headline"], "Agent encountered an error");
+    assert_eq!(s["session"]["label"], "Agent encountered an error");
+    assert!(!s["said"].as_str().unwrap().contains("said it was done"), "{s:#}");
+    // Session and verification stay separate items.
+    assert_eq!(s["verification"]["label"], if passing.results.is_empty() { "Verification wasn't run" } else { "All required checks passed" });
+
+    // Older events without a saved path: found by the session id instead.
+    let bare: Vec<AgentEvent> = events
+        .iter()
+        .cloned()
+        .map(|mut e| {
+            e.payload_redacted.as_object_mut().unwrap().remove("transcript_path");
+            e
+        })
+        .collect();
+    assert_eq!(conversation::for_task(&task, &run, &bare, &roots)["status"], "ok");
+
+    // The record was moved away.
+    std::fs::rename(&record, proj.join("moved.txt")).unwrap();
+    let conv = conversation::for_task(&task, &run, &events, &roots);
+    assert_eq!(conv["status"], "missing");
+    assert!(conv["message"].as_str().unwrap().contains("isn't where it used to be"));
+
+    // Reports include the conversation.
+    let json_report = agenttracker_core::report::export_json(&task, &run, &events, &conv);
+    assert_eq!(json_report["conversation"]["status"], "missing");
+    assert!(agenttracker_core::report::export_html(&task, &run, &events, &conv).contains("<h2>Conversation</h2>"));
+
+    // A manual task has no conversation.
+    let mut manual = task.clone();
+    manual.connector = "manual".into();
+    assert_eq!(conversation::for_task(&manual, &run, &[], &roots)["status"], "not_claude");
+    assert_eq!(conversation::for_task(&task, &run, &[], &[fx.dir.path().join("nowhere")])["status"], "no_record");
 }

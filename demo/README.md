@@ -1,6 +1,6 @@
 # Demo task: "Copy sample files to output folder"
 
-A harmless two-minute walkthrough that shows the whole AgentTracker flow. Nothing outside the demo
+A harmless two-minute walkthrough that shows the whole Houndbit flow. Nothing outside the demo
 folder is touched.
 
 ## What's in here
@@ -19,9 +19,9 @@ The checks:
 5. **Changes stayed in bounds** — nothing changed outside `expected_output/`.
 
 ## Walkthrough
-1. Open AgentTracker. On **Home**, click **Try the demo**. AgentTracker copies these sample files
+1. Open Houndbit. On **Home**, click **Try the demo**. Houndbit copies these sample files
    into its own data folder (shown in a message) and creates the task. You land on **Live Task**.
-2. Click **📸 Take the "before" snapshot**. AgentTracker fingerprints every file in the folders.
+2. Click **📸 Take the "before" snapshot**. Houndbit fingerprints every file in the folders.
 3. Click **▶️ Start**. Now do the work — either:
    - **with an agent**: open the demo folder in Claude Code (connected under **Connections**) and
      ask: *"Copy every file from input into expected_output. Don't change anything in input."*
@@ -35,4 +35,4 @@ Run the demo again (each run gets a fresh folder) and, before checking:
 - edit `input/ideas.txt` → *Originals unchanged* and *Changes stayed in bounds* **fail**;
 - open `input/ideas.txt` in a program that locks it while checking → **Unable to verify**.
 
-AgentTracker never undoes anything — it only reports what it found.
+Houndbit never undoes anything — it only reports what it found.

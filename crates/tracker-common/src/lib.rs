@@ -1,5 +1,6 @@
-//! Shared building blocks used by AgentTracker.
+//! Shared building blocks used by Houndbit.
 pub mod canonical;
+pub mod guard;
 pub mod hash_chain;
 pub mod license;
 pub mod machine_id;

@@ -49,7 +49,9 @@ pub const SETTING_DEFAULTS: &[(&str, &str)] = &[
     ("start_with_windows", "0"),
     ("keep_in_tray", "1"),
     ("auto_verify", "0"),
+    ("auto_tasks", "1"),
     ("export_dir", ""),
+    ("git_tracking", "1"),
 ];
 
 impl AppState {
@@ -100,6 +102,39 @@ impl AppState {
 
     fn copilot(&self) -> CopilotConnector {
         CopilotConnector { state_dir: self.agenttracker_home.join("connectors"), ..CopilotConnector::for_user() }
+    }
+
+    /// One-time tidy-ups after updating from an older install (AgentTracker or TrailFox) to Houndbit. The new installer
+    /// lives in a new folder (%LOCALAPPDATA%\Houndbit) and removes the old one, so:
+    /// - agent hooks that still point at the old, now-missing hook program are re-pointed at the
+    ///   one next to this app (only Houndbit's own entries are touched, as with "Connect");
+    /// - if "Start with Windows" is on, its Run entry is rewritten for this app's location.
+    /// Safe to call on every start: it does nothing when everything is already in place.
+    pub fn after_update_fixups(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(current) = self.hook_binary.clone().filter(|p| p.exists()) {
+            let stale = |p: Option<PathBuf>| p.is_some_and(|p| !p.exists());
+            let fixes: [(&str, bool, Box<dyn Fn() -> crate::Result<crate::connectors::InstallReport>>); 3] = [
+                // Also re-applied when an older install gave PreToolUse too short a timeout for the folder guard.
+                ("Claude Code", stale(self.claude().installed_hook_path()) || self.claude().guard_ready() == Some(false), Box::new(|| self.claude().install(&current))),
+                ("Cursor", stale(self.cursor().installed_hook_path()) || self.cursor().guard_ready() == Some(false), Box::new(|| self.cursor().install(&current))),
+                ("Copilot", stale(self.copilot().installed_hook_path()), Box::new(|| self.copilot().install(&current))),
+            ];
+            for (name, needs_fix, fix) in fixes {
+                if needs_fix {
+                    match fix() {
+                        Ok(_) => notes.push(format!("{name}: hooks now point at {}", current.display())),
+                        Err(e) => notes.push(format!("{name}: couldn't update hooks ({e})")),
+                    }
+                }
+            }
+        }
+        if self.setting("start_with_windows") == "1" {
+            if let Err(e) = apply_autostart(true) {
+                notes.push(format!("Start with Windows: {e}"));
+            }
+        }
+        notes
     }
 
     pub fn setting(&self, key: &str) -> String {
@@ -155,7 +190,7 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
     }
     if path.starts_with("/api/ui/") {
         if !st.has_session(req.headers()) {
-            return err(401, "Open AgentTracker from its window or tray icon");
+            return err(401, "Open Houndbit from its window or tray icon");
         }
         if req.method() != Method::GET && req.method() != Method::HEAD && hdr(req.headers(), CSRF_HEADER) != Some(CSRF_VALUE) {
             return err(403, "Missing CSRF header");
@@ -174,6 +209,12 @@ async fn guards(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Re
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with(state, Router::new())
+}
+
+/// Builds the router with additional UI routes (e.g. the decision runtime's `/api/ui/runtime/*`).
+/// Extra routes are merged before the guard layer, so they get the same session/CSRF/host checks.
+pub fn build_router_with(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/static/*name", get(static_file))
@@ -190,6 +231,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/retention/purge", post(retention_purge))
         .route("/api/ui/pick-folder", post(pick_folder))
         .route("/api/ui/runs/:id", get(run_get))
+        .route("/api/ui/runs/:id/conversation", get(run_conversation))
         .route("/api/ui/export/:fmt/:id", post(run_export))
         .route("/api/ui/incident/propose", post(incident_propose))
         .route("/api/ui/tasks/:id/live", get(task_live))
@@ -197,6 +239,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/tasks", get(tasks_list).post(task_create))
         .route("/api/ui/tasks/:id", get(task_get))
         .route("/api/ui/tasks/:id/checks", put(task_checks))
+        .route("/api/ui/tasks/:id/title", put(task_title))
         .route("/api/ui/tasks/:id/:action", post(task_action))
         .route("/api/ui/events/recent", get(events_recent))
         .route("/api/ui/templates", get(templates_list).post(template_create))
@@ -205,6 +248,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ui/license", post(license_set))
         .route("/api/ui/chain/verify", post(chain_verify))
         .route("/api/ui/demo", post(demo_create))
+        .route("/api/ui/git/repos", get(git_repos_list).post(git_repo_add))
+        .route("/api/ui/git/repos/:id", delete(git_repo_remove))
+        .route("/api/ui/git/repos/:id/github", post(git_repo_github))
+        .route("/api/ui/git/repos/:id/fetch", post(git_repo_fetch))
+        .route("/api/ui/git/fetch-all", post(git_fetch_all))
+        .route("/api/ui/git/github-token", post(git_token_set))
+        .route("/api/ui/git/open-link", post(git_open_link))
+        .route("/api/ui/git/repos/:id/commits", get(git_commits))
+        .route("/api/ui/git/repos/:id/commits/:sha", get(git_commit_inspect))
+        .merge(extra)
         .fallback(|| async { err(404, "Not found") })
         .layer(middleware::from_fn_with_state(state.clone(), guards))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -215,6 +268,10 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> s
     axum::serve(listener, build_router(state)).await
 }
 
+pub async fn serve_with(listener: tokio::net::TcpListener, state: Arc<AppState>, extra: Router<Arc<AppState>>) -> std::io::Result<()> {
+    axum::serve(listener, build_router_with(state, extra)).await
+}
+
 // ---- static + launch -------------------------------------------------------------------------------
 const INDEX_HTML: &[u8] = include_bytes!("../../../static/index.html");
 
@@ -223,7 +280,12 @@ fn static_asset(name: &str) -> Option<(&'static [u8], &'static str)> {
         "index.html" => (INDEX_HTML, "text/html; charset=utf-8"),
         "app.js" => (include_bytes!("../../../static/app.js"), "text/javascript; charset=utf-8"),
         "style.css" => (include_bytes!("../../../static/style.css"), "text/css; charset=utf-8"),
+        "runtime.js" => (include_bytes!("../../../static/runtime.js"), "text/javascript; charset=utf-8"),
+        "protect.js" => (include_bytes!("../../../static/protect.js"), "text/javascript; charset=utf-8"),
+        "code.js" => (include_bytes!("../../../static/code.js"), "text/javascript; charset=utf-8"),
         "icon.svg" => (include_bytes!("../../../static/icon.svg"), "image/svg+xml"),
+        "houndbit-logo.png" => (include_bytes!("../../../static/houndbit-logo.png"), "image/png"),
+        "houndbit-mark.png" => (include_bytes!("../../../static/houndbit-mark.png"), "image/png"),
         _ => return None,
     })
 }
@@ -250,7 +312,7 @@ async fn launch(State(st): State<Arc<AppState>>, Query(q): Query<HashMap<String,
         valid
     };
     if !valid {
-        return (StatusCode::FORBIDDEN, "This link has expired. Open AgentTracker from its window or tray icon.").into_response();
+        return (StatusCode::FORBIDDEN, "This link has expired. Open Houndbit from its window or tray icon.").into_response();
     }
     let sid = security::token_urlsafe(32);
     st.ui_sessions.lock().unwrap_or_else(|p| p.into_inner()).insert(sid.clone());
@@ -442,7 +504,7 @@ async fn connector_action(State(st): State<Arc<AppState>>, UrlPath((name, action
     let s = st.clone();
     let r = blocking(move || -> crate::Result<Value> {
         let hook = s.hook_binary.clone();
-        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The AgentTracker hook program wasn't found next to the app. Reinstall AgentTracker.".into()));
+        let need_hook = || hook.clone().filter(|p| p.exists()).ok_or_else(|| CoreError::Invalid("The Houndbit hook program wasn't found next to the app. Reinstall Houndbit.".into()));
         let mut v = match (name.as_str(), action.as_str()) {
             ("claude_code", "install") => serde_json::to_value(s.claude().install(&need_hook()?)?)?,
             ("claude_code", "uninstall") => serde_json::to_value(s.claude().uninstall()?)?,
@@ -500,6 +562,8 @@ async fn task_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>)
             }
         }
         crate::event::sort_source_order(&mut events);
+        let window = crate::event::window_for_task_page(&task, &events);
+        let events = crate::event::only_this_task(events, window);
         let baselines: Vec<Value> = e
             .manifests
             .latest_for_task(&id, crate::fs_observer::ManifestType::Baseline)?
@@ -510,10 +574,14 @@ async fn task_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>)
                     "unstable": m.entries.iter().filter(|x| x.stability == crate::fs_observer::Stability::Unstable).count()})
             })
             .collect();
+        let mut runs = e.results.runs_for_task(&id)?;
+        for r in runs.iter_mut() {
+            crate::verifiers::reread_legacy(&task, r, &events);
+        }
         Ok(json!({
             "task": task,
             "events": events,
-            "runs": e.results.runs_for_task(&id)?,
+            "runs": runs,
             "baselines": baselines,
             "live_file_events": e.live_hint_count(&id),
         }))
@@ -523,6 +591,10 @@ async fn task_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>)
 
 async fn task_checks(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(checks): Json<Vec<NewCheck>>) -> Response {
     ok(st.engine.tasks.update_checks(&id, checks))
+}
+
+async fn task_title(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(b): Json<Value>) -> Response {
+    ok(st.engine.tasks.set_title(&id, b.get("title").and_then(Value::as_str).unwrap_or("")))
 }
 
 async fn task_action(State(st): State<Arc<AppState>>, UrlPath((id, action)): UrlPath<(String, String)>, body: Bytes) -> Response {
@@ -617,11 +689,16 @@ fn apply_autostart(enabled: bool) -> std::result::Result<(), String> {
     {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-        let mut cmd = std::process::Command::new("reg");
+        // Before the renames the entry was called "AgentTracker" and then "TrailFox", pointing at
+        // the old install folders. Always clear those so Windows never starts a stale copy.
+        for old in ["AgentTracker", "TrailFox"] {
+            let _ = crate::connectors::hidden_command("reg").args(["delete", key, "/v", old, "/f"]).output();
+        }
+        let mut cmd = crate::connectors::hidden_command("reg");
         if enabled {
-            cmd.args(["add", key, "/v", "AgentTracker", "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
+            cmd.args(["add", key, "/v", APP_NAME, "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"]);
         } else {
-            cmd.args(["delete", key, "/v", "AgentTracker", "/f"]);
+            cmd.args(["delete", key, "/v", APP_NAME, "/f"]);
         }
         let out = cmd.output().map_err(|e| e.to_string())?;
         if !enabled || out.status.success() {
@@ -691,9 +768,16 @@ async fn pick_folder(State(st): State<Arc<AppState>>) -> Response {
 
 /// Loads a run plus the frozen task definition it was checked against and the agent events.
 fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crate::task::TaskDefinition, crate::store::VerificationRun, Vec<crate::event::AgentEvent>)> {
-    let run = engine.results.get_run(run_id)?.ok_or_else(|| CoreError::NotFound(format!("run {run_id}")))?;
+    let mut run = engine.results.get_run(run_id)?.ok_or_else(|| CoreError::NotFound(format!("run {run_id}")))?;
     let current = engine.tasks.get(&run.task_id)?;
-    let task = engine.tasks.snapshot(&run.task_id, run.definition_version)?.unwrap_or(current);
+    let task = match engine.tasks.snapshot(&run.task_id, run.definition_version)? {
+        // The name is only a label, so a renamed task shows its new name on older results too.
+        Some(mut snap) => {
+            snap.title = current.title.clone();
+            snap
+        }
+        None => current,
+    };
     let mut events = engine.events.by_task(&run.task_id)?;
     if let Some(sid) = &task.session_id {
         for e in engine.events.by_session(sid)? {
@@ -703,11 +787,40 @@ fn load_run(engine: &crate::engine::Engine, run_id: &str) -> crate::Result<(crat
         }
     }
     crate::event::sort_source_order(&mut events);
+    let window = crate::event::task_window(task.created_at, run.started_at, run.finished_at, &events);
+    let events = crate::event::only_this_task(events, window);
+    crate::verifiers::reread_legacy(&task, &mut run, &events);
     Ok((task, run, events))
 }
 
 async fn run_get(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
-    ok(load_run(&st.engine, &id).map(|(task, run, events)| json!({"task": task, "run": run, "events": events})))
+    ok(load_run(&st.engine, &id).map(|(task, run, events)| {
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &Value::Null);
+        let timeline = crate::quick_list::timeline_for_task(&st.engine.db, &task.id, &events);
+        json!({"task": task, "run": run, "events": events, "said_vs_happened": svh, "timeline": timeline})
+    }))
+}
+
+/// Claude Code's own record of the conversation behind this run (read-only, file read off the
+/// async threads so a big record never stalls the UI).
+async fn run_conversation(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let (task, run, events) = match load_run(&st.engine, &id) {
+        Ok(x) => x,
+        Err(e) => return core_err(e),
+    };
+    let roots = crate::conversation::claude_roots();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut v = crate::conversation::for_task(&task, &run, &events, &roots);
+        let svh = crate::report::said_vs_happened(&task, &run, &events, &v);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("said_vs_happened".into(), svh);
+        }
+        v
+    });
+    match read.await {
+        Ok(v) => j(200, v),
+        Err(_) => err(500, "Couldn't read the conversation"),
+    }
 }
 
 async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath<(String, String)>) -> Response {
@@ -715,15 +828,20 @@ async fn run_export(State(st): State<Arc<AppState>>, UrlPath((fmt, id)): UrlPath
         Ok(x) => x,
         Err(e) => return core_err(e),
     };
-    let stamp = &run.id[..8.min(run.id.len())];
+    let stamp = run.id[..8.min(run.id.len())].to_string();
+    let conv = {
+        let (t, r, e, roots) = (task.clone(), run.clone(), events.clone(), crate::conversation::claude_roots());
+        tokio::task::spawn_blocking(move || crate::conversation::for_task(&t, &r, &e, &roots)).await.unwrap_or(Value::Null)
+    };
+    let timeline = crate::quick_list::timeline_for_task(&st.engine.db, &task.id, &events);
     let (body, mime, ext) = match fmt.as_str() {
-        "html" => (crate::report::export_html(&task, &run, &events), "text/html; charset=utf-8", "html"),
-        "json" => (serde_json::to_string_pretty(&crate::report::export_json(&task, &run, &events)).unwrap_or_default(), "application/json", "json"),
+        "html" => (crate::report::export_html_with(&task, &run, &events, &conv, &timeline), "text/html; charset=utf-8", "html"),
+        "json" => (serde_json::to_string_pretty(&crate::report::export_json_with(&task, &run, &events, &conv, &timeline)).unwrap_or_default(), "application/json", "json"),
         _ => return err(404, "Unknown export format"),
     };
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"agenttracker-report-{stamp}.{ext}\""))
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"houndbit-report-{stamp}.{ext}\""))
         .body(Body::from(body))
         .unwrap()
 }
@@ -765,6 +883,8 @@ async fn task_live(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>
             }
         }
         crate::event::sort_source_order(&mut events);
+        let window = crate::event::window_for_task_page(&task, &events);
+        let events = crate::event::only_this_task(events, window);
         let view = e.live_view(&id);
         let mut gaps: Vec<Value> = view.gaps.iter().map(|g| json!({"kind": "observer", "detail": g})).collect();
         let (errs, agent): (Vec<_>, Vec<_>) = events.into_iter().partition(|x| x.event_type == crate::event::EventType::CaptureError);
@@ -787,5 +907,115 @@ async fn task_live(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>
     match r {
         Ok(v) => ok(v),
         Err(resp) => resp,
+    }
+}
+
+// ---- git tracking ------------------------------------------------------------------------------------
+async fn git_repos_list(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).list()).await {
+        Ok(Ok(repos)) => j(
+            200,
+            json!({
+                "repos": repos,
+                "has_token": crate::gitwork::has_token(&st.engine.db),
+                "tracking": st.setting("git_tracking") != "0",
+            }),
+        ),
+        Ok(Err(e)) => core_err(e),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_add(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let Some(path) = body.get("path").and_then(Value::as_str).map(str::to_string) else { return err(400, "Pick a folder first") };
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).add(&path)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_repo_remove(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).remove(&id).map(|_| json!({"removed": true})))
+}
+
+async fn git_repo_github(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>) -> Response {
+    let enabled = body.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    ok(crate::gitwork::RepoStore::new(&st.engine.db).set_github(&id, enabled))
+}
+
+/// "Check the remote now": git fetch in the project (only remote-tracking branches change).
+async fn git_repo_fetch(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch(&id)).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// "Check all projects": fetches every project's remote; one failure never stops the rest.
+async fn git_fetch_all(State(st): State<Arc<AppState>>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || crate::gitwork::RepoStore::new(&db).fetch_all()).await {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_token_set(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let token = body.get("token").and_then(Value::as_str).unwrap_or("");
+    if token.trim().chars().any(char::is_whitespace) {
+        return err(400, "That doesn't look like a GitHub token.");
+    }
+    match crate::gitwork::set_token(&st.engine.db, token) {
+        Ok(()) => j(200, json!({"has_token": crate::gitwork::has_token(&st.engine.db)})),
+        Err(e) => core_err(e),
+    }
+}
+
+async fn git_commits(State(st): State<Arc<AppState>>, UrlPath(id): UrlPath<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(50);
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::matching::list_commits(std::path::Path::new(&repo.root), limit)
+    })
+    .await
+    {
+        Ok(r) => ok(r.map(|c| json!({"commits": c}))),
+        Err(resp) => resp,
+    }
+}
+
+async fn git_commit_inspect(State(st): State<Arc<AppState>>, UrlPath((id, sha)): UrlPath<(String, String)>) -> Response {
+    let db = st.engine.db.clone();
+    match blocking(move || {
+        let repo = crate::gitwork::RepoStore::new(&db).get(&id)?;
+        crate::gitwork::inspect_with_github(&db, &repo, &sha)
+    })
+    .await
+    {
+        Ok(r) => ok(r),
+        Err(resp) => resp,
+    }
+}
+
+/// Opens a GitHub page in the default browser. Only https://github.com/ links are allowed.
+async fn git_open_link(Json(body): Json<Value>) -> Response {
+    let url = body.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+    let safe = url.starts_with("https://github.com/") && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains('"');
+    if !safe {
+        return err(400, "Only GitHub links can be opened from here.");
+    }
+    #[cfg(windows)]
+    let r = crate::connectors::hidden_command("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+    match r {
+        Ok(_) => j(200, json!({"opened": true})),
+        Err(e) => err(500, &format!("Couldn't open the browser: {e}")),
     }
 }

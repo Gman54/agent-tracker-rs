@@ -20,7 +20,7 @@ pub struct Engine {
     pub templates: TemplateStore,
     pub registry: VerifierRegistry,
     pub snapshotter: Snapshotter,
-    /// AgentTracker's own files (DB, queue, evidence) — never snapshotted.
+    /// Houndbit's own files (DB, queue, evidence) — never snapshotted.
     pub exclude_paths: Vec<PathBuf>,
     observers: Mutex<HashMap<String, Vec<ObserverHandle>>>,
     hints: Mutex<HashMap<String, Vec<ChangeHint>>>,
@@ -95,8 +95,12 @@ impl Engine {
             self.tasks.transition(task_id, Lifecycle::Draft)?;
             return Err(CoreError::Invalid("Add at least one folder before taking the \"before\" snapshot".into()));
         }
+        let started = crate::now_ms();
         match self.snapshot_all(&t, ManifestType::Baseline) {
-            Ok(_) => self.tasks.transition(task_id, Lifecycle::Ready),
+            Ok(_) => {
+                let _ = crate::quick_list::record_baseline_times(&self.db, task_id, started, crate::now_ms());
+                self.tasks.transition(task_id, Lifecycle::Ready)
+            }
             Err(e) => {
                 let _ = self.tasks.transition(task_id, Lifecycle::Error);
                 Err(e)
@@ -127,12 +131,12 @@ impl Engine {
     }
 
     /// After an app restart: restart live watching for tasks that were running and record the
-    /// gap (changes made while AgentTracker was closed are only seen by the final snapshot).
+    /// gap (changes made while Houndbit was closed are only seen by the final snapshot).
     pub fn resume_running(&self) -> Result<Vec<String>> {
         let mut resumed = vec![];
         for t in self.tasks.list()? {
             if t.lifecycle == Lifecycle::Running && !self.observers.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&t.id) {
-                self.add_gap(&t.id, "AgentTracker was restarted while this task was running. Live watching resumed; changes made while it was closed will still be found by the final snapshot comparison.".into());
+                self.add_gap(&t.id, "Houndbit was restarted while this task was running. Live watching resumed; changes made while it was closed will still be found by the final snapshot comparison.".into());
                 self.start_observers(&t);
                 resumed.push(t.id.clone());
             }
@@ -265,12 +269,16 @@ impl Engine {
                     }
                 }
             }
+            let window = crate::event::task_window(task.created_at, started_at, None, &events);
+            let events = crate::event::only_this_task(events, window);
             let evidence = Evidence {
                 baselines: self.manifests.latest_for_task(task_id, ManifestType::Baseline)?,
                 verifications: self.manifests.latest_for_task(task_id, ManifestType::Verification)?,
                 events,
                 change_hints: self.hints.lock().unwrap_or_else(|p| p.into_inner()).remove(task_id).unwrap_or_default(),
                 task: Some(task.clone()),
+                quick_lists: crate::quick_list::for_task(&self.db, task_id)?,
+                baseline_finished_at: crate::quick_list::baseline_times(&self.db, task_id)?.map(|(_, f)| f),
             };
             Ok(self.run_checks(&task, &evidence, started_at))
         })();

@@ -15,7 +15,7 @@ impl Verifier for OriginalsUnchanged {
         "originals_unchanged"
     }
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "1.1.0"
     }
     fn required_evidence(&self) -> &[&'static str] {
         &["baseline_manifest", "verification_manifest"]
@@ -78,6 +78,9 @@ impl Verifier for OriginalsUnchanged {
             }
         }
         f.limitations.push("Compares file contents by SHA-256 at two moments; a change that was made and then reverted in between is not detectable here.".into());
+        if compared == 0 && f.failures.is_empty() && f.uncertain.is_empty() {
+            f.neutral = Some((super::CheckStatus::NotApplicable, "There were no protected items to compare.".into()));
+        }
         f.finish(self, format!("All {compared} protected item(s) are unchanged."))
     }
 }

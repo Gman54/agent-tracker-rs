@@ -125,9 +125,15 @@ pub struct TaskDefinition {
     pub session_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// "manual" (set up by the user) or "auto" (started when an agent received a prompt).
+    #[serde(default = "manual")]
+    pub origin: String,
 }
 
 impl TaskDefinition {
+    pub fn is_auto(&self) -> bool {
+        self.origin == "auto"
+    }
     pub fn folders_with(&self, role: FolderRole) -> Vec<String> {
         self.folders.iter().filter(|f| f.role == role).map(|f| f.folder_path.clone()).collect()
     }
@@ -210,7 +216,7 @@ impl TaskStore {
         let conn = self.db.conn();
         let row = conn
             .query_row(
-                "SELECT id, title, instruction, definition_version, lifecycle, created_at, updated_at, connector, session_id FROM tasks WHERE id = ?1",
+                "SELECT id, title, instruction, definition_version, lifecycle, created_at, updated_at, connector, session_id, origin FROM tasks WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
@@ -223,6 +229,7 @@ impl TaskStore {
                         r.get::<_, i64>(6)?,
                         r.get::<_, String>(7)?,
                         r.get::<_, Option<String>>(8)?,
+                        r.get::<_, String>(9)?,
                     ))
                 },
             )
@@ -257,6 +264,7 @@ impl TaskStore {
             created_at: row.5,
             updated_at: row.6,
             connector: row.7,
+            origin: row.9,
         })
     }
 
@@ -302,6 +310,24 @@ impl TaskStore {
         self.get(id)
     }
 
+    /// Marks how the task was created ("manual" or "auto").
+    pub fn set_origin(&self, id: &str, origin: &str) -> Result<()> {
+        self.db.conn().execute("UPDATE tasks SET origin = ?2 WHERE id = ?1", params![id, origin])?;
+        Ok(())
+    }
+
+    /// Renames a task (the short title shown in lists and headings). The original request is kept.
+    pub fn set_title(&self, id: &str, title: &str) -> Result<TaskDefinition> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(CoreError::Invalid("Please give the task a name".into()));
+        }
+        let title: String = title.chars().take(120).collect();
+        self.get(id)?;
+        self.db.conn().execute("UPDATE tasks SET title = ?2, updated_at = ?3 WHERE id = ?1", params![id, title, crate::now_ms()])?;
+        self.get(id)
+    }
+
     pub fn set_session(&self, id: &str, session_id: &str) -> Result<()> {
         self.db.conn().execute("UPDATE tasks SET session_id = ?2, updated_at = ?3 WHERE id = ?1", params![id, session_id, crate::now_ms()])?;
         Ok(())
@@ -344,9 +370,83 @@ impl TaskStore {
     }
 }
 
+const FILLER: &[&str] = &[
+    "please", "pls", "hey", "hi", "hello", "ok", "okay", "so", "now", "claude", "can you", "could you", "would you", "will you",
+    "i want you to", "i need you to", "i'd like you to", "i would like you to", "i want to", "i need to", "i'd like to", "help me",
+    "go ahead and", "let's", "lets",
+];
+const TRAILING_SMALL: &[&str] = &["the", "a", "an", "and", "or", "of", "to", "with", "for", "in", "on", "at", "that", "from", "by", "into", "so", "this", "these", "those", "my", "your", "its", "our", "each", "every", "all", "some", "any"];
+const SHORT_WORDS: usize = 6;
+const SHORT_CHARS: usize = 48;
+
+/// A few readable words that name the job, made from a longer request
+/// ("Please can you create summary files for every report in this folder" -> "Create summary files for every report").
+/// Plain text rules only: polite openers are dropped, the first sentence or clause is kept,
+/// and it is cut on a word boundary. Returns an empty string when there is nothing usable.
+pub fn short_title(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let mut s = line.trim_matches(|c: char| c == '"' || c == '\'' || c == '`').trim().to_string();
+    // Drop polite openers, repeatedly ("hey claude, can you please ...").
+    loop {
+        let hit = FILLER.iter().find(|f| {
+            s.get(..f.len()).is_some_and(|p| p.eq_ignore_ascii_case(f)) && s[f.len()..].chars().next().map_or(true, |c| !c.is_alphanumeric())
+        });
+        match hit {
+            Some(f) => s = s[f.len()..].trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ',' | '!' | ':' | '-')).to_string(),
+            None => break,
+        }
+    }
+    // First sentence or clause. A '.' only ends a sentence when followed by a space (keeps "notes.txt").
+    let mut cut = s.len();
+    let b = s.as_bytes();
+    for (i, c) in s.char_indices() {
+        let next_space = b.get(i + 1).map_or(true, |n| n.is_ascii_whitespace());
+        if matches!(c, '?' | '!' | ';' | '\n') || (matches!(c, '.' | ':' | ',') && next_space) {
+            cut = i;
+            break;
+        }
+    }
+    let first = &s[..cut];
+    let mut words: Vec<&str> = first.split_whitespace().collect();
+    let long = words.len() > SHORT_WORDS;
+    words.truncate(SHORT_WORDS);
+    while words.join(" ").chars().count() > SHORT_CHARS && words.len() > 1 {
+        words.pop();
+    }
+    if long || cut < s.len() {
+        while words.len() > 1 && TRAILING_SMALL.contains(&words[words.len() - 1].to_lowercase().as_str()) {
+            words.pop();
+        }
+    }
+    let mut out = words.join(" ");
+    if out.chars().count() > SHORT_CHARS {
+        out = out.chars().take(SHORT_CHARS).collect();
+    }
+    let out = out.trim_end_matches(|c: char| !c.is_alphanumeric() && c != ')' && c != '"').to_string();
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Lifecycle::*;
+    use super::short_title;
+
+    #[test]
+    fn short_titles() {
+        assert_eq!(short_title("Create notes.txt with a greeting"), "Create notes.txt with a greeting");
+        assert_eq!(short_title("Please can you create summary files for every report in this folder and keep the originals"), "Create summary files for every report");
+        assert_eq!(short_title("hey claude, fix the login bug. It crashes when the password is empty."), "Fix the login bug");
+        assert_eq!(short_title("  \n\nrename photos by date"), "Rename photos by date");
+        assert_eq!(short_title("Could you, please, tidy up"), "Tidy up");
+        assert_eq!(short_title(""), "");
+        assert_eq!(short_title("please"), "");
+        assert!(short_title(&"word ".repeat(40)).split_whitespace().count() <= 6);
+        assert!(short_title("Supercalifragilisticexpialidociouslylongwordthatkeepsgoingandgoingforever").chars().count() <= 48);
+    }
 
     #[test]
     fn transitions() {

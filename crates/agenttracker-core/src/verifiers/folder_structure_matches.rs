@@ -19,7 +19,7 @@ impl Verifier for FolderStructureMatches {
         "folder_structure_matches"
     }
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "1.1.0"
     }
     fn required_evidence(&self) -> &[&'static str] {
         &["verification_manifest"]
@@ -71,6 +71,9 @@ impl Verifier for FolderStructureMatches {
             if !files.iter().any(|file| m.is_match(file)) {
                 f.failures.push(format!("Nothing matches the required pattern \"{rp}\""));
             }
+        }
+        if files.is_empty() && required.is_empty() && f.failures.is_empty() {
+            f.neutral = Some((super::CheckStatus::NotApplicable, "The folder has no files, so there were no names to check.".into()));
         }
         f.finish(self, format!("{} file(s) follow the approved structure.", files.len()))
     }

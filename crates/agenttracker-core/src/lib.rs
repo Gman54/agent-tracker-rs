@@ -1,13 +1,16 @@
-//! AgentTracker core: observes AI coding agents and independently verifies their file work.
+//! Houndbit core: observes AI coding agents and independently verifies their file work.
 //! Observational only — nothing here blocks or enforces agent behaviour.
 pub mod collector;
+pub mod conversation;
 pub mod connectors;
 pub mod db;
 pub mod demo;
 pub mod engine;
 pub mod event;
 pub mod fs_observer;
+pub mod gitwork;
 pub mod queue;
+pub mod quick_list;
 pub mod report;
 pub mod server;
 pub mod store;
@@ -16,7 +19,7 @@ pub mod verifiers;
 
 pub use tracker_common::now_ms;
 
-pub const APP_NAME: &str = "AgentTracker";
+pub const APP_NAME: &str = "Houndbit";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const EVENT_SCHEMA_VERSION: &str = "1.0";
 
@@ -40,7 +43,7 @@ pub enum CoreError {
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-/// Per-user AgentTracker directory (`%USERPROFILE%\.agenttracker` / `~/.agenttracker`).
+/// Per-user Houndbit directory (`%USERPROFILE%\.agenttracker` / `~/.agenttracker`).
 /// `AGENTTRACKER_HOME` overrides it (used by tests and portable setups).
 pub fn agenttracker_home() -> std::path::PathBuf {
     if let Some(h) = std::env::var_os("AGENTTRACKER_HOME").filter(|v| !v.is_empty()) {

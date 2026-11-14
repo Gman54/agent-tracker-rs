@@ -16,7 +16,7 @@ impl Verifier for ChangesWithinScope {
         "changes_within_scope"
     }
     fn version(&self) -> &'static str {
-        "1.0.0"
+        "1.1.0"
     }
     fn required_evidence(&self) -> &[&'static str] {
         &["baseline_manifest", "verification_manifest", "change_hints?"]
@@ -113,6 +113,7 @@ impl Verifier for ChangesWithinScope {
             f.limitations.push("No allowed-write folders are configured, so any change counts as out of scope.".into());
         }
         f.limitations.push("Only folders that were snapshotted are covered; changes elsewhere on the PC are not visible to this check.".into());
-        f.finish(self, format!("{changed} change(s) found, all inside the allowed area."))
+        let pass = if changed == 0 { "No changes were found in the snapshotted folders.".to_string() } else { format!("{changed} change(s) found, all inside the allowed area.") };
+        f.finish(self, pass)
     }
 }
