@@ -69,6 +69,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/ui/runtime/protect/model/stop", post(model_stop))
         .route("/api/ui/runtime/protect/model/apply", post(model_apply))
         .route("/api/ui/runtime/protect/model/discard", post(model_discard))
+        .route("/api/ui/runtime/protect/launch", get(launch_list).post(launch_run))
+        .route("/api/ui/runtime/protect/launch/stop", post(launch_stop))
 }
 
 fn j(status: u16, v: Value) -> Response {
@@ -734,4 +736,39 @@ async fn model_apply(Json(b): Json<ModelDecisionIn>) -> Response {
 
 async fn model_discard(Json(b): Json<ModelDecisionIn>) -> Response {
     protect_result(tokio::task::spawn_blocking(move || crate::protect_model::discard(&b.job_id, b.paths)).await.unwrap_or_else(|e| Err(format!("worker failed: {e}"))))
+}
+
+
+// ---- Locked-job launcher (start an AI tool inside a Windows job it can't escape) ----
+
+/// The tools Houndbit currently has running inside locked jobs. Also reports whether
+/// this build can actually launch (Windows only).
+async fn launch_list() -> Response {
+    j(200, json!({
+        "supported": cfg!(windows),
+        "running": crate::jobguard::list_running(),
+    }))
+}
+
+async fn launch_run(Json(b): Json<crate::jobguard::LaunchSpec>) -> Response {
+    // The launch itself does blocking Win32 work; keep it off the async runtime.
+    let r = tokio::task::spawn_blocking(move || crate::jobguard::launch_locked(b))
+        .await
+        .unwrap_or_else(|e| Err(format!("worker failed: {e}")));
+    match r {
+        Ok(outcome) => j(200, serde_json::to_value(outcome).unwrap_or_else(|_| json!({}))),
+        Err(m) => j(400, json!({"error": m})),
+    }
+}
+
+#[derive(Deserialize)]
+struct LaunchStopIn {
+    pid: u32,
+}
+
+async fn launch_stop(Json(b): Json<LaunchStopIn>) -> Response {
+    match crate::jobguard::stop(b.pid) {
+        Ok(()) => j(200, json!({"ok": true})),
+        Err(m) => j(400, json!({"error": m})),
+    }
 }

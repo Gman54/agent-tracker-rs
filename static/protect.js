@@ -262,7 +262,110 @@ async function refreshFolders(hosted) {
 
   box.innerHTML = `<div class="card-head"><h2>1. Folders Houndbit may work on (in a safe copy)</h2></div>${list}${addRow}`;
   if (hosted) await renderModelCard(grants);
+  await renderLaunchCard();
 }
+
+// ---- Start an AI tool in a locked job ---------------------------------------------------------
+// Houndbit starts the tool inside a Windows "job". The whole thing is killed if Houndbit closes,
+// you can cap its memory, and you can stop it from starting any other program at all. This only
+// covers tools Houndbit launches here; it does nothing to tools you opened yourself.
+
+function launchWhen(ts) {
+  if (!ts) return '';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+  return `${Math.floor(secs / 3600)} h ago`;
+}
+
+async function renderLaunchCard() {
+  let card = document.getElementById('launch-card');
+  if (!card) {
+    const after = document.getElementById('model-card') || document.getElementById('protect-folders');
+    if (!after) return;
+    card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'launch-card';
+    after.after(card);
+  }
+  let m;
+  try {
+    m = await api('GET', '/api/ui/runtime/protect/launch');
+  } catch (e) {
+    card.innerHTML = `<div class="card-head"><h2>Start an AI tool in a locked job</h2></div><p class="small text-danger">${esc(e.message)}</p>`;
+    return;
+  }
+  const running = (m && m.running) || [];
+  const notWin = m && m.supported === false ? `
+    <div class="note note-plain mt-xs"><p class="small">${pill('amber', 'Windows only')} This only works in the Windows app. On this build Houndbit can\u2019t start a locked job.</p></div>` : '';
+  const list = running.length ? `
+    <table class="table mt"><thead><tr><th>Tool</th><th>Started</th><th>Locked</th><th></th></tr></thead><tbody>
+    ${running.map(r => `<tr>
+      <td><span class="mono">${esc(r.program)}</span>${r.args && r.args.length ? ` <span class="small muted">${esc(r.args.join(' '))}</span>` : ''}<br><span class="small muted">id ${r.pid}</span></td>
+      <td class="small muted">${launchWhen(r.started_unix)}</td>
+      <td class="small">${r.no_child_processes ? 'can\u2019t start other programs' : 'normal'}${r.memory_mb ? `, ${r.memory_mb} MB cap` : ''}</td>
+      <td><button class="btn btn-secondary btn-small" data-act="launchStop" data-pid="${r.pid}">Stop</button></td>
+    </tr>`).join('')}</tbody></table>` : '<p class="muted mt">Nothing is running in a locked job right now.</p>';
+  card.innerHTML = `
+    <div class="card-head"><h2>Start an AI tool in a locked job</h2></div>
+    <p class="muted">Pick a program (for example your coding AI, or <span class="mono">powershell</span>) and Houndbit starts it inside a locked Windows job. If Houndbit closes, the tool is closed too. You can cap its memory, and you can stop it from starting any other program. This only covers tools started here; it doesn\u2019t touch ones you opened yourself.</p>
+    ${notWin}
+    <div class="row mt">
+      <label class="small" for="launch-prog">Program</label>
+      <input class="input launch-prog" id="launch-prog" placeholder="e.g. claude, cursor, or C:\\path\\to\\tool.exe">
+    </div>
+    <div class="row mt-xs">
+      <label class="small" for="launch-args">Extras</label>
+      <input class="input launch-args" id="launch-args" placeholder="optional, e.g. --help">
+    </div>
+    <div class="row mt-xs">
+      <label class="small" for="launch-dir">Folder</label>
+      <input class="input launch-dir" id="launch-dir" placeholder="optional, e.g. F:\\Test">
+    </div>
+    <div class="row mt-xs">
+      <label class="small" for="launch-mem">Memory cap (MB)</label>
+      <input class="input launch-mem" id="launch-mem" type="number" min="64" placeholder="optional, e.g. 2048">
+    </div>
+    <label class="row small mt-xs"><input type="checkbox" id="launch-nochild"> Don\u2019t let it start other programs (strict \u2014 can break AI tools that use git or python)</label>
+    <div class="row mt-xs">
+      <button class="btn btn-primary" data-act="launchStart">Start in a locked job</button>
+    </div>
+    ${list}`;
+}
+
+actions.launchStart = async () => {
+  const program = ((document.getElementById('launch-prog') || {}).value || '').trim();
+  const argsRaw = ((document.getElementById('launch-args') || {}).value || '').trim();
+  const dir = ((document.getElementById('launch-dir') || {}).value || '').trim();
+  const memRaw = ((document.getElementById('launch-mem') || {}).value || '').trim();
+  const nochild = !!(document.getElementById('launch-nochild') || {}).checked;
+  if (!program) { showToast('Type the program to start.', 'error'); return; }
+  const body = { program, block_child_processes: nochild };
+  if (argsRaw) body.args = argsRaw.split(/\s+/);
+  if (dir) body.working_dir = dir;
+  if (memRaw) {
+    const mb = parseInt(memRaw, 10);
+    if (!Number.isNaN(mb)) body.memory_mb = mb;
+  }
+  try {
+    const r = await api('POST', '/api/ui/runtime/protect/launch', body);
+    showToast((r && r.note) || 'Started in a locked job.', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+    return;
+  }
+  await renderLaunchCard();
+};
+
+actions.launchStop = async (d) => {
+  try {
+    await api('POST', '/api/ui/runtime/protect/launch/stop', { pid: parseInt(d.pid, 10) });
+    showToast('Stopped.', 'success');
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+  await renderLaunchCard();
+};
 
 // ---- Let a model on this PC work on a folder --------------------------------------------------
 // The model only sees the safe copy and can only look at files and suggest new versions. Nothing

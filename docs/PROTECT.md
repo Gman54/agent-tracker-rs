@@ -289,13 +289,70 @@ Limits, plainly:
   against a small fake model server: Find models, Start, the Now/After review, Apply, and the real
   file changed only after Apply. Not yet tried with LM Studio or Ollama, and not on Windows.
 
+## Start an AI tool in a locked job (new, Windows only, compile-checked not run)
+
+Houndbit can start a program (for example a coding AI, or `powershell`) inside a locked Windows
+*job object*. A job is a Windows container for one or more processes. We use three levers:
+
+- **Kill on close** (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): the whole tree is killed the moment
+  Houndbit (or the job handle) goes away. Nothing is left running behind your back.
+- **Memory cap** (optional, `JOB_OBJECT_LIMIT_PROCESS_MEMORY`): a ceiling in megabytes.
+- **No other programs** (optional, strict): the tool is launched with
+  `PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED`, which
+  stops it from starting *any* child process at all. This is the real "it cannot run other programs"
+  switch.
+
+How it is wired: a fresh job (`CreateJobObjectW`) gets its limits (`SetInformationJobObject`); the
+program is created suspended with `CreateProcessW` (plus `STARTUPINFOEXW` and an attribute list when
+the strict switch is on), put into the job (`AssignProcessToJobObject`), then resumed. Houndbit keeps
+the job and process handles so it can stop the whole tree later (`TerminateJobObject`).
+
+- Endpoints: `GET /api/ui/runtime/protect/launch` (what's running + whether this build supports it),
+  `POST .../protect/launch` (start: program, args, working_dir, memory_mb, block_child_processes),
+  `POST .../protect/launch/stop` (stop by pid). UI: a card on the Protect page.
+
+Honest limits for this piece:
+
+- **Windows only.** The Win32 code is compiled and checked on the Linux build machine by
+  cross-compiling to `x86_64-pc-windows-gnu`, and it compiles clean. It has **not** been run on a
+  real Windows box from here. On non-Windows builds the launch call returns a plain "Windows-only"
+  error and the card says so.
+- It only covers tools **Houndbit launches itself**. A tool you opened from the Start menu, or one
+  already running, is not inside the job and is not affected.
+- The strict "no other programs" switch is blunt. Some AI CLIs legitimately shell out to `git`,
+  `python`, and so on; turning it on will break those. It is off by default.
+- The strongest coverage is still a limited or separate Windows account for the AI tool. The locked
+  job narrows what one launched tool can do; it is not a whole-machine fence.
+
+## Screen-clicking AIs (what a locked job does *not* stop)
+
+Some AI tools don't run commands at all — they move the mouse and click the screen like a person
+(Claude's "Cowork"/computer-use, ChatGPT's computer use, and similar). Houndbit's folder guard and
+the locked job can't catch these, because no tool hook fires and no new program is launched: they
+drive apps that are already open. A locked job only fences a program Houndbit *starts*, so it does
+nothing against a screen-clicker driving your existing browser or editor.
+
+What actually helps, roughly strongest first:
+
+- **Run the screen-clicking AI under a separate, limited Windows account** (or in Windows Sandbox).
+  It can then only see and click that account's apps and files, not your main ones. This is the one
+  real fence.
+- **Use the tool's own per-app permissions.** Claude's computer use blocks finance/crypto sites by
+  default and asks before acting; ChatGPT's computer use asks per app/site. Keep those prompts on and
+  add your own blocklist.
+- **AppLocker / Windows app control** can stop *programs* from starting, but only on Windows 10/11
+  Pro or Enterprise, and it won't stop clicks inside an app that's allowed to run.
+- Keep the things you care about (wallets, banking, crypto tools) in that separate account, so a
+  screen-clicker in your everyday account simply can't see them.
+
 ## Honest limits
 
 - The sandbox only covers the four file actions, and only for the folders you add. It is a confined
   file worker, not operating-system isolation: it does not stop another program from touching files
   on its own, outside Protect.
-- There is no Windows isolation backend yet (job objects, restricted tokens, containers). Gate and
-  isolate modes stay unavailable.
+- The *sandbox worker* still has no Windows isolation backend (restricted tokens, containers). Gate
+  and isolate modes stay unavailable. The locked-job launcher above does use job objects, but that is
+  a separate feature for tools Houndbit starts, not isolation for the sandbox worker.
 - The pipe uses Windows' default permissions. They haven't been tightened yet.
 - The command line is not a trusted screen. Any program running as you could use it to approve
   things. The real approval window has to come before gate mode is switched on.
@@ -311,6 +368,10 @@ Limits, plainly:
   test and the Houndbit connector test all passed. See the full run in the pull request.
 - Windows: these run in the GitHub build (`cargo test --workspace`). See that run for the result.
   Until it passes, the named-pipe version counts as untested.
+- Locked-job launcher: its non-Windows logic (spec validation, the Windows-only guard, and the
+  running-job registry list/stop bookkeeping) is unit-tested and passes on Linux. The Win32 launch
+  path itself is only compile-checked by cross-compiling to `x86_64-pc-windows-gnu`; it has not been
+  run on Windows from here.
 
 ## Milestones from the spec
 
@@ -322,5 +383,5 @@ Limits, plainly:
 | D | Houndbit talking to Protect through the same public door | Done and tested on Linux. Protect now starts inside Houndbit; the Protect page was clicked through in the headless preview, not yet in the Windows app. |
 | E | MCP gateway and Claude Code gate hook | Folder guard for Claude Code and Cursor (hooks), plus the chat recorder, with script and working-folder checks and an add-on switch. Tested on Linux with the real hook program and a fake model server; not yet tried with live Claude Code, Cursor or a chat app on Windows. Uses path matching, not OS isolation. **MCP gateway skipped** (too big to do solidly this round). |
 | F | Payments, license, signed installer | Not started. An on/off add-on switch is in place (on for testing), with a marked spot for a license check. Needs your choice of payment service, a code-signing certificate and a server. |
-| G | More hosts and launchers | Not started. |
+| G | More hosts and launchers | Started: a locked-job launcher starts an AI tool inside a Windows job object (kill-on-close, optional memory cap, optional no-child-processes). Non-Windows logic tested on Linux; the Win32 path is compile-checked via cross-compile, not run on Windows. Covers only tools Houndbit starts. |
 | 12 | Optional model relay | Local model helper on the Protect page: works through the sandbox, you review and Apply each change. Tested on Linux with a scripted stand-in model; not tried with a real model or on Windows. |
